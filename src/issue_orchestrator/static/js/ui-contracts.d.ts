@@ -1024,6 +1024,64 @@ export interface OrchestratorStatusPayload {
   tick_id: number | number | null;
 }
 
+export interface OriginalDeliveryOwnerPayload {
+  agent: string;
+  base_sha: string;
+  branch: string;
+  cancelled: boolean;
+  config_fingerprint: string;
+  contract_sha256: string;
+  correction_id: string;
+  correction_runs: string | number[][];
+  corrections: string | number[][];
+  cycles: number;
+  engine_birth: string;
+  engine_history: string | number[][];
+  engine_host: string;
+  engine_pid: number;
+  feedback: string;
+  head_sha: string;
+  launches: string[];
+  logical_child: string;
+  max_cycles: number;
+  native_phase_name: string;
+  pending: boolean;
+  pr_number: number;
+  process_roots: string | number[][];
+  released: boolean;
+  repository: string;
+  run_dir: string;
+  run_id: string;
+  session_name: string;
+  started_at: string;
+  worktree: string;
+}
+
+export interface OriginalDeliveryPayload {
+  claimant: string;
+  expires_at: string;
+  fence: string;
+  issue_number: number;
+  lease_current: boolean;
+  lease_id: string;
+  owner: OriginalDeliveryOwnerPayload | null;
+  remote_released: boolean;
+}
+
+export interface OriginalDeliveryRequestPayload {
+  base_sha?: string;
+  contract_sha256: string;
+  feedback?: string;
+  fence: string;
+  head_sha?: string;
+  lease_id: string;
+  pr_number?: number;
+  request_id: string;
+  run_id: string;
+  session_name?: string;
+  started_at?: string;
+}
+
 export interface OutcomeBadgePayload {
   label: string;
   tone: "passed" | "failed" | "error" | "in_progress" | "neutral";

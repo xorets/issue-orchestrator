@@ -184,6 +184,7 @@ tools. **Names, arguments, and return shapes may change in any `0.x` release.**
 | `orchestrator.session.phases` | Phase history for an issue's session |
 | `orchestrator.session.claude_log` | Agent log tail |
 | `orchestrator.session.orchestrator_log` | Orchestrator log for the session |
+| `orchestrator.original_delivery` | [Fenced original custody, bounded correction, and terminal reconciliation](original_delivery.md) |
 | `orchestrator.session.kill` | Kill an issue's session |
 | `orchestrator.issue.retry` | Release an issue's retry hold through the operator command |
 | `orchestrator.session.focus` | Focus the session terminal |

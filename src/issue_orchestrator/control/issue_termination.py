@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import logging
 from typing import TYPE_CHECKING, Callable
 
+from ..domain.original_delivery import OriginalDelivery
 from ..domain.validated_work_commands import ValidatedWorkDispositionBatch
 from ..events import EventName
 from ..ports.event_sink import EventSink, make_trace_event
@@ -254,9 +255,12 @@ def end_session_records(
     for session in tuple(active_sessions):
         if ended(session):
             if session.lease_id:
+                # The remote adapter retains registered original custody here.
+                # Only the public terminal owner can release it by fenced CAS.
                 claim_manager.release_claim(session.issue.number, session.lease_id)
                 current = claim_manager.get_current_claim(session.issue.number)
-                if current is not None and current.lease_id == session.lease_id:
+                retained_original = current is not None and current.lease_id == session.lease_id and isinstance(getattr(current, "original", None), OriginalDelivery)
+                if current is not None and current.lease_id == session.lease_id and not retained_original:
                     raise RuntimeError(f"issue #{session.issue.number} claim release was not acknowledged")
             work.settle(session, SettlementOutcome.CONSUMED)
     active_sessions[:] = [session for session in active_sessions if not ended(session)]

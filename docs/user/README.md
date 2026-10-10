@@ -15,3 +15,5 @@ For the full documentation index, see [docs/README.md](../README.md).
 - [VS Code Integration](vscode.md) - IDE integration via MCP
 - [MCP Server](mcp.md) - `issue-orchestrator-mcp`, client setup, and tool reference
 - [FAQ](faq.md)
+
+- [Original delivery custody](original_delivery.md) — public fenced correction and terminal reconciliation.

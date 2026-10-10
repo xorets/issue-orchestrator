@@ -22,6 +22,8 @@ from ...domain.claim import (
     ClaimState,
 )
 from ...domain.lease_config import LeaseConfig
+from ...domain.session_run import SessionRunAssets
+from ...domain.original_delivery import OriginalDelivery, bind_correction_run, transition
 from ...domain.run_ledger import (
     RunLedger,
     RunLedgerDecodeError,
@@ -210,8 +212,9 @@ class GitHubRefClaimAdapter(ClaimManager):
     moves to a commit whose parent is the previously-read ref tip, so GitHub's
     fast-forward check acts as the compare-and-swap guard.
 
-    Release deletes the owned claim ref after a fresh read confirms the ref
-    still points at the releasing lease. The ``io:claimed`` label is advisory:
+    Ordinary release deletes the owned claim ref after a fresh read confirms
+    the releasing lease. Registered original custody instead retains this cell
+    until public owner-fenced terminal CAS records release. The label is advisory:
     if label updates fail around release, readers that need ownership must
     consult the ref rather than the label alone.
     """
@@ -356,7 +359,7 @@ class GitHubRefClaimAdapter(ClaimManager):
         """Renew the claim if the ref still points at our lease."""
         snapshot = self._read_snapshot(issue_number)
         current_claim = self._active_claim(snapshot, issue_number)
-        if current_claim is None or current_claim.lease_id != lease_id:
+        if current_claim is None or current_claim.lease_id != lease_id or current_claim.claimant != self._claimant_id:
             logger.warning(
                 "Cannot renew claim for issue #%d: not the current winner",
                 issue_number,
@@ -370,6 +373,7 @@ class GitHubRefClaimAdapter(ClaimManager):
             priority=current_claim.priority,
         )
 
+        renewed_claim = dataclasses.replace(renewed_claim, original=current_claim.original)
         assert snapshot is not None
         try:
             if not self._store.update(
@@ -403,6 +407,95 @@ class GitHubRefClaimAdapter(ClaimManager):
         snapshot = self._read_snapshot(issue_number)
         return self._active_claim(snapshot, issue_number)
 
+    def original_claim(self, issue_number: int) -> tuple[Claim, str]:
+        """Raw original ownership, including terminal records; absent is not authority."""
+        snapshot = self._read_snapshot(issue_number)
+        if snapshot is None:
+            raise ClaimFetchError("Original remote claim is absent")
+        claim = _parse_owned_claim(snapshot.record, issue_number=issue_number)
+        if claim is None:
+            raise ClaimFetchError("Original remote claim is unreadable")
+        return claim, snapshot.commit_sha
+
+    def bind_original(self, issue_number: int, lease_id: str, fence: str,
+                      owner: OriginalDelivery) -> bool:
+        snapshot = self._read_snapshot(issue_number)
+        if snapshot is None or snapshot.commit_sha != fence:
+            return False
+        claim = _parse_owned_claim(snapshot.record, issue_number=issue_number)
+        if claim is None or claim.lease_id != lease_id or claim.claimant != self._claimant_id or claim.is_expired():
+            return False
+        if claim.original is not None:
+            return claim.original == owner
+        return self._store.update(snapshot, _format_claim_commit_message(dataclasses.replace(claim, original=owner)))
+
+    def transition_original(self, issue_number: int, lease_id: str, fence: str,
+                            operation: str, *, request_id: str, pr_number: int = 0,
+                            head_sha: str = "", base_sha: str = "", feedback: str = "") -> Claim | None:
+        snapshot = self._read_snapshot(issue_number)
+        if snapshot is None or snapshot.commit_sha != fence:
+            return None
+        claim = _parse_owned_claim(snapshot.record, issue_number=issue_number)
+        if claim is None or claim.lease_id != lease_id or claim.claimant != self._claimant_id or claim.original is None:
+            return None
+        if operation not in {"cancel", "reconcile"} and claim.is_expired():
+            raise ClaimFetchError("Original remote lease has expired")
+        owner = transition(claim.original, operation, request_id=request_id,
+                           pr_number=pr_number, head_sha=head_sha, base_sha=base_sha, feedback=feedback)
+        changed = dataclasses.replace(claim, original=owner)
+        if changed == claim:
+            return claim
+        if not self._store.update(snapshot, _format_claim_commit_message(changed)):
+            return None
+        return changed
+
+    def reserve_original_launch(self, issue_number: int, request_id: str) -> bool:
+        claim, fence = self.original_claim(issue_number)
+        owner = claim.original
+        if owner is None or request_id in owner.launches:
+            return False
+        return self.transition_original(issue_number, claim.lease_id, fence, "launch", request_id=request_id) is not None
+
+    def bind_original_run(self, issue_number: int, request_id: str, run: SessionRunAssets, terminal_id: str) -> bool:
+        claim, fence = self.original_claim(issue_number)
+        if claim.original is None or claim.is_expired():
+            return False
+        owner = bind_correction_run(claim.original, request_id, run.run_id, str(run.run_dir), terminal_id, run.started_at, run.session_name)
+        return self._replace_original(issue_number, claim.lease_id, fence, owner)
+
+    def resume_original(self, issue_number: int, lease_id: str, fence: str,
+                        identity: tuple[str, int, str]) -> bool:
+        claim, current = self.original_claim(issue_number)
+        owner = claim.original
+        if owner is None or owner.cancelled or owner.released or current != fence:
+            return False
+        host, pid, birth = identity
+        updated = dataclasses.replace(owner, engine_host=host, engine_pid=pid, engine_birth=birth,
+            engine_history=(*owner.engine_history, (owner.engine_host, owner.engine_pid, owner.engine_birth)))
+        return self._replace_original(issue_number, lease_id, fence, updated, renew=True)
+
+    def bind_original_processes(self, issue_number: int, lease_id: str, fence: str,
+                                roots: tuple[tuple[str, int, str, int, str], ...]) -> bool:
+        claim, current = self.original_claim(issue_number)
+        if current != fence or claim.original is None or claim.original.released:
+            return False
+        merged = tuple(dict.fromkeys((*claim.original.process_roots, *roots)))
+        return self._replace_original(issue_number, lease_id, fence,
+            dataclasses.replace(claim.original, process_roots=merged))
+
+    def _replace_original(self, issue_number: int, lease_id: str, fence: str,
+                          owner: OriginalDelivery, *, renew: bool = False) -> bool:
+        snapshot = self._read_snapshot(issue_number)
+        if snapshot is None or snapshot.commit_sha != fence:
+            return False
+        claim = _parse_owned_claim(snapshot.record, issue_number=issue_number)
+        if claim is None or claim.lease_id != lease_id or claim.claimant != self._claimant_id:
+            return False
+        updated = dataclasses.replace(claim, original=owner)
+        if renew:
+            updated = dataclasses.replace(updated, expires_at=datetime.now() + timedelta(seconds=self._config.lease_seconds))
+        return self._store.update(snapshot, _format_claim_commit_message(updated))
+
     def _read_snapshot(self, issue_number: int) -> GitRefSnapshot | None:
         try:
             with gh_audit.context(
@@ -423,10 +516,12 @@ class GitHubRefClaimAdapter(ClaimManager):
     ) -> Claim | None:
         if snapshot is None:
             return None
-        claim = parse_claim_comment(snapshot.record, issue_number=issue_number)
-        if claim is None or claim.is_expired(datetime.now()):
-            return None
-        return claim
+        claim = _parse_owned_claim(snapshot.record, issue_number=issue_number)
+        if claim is None:
+            raise ClaimFetchError("The remote claim record is unreadable")
+        if claim.original is not None:
+            return None if claim.original.released else claim
+        return None if claim.is_expired(datetime.now()) else claim
 
     def _build_claim(
         self,
@@ -464,7 +559,7 @@ class GitHubRefClaimAdapter(ClaimManager):
                 if remove_label:
                     self._remove_claim_label(issue_number)
                 return
-            if held.lease_id != lease_id:
+            if held.lease_id != lease_id or held.original is not None:
                 return
 
             label_error: Exception | None = None
@@ -558,3 +653,10 @@ class LabelSetProtocol(TypingProtocol):
 
     def remove_label(self, issue_number: int, label: str) -> None:
         ...
+
+
+def _parse_owned_claim(record: str, *, issue_number: int) -> Claim | None:
+    try:
+        return parse_claim_comment(record, issue_number=issue_number)
+    except (ValueError, TypeError) as error:
+        raise ClaimFetchError("Original remote custody record is invalid") from error

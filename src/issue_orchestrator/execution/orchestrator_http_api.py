@@ -247,6 +247,14 @@ class OrchestratorAsyncHttpApi:
             response.raise_for_status()
             return response.json()
 
+    async def original_delivery(self, issue_number: int, operation: str = "observe",
+                                payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        path = f"/api/original-delivery/{issue_number}"
+        try:
+            return await self._request("GET", path) if operation == "observe" else await self._request("POST", f"{path}/{operation}", payload)
+        except httpx.HTTPError as refusal:
+            raise RuntimeError(f"Original delivery HTTP boundary refused: {refusal}") from refusal
+
     async def status(self) -> dict[str, Any]:
         return await self._request("GET", "/api/status")
 

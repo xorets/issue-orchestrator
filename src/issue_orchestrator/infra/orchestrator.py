@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, ClassVar, Optional, cast
 
 if TYPE_CHECKING:
+    from ..control.original_delivery import OriginalDeliveryCommand
     from ..domain.completion_intake import (
         SubmitCompletionEvidence,
         CompletionIntakeReceipt,
@@ -541,10 +542,19 @@ class Orchestrator:
             self.config,
             self.deps.session_output,
             publish_recovery=self.deps.publish_recovery,
+            claim_manager=self.deps.claim_manager,
             pending_work_claims=self.deps.pending_work_claims,
             provider_error_type=provider_error_type,
             processing_policy=unprocessed_session_policy(session),
         )
+
+    def original_delivery(self, issue_number: int, command: "OriginalDeliveryCommand | None" = None) -> dict[str, object]:
+        """Supported original-owner command, serialized with the engine tick."""
+        with self.state_lock:
+            owner = self.deps.original_delivery_owner
+            if owner is None:
+                raise ValueError("Original remote ownership is unavailable")
+            return owner.observe(issue_number) if command is None else owner.execute(issue_number, command)
 
     def tick(self) -> bool:
         self.deps.completion_intake.pump()
@@ -705,10 +715,13 @@ class Orchestrator:
                 completion_dispatcher=self.deps.completion_dispatcher,
                 provider_resilience=self.deps.provider_resilience,
                 publish_recovery=self.deps.publish_recovery,
+                claim_manager=self.deps.claim_manager,
                 pending_work_claims=self.deps.pending_work_claims,
             )
             # Check lease renewals for active sessions
             self._check_lease_renewals()
+            if self.deps.original_delivery_owner is not None:
+                self.deps.original_delivery_owner.renew_retained()
             _reconcile_tech_lead_ownership(self)  # renew/withdraw run claims
         finally:
             self._last_orphan_reconcile_active_count = len(self.state.active_sessions)

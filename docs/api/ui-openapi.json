@@ -5,6 +5,57 @@
     "version": "1.0.0"
   },
   "paths": {
+    "/api/original-delivery/{issue_number}": {
+      "get": {
+        "operationId": "observeOriginalDelivery",
+        "parameters": [
+          {"name": "issue_number", "in": "path", "required": true, "schema": {"type": "integer", "minimum": 1}}
+        ],
+        "responses": {
+          "200": {
+            "description": "Exact observed original remote custody",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OriginalDeliveryPayload"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/original-delivery/{issue_number}/{operation}": {
+      "post": {
+        "operationId": "commandOriginalDelivery",
+        "parameters": [
+          {"name": "issue_number", "in": "path", "required": true, "schema": {"type": "integer", "minimum": 1}},
+          {"name": "operation", "in": "path", "required": true, "schema": {"type": "string", "enum": ["register", "handoff", "correct", "launch", "track", "resume", "cancel", "reconcile"]}}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OriginalDeliveryRequestPayload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Exact observed original remote custody",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OriginalDeliveryPayload"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/tech-lead/rework-proposals": {
       "get": {
         "operationId": "getReworkProposals",
@@ -1175,6 +1226,320 @@
   },
   "components": {
     "schemas": {
+      "OriginalDeliveryOwnerPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "repository",
+          "config_fingerprint",
+          "contract_sha256",
+          "run_id",
+          "session_name",
+          "native_phase_name",
+          "logical_child",
+          "started_at",
+          "branch",
+          "worktree",
+          "run_dir",
+          "agent",
+          "engine_host",
+          "engine_pid",
+          "engine_birth",
+          "max_cycles",
+          "cycles",
+          "pr_number",
+          "base_sha",
+          "head_sha",
+          "correction_id",
+          "feedback",
+          "corrections",
+          "launches",
+          "correction_runs",
+          "engine_history",
+          "process_roots",
+          "pending",
+          "cancelled",
+          "released"
+        ],
+        "properties": {
+          "repository": {
+            "type": "string"
+          },
+          "config_fingerprint": {
+            "type": "string"
+          },
+          "contract_sha256": {
+            "type": "string"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "session_name": {
+            "type": "string"
+          },
+          "native_phase_name": {
+            "type": "string"
+          },
+          "logical_child": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": "string"
+          },
+          "branch": {
+            "type": "string"
+          },
+          "worktree": {
+            "type": "string"
+          },
+          "run_dir": {
+            "type": "string"
+          },
+          "agent": {
+            "type": "string"
+          },
+          "engine_host": {
+            "type": "string"
+          },
+          "engine_pid": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "engine_birth": {
+            "type": "string"
+          },
+          "max_cycles": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "cycles": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "pr_number": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "base_sha": {
+            "type": "string"
+          },
+          "head_sha": {
+            "type": "string"
+          },
+          "correction_id": {
+            "type": "string"
+          },
+          "feedback": {
+            "type": "string"
+          },
+          "corrections": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "integer"
+                  }
+                ]
+              }
+            }
+          },
+          "launches": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "correction_runs": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "integer"
+                  }
+                ]
+              }
+            }
+          },
+          "engine_history": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "integer"
+                  }
+                ]
+              }
+            }
+          },
+          "process_roots": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "integer"
+                  }
+                ]
+              }
+            }
+          },
+          "pending": {
+            "type": "boolean"
+          },
+          "cancelled": {
+            "type": "boolean"
+          },
+          "released": {
+            "type": "boolean"
+          }
+        }
+      },
+      "OriginalDeliveryPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "issue_number",
+          "lease_id",
+          "claimant",
+          "fence",
+          "lease_current",
+          "expires_at",
+          "owner",
+          "remote_released"
+        ],
+        "properties": {
+          "issue_number": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "lease_id": {
+            "type": "string"
+          },
+          "claimant": {
+            "type": "string"
+          },
+          "fence": {
+            "type": "string"
+          },
+          "lease_current": {
+            "type": "boolean"
+          },
+          "expires_at": {
+            "type": "string"
+          },
+          "owner": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OriginalDeliveryOwnerPayload"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "remote_released": {
+            "type": "boolean"
+          }
+        }
+      },
+      "OriginalDeliveryRequestPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "lease_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Lease Id",
+            "type": "string"
+          },
+          "fence": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Fence",
+            "type": "string"
+          },
+          "contract_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Contract Sha256",
+            "type": "string"
+          },
+          "run_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "request_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Request Id",
+            "type": "string"
+          },
+          "session_name": {
+            "default": "",
+            "maxLength": 256,
+            "title": "Session Name",
+            "type": "string"
+          },
+          "started_at": {
+            "default": "",
+            "maxLength": 256,
+            "title": "Started At",
+            "type": "string"
+          },
+          "pr_number": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Pr Number",
+            "type": "integer"
+          },
+          "head_sha": {
+            "default": "",
+            "maxLength": 40,
+            "title": "Head Sha",
+            "type": "string"
+          },
+          "base_sha": {
+            "default": "",
+            "maxLength": 40,
+            "title": "Base Sha",
+            "type": "string"
+          },
+          "feedback": {
+            "default": "",
+            "maxLength": 65536,
+            "title": "Feedback",
+            "type": "string"
+          }
+        },
+        "required": [
+          "lease_id",
+          "fence",
+          "contract_sha256",
+          "run_id",
+          "request_id"
+        ],
+        "title": "OriginalDeliveryRequest",
+        "type": "object"
+      },
       "ReworkProposalPayload": {
         "type": "object",
         "properties": {

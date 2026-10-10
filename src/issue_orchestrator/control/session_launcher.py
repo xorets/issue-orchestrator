@@ -211,9 +211,11 @@ class SessionLauncher:
         # The validated-work recovery owner's holds (#7455): a review waits only
         # for a hold that owner confirms, never for a lingering label alone.
         recovery_holds: RecoveryHolds = NO_RECOVERY_HOLDS,
+        original_runtime_identity: Callable[[], tuple[str, int, str]] | None = None,
     ):
         self.config = config
         self._recovery_holds = recovery_holds
+        self._original_runtime_identity = original_runtime_identity
         self.events = events
         self.repository_host = repository_host
         self._action_applier = action_applier
@@ -2148,6 +2150,8 @@ class SessionLauncher:
             resolve_stack_decision=self._dependency_gate.stack_base_decision_for_issue,
             coder_prompt_addendum=self._coder_prompt_addendum,
             scoped_rework=ScopedReworkLaunch(self._tech_lead_authority, self.repository_host, self._action_applier.apply),
+            claim_manager=self._claim_manager,
+            original_runtime_identity=self._original_runtime_identity,
         )
         return launch_rework_flow(
             rework, active_sessions, deps, work_claim=work_claim
