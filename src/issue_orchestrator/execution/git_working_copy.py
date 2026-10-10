@@ -26,6 +26,7 @@ from ..domain.validated_work_store import AncestryRelation
 from ..ports.git import Git, GitError, GitResult
 from .git_branch_content_reader import GitBranchContentReader, git_error_output as _git_error_output
 from .git_revision_reader import GitRevisionReader
+from .publication_checkout_integrity import require_exact_checkout_content
 from ..ports.working_copy import (
     BranchCommitMessagesResult,
     BranchPathsResult,
@@ -171,6 +172,17 @@ class GitWorkingCopy:
 
     def get_head_sha(self, worktree: Path) -> str | None:
         return GitRevisionReader(self._run_git).get_head_sha(worktree)
+
+    def matches_exact_commit(self, worktree: Path, sha: str) -> bool:
+        """Prove HEAD, tracked bytes, modes and index visibility without edits."""
+        try:
+            if self.get_head_sha(worktree) != sha:
+                return False
+            require_exact_checkout_content(self._git, worktree, sha)
+            return True
+        except (GitError, OSError, ValueError):
+            logger.warning("Failed to prove exact tracked content in %s", worktree)
+            return False
 
     def fetch_remote_branch_head(self, worktree: Path, branch: str) -> str | None:
         return GitRevisionReader(self._run_git).fetch_remote_branch_head(worktree, branch)

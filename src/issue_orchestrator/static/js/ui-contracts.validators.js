@@ -4671,6 +4671,302 @@
             ],
             "type": "object"
         },
+        "OriginalDeliveryOwnerPayload": {
+            "additionalProperties": false,
+            "properties": {
+                "agent": {
+                    "type": "string"
+                },
+                "base_sha": {
+                    "type": "string"
+                },
+                "branch": {
+                    "type": "string"
+                },
+                "cancelled": {
+                    "type": "boolean"
+                },
+                "config_fingerprint": {
+                    "type": "string"
+                },
+                "contract_sha256": {
+                    "type": "string"
+                },
+                "correction_id": {
+                    "type": "string"
+                },
+                "correction_runs": {
+                    "items": {
+                        "items": {
+                            "anyOf": [
+                                {
+                                    "type": "string"
+                                },
+                                {
+                                    "type": "integer"
+                                }
+                            ]
+                        },
+                        "type": "array"
+                    },
+                    "type": "array"
+                },
+                "corrections": {
+                    "items": {
+                        "items": {
+                            "anyOf": [
+                                {
+                                    "type": "string"
+                                },
+                                {
+                                    "type": "integer"
+                                }
+                            ]
+                        },
+                        "type": "array"
+                    },
+                    "type": "array"
+                },
+                "cycles": {
+                    "minimum": 0,
+                    "type": "integer"
+                },
+                "engine_birth": {
+                    "type": "string"
+                },
+                "engine_history": {
+                    "items": {
+                        "items": {
+                            "anyOf": [
+                                {
+                                    "type": "string"
+                                },
+                                {
+                                    "type": "integer"
+                                }
+                            ]
+                        },
+                        "type": "array"
+                    },
+                    "type": "array"
+                },
+                "engine_host": {
+                    "type": "string"
+                },
+                "engine_pid": {
+                    "minimum": 0,
+                    "type": "integer"
+                },
+                "feedback": {
+                    "type": "string"
+                },
+                "head_sha": {
+                    "type": "string"
+                },
+                "launches": {
+                    "items": {
+                        "type": "string"
+                    },
+                    "type": "array"
+                },
+                "logical_child": {
+                    "type": "string"
+                },
+                "max_cycles": {
+                    "minimum": 0,
+                    "type": "integer"
+                },
+                "native_phase_name": {
+                    "type": "string"
+                },
+                "pending": {
+                    "type": "boolean"
+                },
+                "pr_number": {
+                    "minimum": 0,
+                    "type": "integer"
+                },
+                "process_roots": {
+                    "items": {
+                        "items": {
+                            "anyOf": [
+                                {
+                                    "type": "string"
+                                },
+                                {
+                                    "type": "integer"
+                                }
+                            ]
+                        },
+                        "type": "array"
+                    },
+                    "type": "array"
+                },
+                "released": {
+                    "type": "boolean"
+                },
+                "repository": {
+                    "type": "string"
+                },
+                "run_dir": {
+                    "type": "string"
+                },
+                "run_id": {
+                    "type": "string"
+                },
+                "session_name": {
+                    "type": "string"
+                },
+                "started_at": {
+                    "type": "string"
+                },
+                "worktree": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "repository",
+                "config_fingerprint",
+                "contract_sha256",
+                "run_id",
+                "session_name",
+                "native_phase_name",
+                "logical_child",
+                "started_at",
+                "branch",
+                "worktree",
+                "run_dir",
+                "agent",
+                "engine_host",
+                "engine_pid",
+                "engine_birth",
+                "max_cycles",
+                "cycles",
+                "pr_number",
+                "base_sha",
+                "head_sha",
+                "correction_id",
+                "feedback",
+                "corrections",
+                "launches",
+                "correction_runs",
+                "engine_history",
+                "process_roots",
+                "pending",
+                "cancelled",
+                "released"
+            ],
+            "type": "object"
+        },
+        "OriginalDeliveryPayload": {
+            "additionalProperties": false,
+            "properties": {
+                "claimant": {
+                    "type": "string"
+                },
+                "expires_at": {
+                    "type": "string"
+                },
+                "fence": {
+                    "type": "string"
+                },
+                "issue_number": {
+                    "minimum": 1,
+                    "type": "integer"
+                },
+                "lease_current": {
+                    "type": "boolean"
+                },
+                "lease_id": {
+                    "type": "string"
+                },
+                "owner": {
+                    "anyOf": [
+                        {
+                            "$ref": "#/components/schemas/OriginalDeliveryOwnerPayload"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ]
+                },
+                "remote_released": {
+                    "type": "boolean"
+                }
+            },
+            "required": [
+                "issue_number",
+                "lease_id",
+                "claimant",
+                "fence",
+                "lease_current",
+                "expires_at",
+                "owner",
+                "remote_released"
+            ],
+            "type": "object"
+        },
+        "OriginalDeliveryRequestPayload": {
+            "additionalProperties": false,
+            "properties": {
+                "base_sha": {
+                    "maxLength": 40,
+                    "type": "string"
+                },
+                "contract_sha256": {
+                    "pattern": "^[0-9a-f]{64}$",
+                    "type": "string"
+                },
+                "feedback": {
+                    "maxLength": 65536,
+                    "type": "string"
+                },
+                "fence": {
+                    "maxLength": 256,
+                    "minLength": 1,
+                    "type": "string"
+                },
+                "head_sha": {
+                    "maxLength": 40,
+                    "type": "string"
+                },
+                "lease_id": {
+                    "maxLength": 256,
+                    "minLength": 1,
+                    "type": "string"
+                },
+                "pr_number": {
+                    "minimum": 0,
+                    "type": "integer"
+                },
+                "request_id": {
+                    "maxLength": 256,
+                    "minLength": 1,
+                    "type": "string"
+                },
+                "run_id": {
+                    "maxLength": 256,
+                    "minLength": 1,
+                    "type": "string"
+                },
+                "session_name": {
+                    "maxLength": 256,
+                    "type": "string"
+                },
+                "started_at": {
+                    "maxLength": 256,
+                    "type": "string"
+                }
+            },
+            "required": [
+                "lease_id",
+                "fence",
+                "contract_sha256",
+                "run_id",
+                "request_id"
+            ],
+            "type": "object"
+        },
         "OutcomeBadgePayload": {
             "additionalProperties": false,
             "properties": {

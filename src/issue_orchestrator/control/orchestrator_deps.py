@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from .original_delivery import OriginalDeliveryOwner
     from ..events import EventHub
     from ..ports.agent_callback_endpoint import AgentCallbackEndpoint
     from ..ports.completion_handler_factory import CompletionHandlerFactory
@@ -184,6 +185,8 @@ class OrchestratorDeps:
     # ------------------------------------------------------------------
     # Backward-compat properties — delegate to services bundle
     # ------------------------------------------------------------------
+
+    original_delivery_owner: "OriginalDeliveryOwner | None" = None
 
     @property
     def label_manager(self) -> "LabelManager":

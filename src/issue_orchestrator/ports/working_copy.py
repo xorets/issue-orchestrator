@@ -196,6 +196,23 @@ class WorkingCopy(ExactGit, Protocol):
         """
         ...
 
+    def list_dirty_files(self, worktree: Path, mode: str) -> list[str] | None:
+        """Observe exact dirty paths; None means Git reads failed.
+
+        ``tracked`` includes staged and unstaged tracked changes. ``all``
+        also includes untracked paths, except orchestrator-planted CLI source.
+        ``unstaged`` includes only unstaged tracked changes. No files change.
+        """
+        ...
+
+    def matches_exact_commit(self, worktree: Path, sha: str) -> bool:
+        """Prove HEAD and actual tracked bytes/type/mode match the commit.
+
+        Hidden index flags and unreadable content refuse. This read changes
+        neither index flags nor checkout contents and ignores untracked paths.
+        """
+        ...
+
     def get_commits_ahead_of_main(self, worktree: Path) -> list[CommitInfo]:
         """Get commits that are ahead of main branch.
 

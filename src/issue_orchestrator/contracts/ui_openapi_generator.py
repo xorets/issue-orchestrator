@@ -372,21 +372,33 @@ def _render_dts_interface(component: ComponentSchema) -> list[str]:
 
 
 def ts_type(schema: dict[str, Any]) -> str:
-    if "const" in schema:
-        return json.dumps(schema["const"])
-    if "enum" in schema and isinstance(schema["enum"], list):
-        return " | ".join(json.dumps(item) for item in schema["enum"])
-    if "$ref" in schema:
-        return ref_name(schema["$ref"])
-    union = schema.get("oneOf") or schema.get("anyOf")
-    if union:
-        return " | ".join(ts_type(s) for s in union)
+    return _TsTypeRendering(schema).render()
 
-    schema_type = schema.get("type")
-    if isinstance(schema_type, list):
-        return " | ".join(ts_type({**schema, "type": t}) for t in schema_type)
 
-    return _ts_single_type(schema_type, schema)
+@dataclass(frozen=True)
+class _TsTypeRendering:
+    schema: dict[str, Any]
+    array_item: bool = False
+
+    def render(self) -> str:
+        schema = self.schema
+        if "const" in schema:
+            return json.dumps(schema["const"])
+        if "enum" in schema and isinstance(schema["enum"], list):
+            return self._union([json.dumps(item) for item in schema["enum"]])
+        if "$ref" in schema:
+            return ref_name(schema["$ref"])
+        union = schema.get("oneOf") or schema.get("anyOf")
+        if union:
+            return self._union([ts_type(s) for s in union])
+        schema_type = schema.get("type")
+        if isinstance(schema_type, list):
+            return self._union([ts_type({**schema, "type": t}) for t in schema_type])
+        return _ts_single_type(schema_type, schema)
+
+    def _union(self, members: list[str]) -> str:
+        union = " | ".join(members)
+        return f"({union})" if self.array_item else union
 
 
 def _ts_single_type(schema_type: str | None, schema: dict[str, Any]) -> str:
@@ -400,7 +412,7 @@ def _ts_single_type(schema_type: str | None, schema: dict[str, Any]) -> str:
     if schema_type in scalar:
         return scalar[schema_type]
     if schema_type == "array":
-        return f"{ts_type(schema.get('items', {}))}[]"
+        return f"{_TsTypeRendering(schema.get('items', {}), array_item=True).render()}[]"
     if schema_type == "object":
         return _ts_object_type(schema)
     return "any"

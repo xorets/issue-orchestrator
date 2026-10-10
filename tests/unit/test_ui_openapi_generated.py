@@ -100,6 +100,26 @@ def _dts_interface_body(source: str, interface_name: str) -> str:
     return rest[: rest.index("}")]
 
 
+@pytest.mark.parametrize(('items', 'expected'), [
+    ({'oneOf': [{'type': 'string'}, {'type': 'integer'}]}, '(string | number)[]'),
+    ({'anyOf': [{'type': 'string'}, {'type': 'number'}]}, '(string | number)[]'),
+    ({'type': ['string', 'null']}, '(string | null)[]'),
+    ({'enum': ['first', 'second']}, '("first" | "second")[]'),
+    ({'type': 'array', 'items': {'type': ['string', 'number']}}, '(string | number)[][]'),
+    ({'type': 'string'}, 'string[]'),
+    ({'const': 'literal | value'}, '"literal | value"[]'),
+    ({'$ref': '#/components/schemas/UnionAlias'}, 'UnionAlias[]'),
+    ({'type': 'object', 'additionalProperties': {'type': ['string', 'number']}},
+        'Record<string, string | number>[]'),
+])
+def test_generated_array_type_preserves_item_union_precedence(items, expected):
+    source = render_dts_types([ComponentSchema('ArrayPayload', {
+        'type': 'object', 'required': ['value'],
+        'properties': {'value': {'type': 'array', 'items': items}},
+    })])
+    assert f'  value: {expected};' in _dts_interface_body(source, 'ArrayPayload')
+
+
 def test_response_payload_view_fields_reference_timeline_view() -> None:
     """Issue #5976 F1: the two response payloads that echo the rendered lens
     back to the client (``IssueDetailPayload`` / ``E2ERunDetailPayload``) carry

@@ -38,6 +38,8 @@ from typing import Any, Awaitable, Callable, cast
 import inspect
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
+from ..contracts.original_delivery import OriginalDeliveryRequest
+from .mcp_original_delivery import original_delivery_result
 
 from ..domain.pause_state import PauseActor
 from ..contracts.mcp import (
@@ -262,6 +264,7 @@ MCP_TOOLS: tuple[tuple[str, str], ...] = (
     # Any MCP client holding the transport could inject arbitrary text into a
     # running agent's prompt via that tool.
     ("orchestrator.session.kill", "tool_session_kill"),
+    ("orchestrator.original_delivery", "tool_original_delivery"),
     ("orchestrator.issue.retry", "tool_issue_retry"),
     ("orchestrator.session.focus", "tool_session_focus"),
     ("orchestrator.urls", "tool_urls"),
@@ -439,6 +442,12 @@ class McpApp:
             "orchestrator.session.orchestrator_log",
             lambda: self.session_orchestrator_log(issue_number),
         )
+
+    async def tool_original_delivery(self, issue_number: int, operation: str = "observe",
+                                     payload: OriginalDeliveryRequest | None = None) -> CallToolResult:
+        """Observe/bind current original custody, admit bounded correction, or reconcile its terminal lease."""
+        return await original_delivery_result(self._api, self._settings.config_path, issue_number,
+            operation, payload, running=self._client.status().state == "running")
 
     async def tool_session_kill(self, issue_number: int) -> dict[str, Any]:
         return await self._safe(
