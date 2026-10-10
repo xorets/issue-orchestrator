@@ -1,5 +1,6 @@
 """Original public control policies over genuine adapter CAS, with port fakes."""
 from dataclasses import replace
+import subprocess
 from unittest.mock import MagicMock
 
 import pytest
@@ -10,6 +11,10 @@ from issue_orchestrator.control.original_delivery import OriginalDeliveryCommand
 from issue_orchestrator.domain.models import Issue, OrchestratorState, Session, SessionKey, SessionKind
 from issue_orchestrator.domain.pause_state import PauseActor, PauseReason, PauseState
 from issue_orchestrator.domain.session_run import SessionRunAssets
+from issue_orchestrator.execution.git_working_copy import GitWorkingCopy
+from issue_orchestrator.execution.command_runner import LocalCommandRunner
+from issue_orchestrator.adapters.git.git_cli import GitCLI
+from issue_orchestrator.ports.git import Git, GitError, GitResult
 from issue_orchestrator.ports.pull_request_tracker import PRInfo
 from issue_orchestrator.ports.repository_host import RepositoryHost
 from issue_orchestrator.ports.working_copy import WorkingCopy
@@ -40,7 +45,9 @@ def original_owner(tmp_path, sample_config, sample_agent_config):
         branch='delivery',body='',state='open',labels=[],draft=True,head_sha='a'*40,base_sha='b'*40)
     git = MagicMock(spec=WorkingCopy)
     git.get_head_sha.return_value = 'a'*40
+    git.matches_exact_commit.return_value = True
     git.has_uncommitted_changes.return_value = False
+    git.list_dirty_files.return_value = []
     quiescent = MagicMock()
     owner = OriginalDeliveryOwner(claims, repository, git, sample_config, state, lambda:('host',10,'birth'),
         quiescent, lambda _:None, lambda _:(('original',20,'child-birth',20,'child-birth'),),
@@ -61,6 +68,108 @@ def published(owner):
     owner.execute(42, command(owner,'register'))
     owner.state.active_sessions.clear()
     return owner.execute(42, command(owner,'handoff'))
+
+
+def git_command(root, *args):
+    return subprocess.run(['git', *args], cwd=root, check=True, capture_output=True, text=True).stdout.strip()
+
+
+@pytest.fixture
+def real_git_owner(original_owner):
+    owner, session = original_owner
+    root = session.worktree_path
+    git_command(root, 'init', '-b', 'delivery')
+    git_command(root, 'config', 'user.email', 'fixture@example.invalid')
+    git_command(root, 'config', 'user.name', 'Fixture')
+    (root/'source.txt').write_bytes(b'Published source\n')
+    git_command(root, 'add', 'source.txt', 'prompt.txt')
+    git_command(root, 'commit', '-m', 'Published source')
+    head = git_command(root, 'rev-parse', 'HEAD')
+    owner.repository.get_pr.return_value = replace(owner.repository.get_pr.return_value, head_sha=head)
+    owner.working_copy = GitWorkingCopy()
+    owner.execute(42, command(owner, 'register'))
+    owner.state.active_sessions.clear()
+    feedback = root/'.issue-orchestrator/review-feedback/cycle-1.md'
+    feedback.parent.mkdir(parents=True)
+    feedback.write_bytes(b'Independent finding: preserve this feedback.\n')
+    feedback.chmod(0o400)
+    return owner, root, head, feedback
+
+
+def test_original_handoff_and_correction_preserve_retained_feedback(real_git_owner):
+    owner, root, head, feedback = real_git_owner
+    before = (feedback.read_bytes(), feedback.stat().st_mode, git_command(root, 'status', '--porcelain'))
+    owner.execute(42, command(owner, 'handoff', head_sha=head))
+    admitted = owner.execute(42, command(owner, 'correct', head_sha=head, request_id='A', feedback='Fix finding'))
+    assert admitted['owner']['cycles'] == 1
+    assert (feedback.read_bytes(), feedback.stat().st_mode, git_command(root, 'status', '--porcelain')) == before
+
+
+@pytest.mark.parametrize('flag', ['--assume-unchanged', '--skip-worktree'])
+def test_original_correction_refuses_hidden_tracked_work_before_admission(real_git_owner, flag):
+    owner, root, head, feedback = real_git_owner
+    owner.execute(42, command(owner, 'handoff', head_sha=head))
+    source = root/'source.txt'
+    source.write_bytes(b'Unpublished operator changes\n')
+    git_command(root, 'update-index', flag, 'source.txt')
+    assert 'source.txt' not in git_command(root, 'status', '--porcelain')
+    assert git_command(root, 'show', 'HEAD:source.txt').encode() != source.read_bytes().strip()
+    before = (source.read_bytes(), (root/'.git/index').read_bytes(), feedback.read_bytes(), owner.observe(42))
+    with pytest.raises(ValueError, match='unpublished work'):
+        owner.execute(42, command(owner, 'correct', head_sha=head, request_id='A', feedback='Fix finding'))
+    assert (source.read_bytes(), (root/'.git/index').read_bytes(), feedback.read_bytes(), owner.observe(42)) == before
+
+
+@pytest.mark.parametrize('path,staged', [('source.txt', False), ('source.txt', True),
+    ('unpublished.txt', False), ('unpublished\nfile.txt', False),
+    ('.issue-orchestrator/review-feedback-other/notes.md', False),
+    ('.issue-orchestrator/operator-notes.md', False),
+    ('.issue-orchestrator/review-feedback/cycle-1.md', True)])
+def test_original_handoff_refuses_unpublished_work_beside_feedback(real_git_owner, path, staged):
+    owner, root, head, feedback = real_git_owner
+    target = root/path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        target.chmod(0o600)
+    target.write_bytes(b'Unpublished work\n')
+    if staged:
+        git_command(root, 'add', '--', path)
+    before = (target.read_bytes(), feedback.read_bytes(), git_command(root, 'status', '--porcelain'), owner.observe(42))
+    with pytest.raises(ValueError, match='unpublished work'):
+        owner.execute(42, command(owner, 'handoff', head_sha=head))
+    assert (target.read_bytes(), feedback.read_bytes(), git_command(root, 'status', '--porcelain'), owner.observe(42)) == before
+
+
+@pytest.mark.parametrize('query', [('diff', '--name-only', '-z'),
+    ('diff', '--cached', '--name-only', '-z'), ('ls-files', '--others', '--exclude-standard', '-z'),
+    ('ls-files', '-v', '-z'), ('ls-files', '-f', '-z')])
+def test_original_handoff_refuses_failed_git_enumeration(real_git_owner, query):
+    owner, root, head, feedback = real_git_owner
+    real_git = GitCLI(runner=LocalCommandRunner())
+    git = MagicMock(spec=Git)
+    def read(worktree, args, **kwargs):
+        if tuple(args) == query:
+            raise GitError(GitResult(argv=['git', *args], returncode=128, stdout='', stderr='Read failed'))
+        return real_git.run(worktree, args, **kwargs)
+    git.run.side_effect = read
+    owner.working_copy = GitWorkingCopy(git=git)
+    before = (feedback.read_bytes(), owner.observe(42))
+    with pytest.raises(ValueError, match='unpublished work'):
+        owner.execute(42, command(owner, 'handoff', head_sha=head))
+    assert (feedback.read_bytes(), owner.observe(42)) == before
+
+
+def test_original_handoff_does_not_accept_checkout_runtime_ignore_policy(real_git_owner):
+    owner, root, head, feedback = real_git_owner
+    local_policy = root/'.issue-orchestrator/runtime-ignore'
+    local_policy.write_text('operator-work.txt\n')
+    (root/'.git/info/exclude').write_text('.issue-orchestrator/runtime-ignore\n')
+    unpublished = root/'operator-work.txt'
+    unpublished.write_bytes(b'Operator-owned unpublished work\n')
+    before = (unpublished.read_bytes(), feedback.read_bytes(), owner.observe(42))
+    with pytest.raises(ValueError, match='unpublished work'):
+        owner.execute(42, command(owner, 'handoff', head_sha=head))
+    assert (unpublished.read_bytes(), feedback.read_bytes(), owner.observe(42)) == before
 
 
 def test_register_requires_current_terminal_phase_hold_and_original_budget(original_owner):

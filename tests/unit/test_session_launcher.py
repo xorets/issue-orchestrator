@@ -47,7 +47,7 @@ from typing import Any, Optional, cast
 from unittest.mock import MagicMock, patch
 
 from issue_orchestrator.domain.tech_lead_session import TechLeadCreationOrigin
-from issue_orchestrator.domain.claim import ClaimResult
+from issue_orchestrator.domain.claim import Claim, ClaimResult
 from issue_orchestrator.control.provider_resilience import ProviderResilienceManager
 from issue_orchestrator.control.launch_transaction import PendingWorkLaunchClaim
 from issue_orchestrator.domain.repository_launch_selection import (
@@ -767,6 +767,7 @@ def internal_review_launcher_bundle(
     claim_manager = MagicMock(name="claim_manager")
     claim_manager.attempt_claim.return_value = ClaimResult.claimed("lease-123")
     claim_manager.run_convergence.return_value = True
+    claim_manager.get_current_claim.return_value = None
     bundle = _build_launcher_bundle(
         sample_config,
         mock_events,
@@ -807,6 +808,7 @@ def unavailable_provider_internal_review_bundle(
     claim_manager = MagicMock(name="claim_manager")
     claim_manager.attempt_claim.return_value = ClaimResult.claimed("lease-123")
     claim_manager.run_convergence.return_value = True
+    claim_manager.get_current_claim.return_value = None
     bundle = _build_launcher_bundle(
         sample_config,
         mock_events,
@@ -826,6 +828,13 @@ def unavailable_provider_internal_review_bundle(
 def session_launcher(launcher_bundle: LauncherTestBundle) -> SessionLauncher:
     """Convenience fixture for tests that only need the launcher."""
     return launcher_bundle.launcher
+
+
+@pytest.fixture(params=[None, Claim(lease_id="lease-123", claimant="ordinary-engine", issue_number=123,
+    started_at=datetime(2026, 1, 1), expires_at=datetime(2099, 1, 1), priority=0)],
+    ids=["absent-current-claim", "ordinary-current-claim"])
+def ordinary_current_claim(request):
+    return request.param
 
 
 # =============================================================================
@@ -2953,6 +2962,7 @@ class TestLaunchReworkSession:
     def test_internal_review_instructions_reach_rework_command(
         self,
         internal_review_launcher_bundle,
+        ordinary_current_claim,
     ):
         bundle, provider = internal_review_launcher_bundle
         rework = PendingRework(
@@ -2961,6 +2971,7 @@ class TestLaunchReworkSession:
             rework_cycle=1,
         )
 
+        bundle.claim_manager.get_current_claim.return_value = ordinary_current_claim
         result = bundle.launcher.launch_rework_session(rework, active_sessions=[])
 
         assert result.success is True
@@ -2971,6 +2982,7 @@ class TestLaunchReworkSession:
         self,
         unavailable_provider_internal_review_bundle,
         mock_worktree_manager,
+        ordinary_current_claim,
     ):
         bundle, provider, readiness_probe = (
             unavailable_provider_internal_review_bundle
@@ -2979,6 +2991,7 @@ class TestLaunchReworkSession:
             "instructions empty"
         )
         work_claim = MagicMock()
+        bundle.claim_manager.get_current_claim.return_value = ordinary_current_claim
         rework = PendingRework(
             issue_key=GitHubIssueKey(repo="test/repo", external_id="123"),
             agent_type="agent:web",

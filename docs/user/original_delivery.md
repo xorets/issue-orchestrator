@@ -55,6 +55,17 @@ replayed to prepare another workspace. `process_roots` records
 `[native_run_id, pid, birth, session_id, session_leader_birth]`; numeric PID or
 session-ID reuse is foreign ownership, never termination authority.
 
+The original workspace check retains untracked engine review feedback under
+`.issue-orchestrator/review-feedback/` without treating it as unpublished source.
+Tracked changes, other untracked work, and failed Git enumeration still refuse
+handoff or correction. Mutable checkout runtime-ignore patterns cannot grant
+this exemption. The check does not delete, hide, or rewrite retained feedback.
+Before admission it also proves HEAD and actual tracked bytes, types and modes
+against the published commit. Hidden index flags (`assume-unchanged` or
+`skip-worktree`) and unreadable tracked content refuse; a clean Git status is
+insufficient. Checkout filters that transform tracked blob bytes also refuse.
+No checkout contents or index flags are changed by this proof.
+
 ## Custody and qualification
 
 Registration verifies the canonical nonsymlink, current-user, single-link,

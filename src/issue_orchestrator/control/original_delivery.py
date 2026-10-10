@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from ..domain.claim import Claim, ClaimFetchError
 from ..domain.models import OrchestratorState, PendingRework, Session
 from ..domain.original_delivery import OriginalDelivery
+from ..infra.runtime_artifacts import builtin_cleanup_root
 from ..ports.original_delivery import OriginalDeliveryClaims
 from ..ports.repository_host import RepositoryHost
 from ..ports.working_copy import WorkingCopy
@@ -226,7 +227,10 @@ class OriginalDeliveryOwner:
         if self.working_copy is None:
             raise ValueError("Original Git observation capability is unavailable")
         worktree = Path(owner.worktree)
-        if self.working_copy.get_head_sha(worktree) != command.head_sha or self.working_copy.has_uncommitted_changes(worktree):
+        tracked = self.working_copy.list_dirty_files(worktree, "tracked")
+        dirty = self.working_copy.list_dirty_files(worktree, "all")
+        if (not self.working_copy.matches_exact_commit(worktree, command.head_sha) or tracked is None or dirty is None
+                or tracked or any(builtin_cleanup_root(path) != ".issue-orchestrator/review-feedback" for path in dirty)):
             raise ValueError("Original workspace contains unpublished work")
 
     def _resume(self, issue_number: int, command: OriginalDeliveryCommand, claim: Claim,
