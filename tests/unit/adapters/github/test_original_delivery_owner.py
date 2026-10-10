@@ -89,6 +89,17 @@ def test_register_requires_current_terminal_phase_hold_and_original_budget(origi
     assert owner.execute(42, command(owner,'register')) == result
 
 
+@pytest.mark.parametrize('kind', [SessionKind.REWORK, SessionKind.REVIEW,
+    SessionKind.RETROSPECTIVE_REVIEW, SessionKind.TECH_LEAD, SessionKind.HISTORICAL])
+def test_register_refuses_sessions_whose_existing_pr_is_not_their_original_output(original_owner, kind):
+    owner, session = original_owner
+    before = owner.observe(42)
+    session.key = SessionKey(issue=session.issue.key, kind=kind)
+    with pytest.raises(ValueError, match='initial implementation custody'):
+        owner.execute(42, command(owner, 'register'))
+    assert owner.observe(42) == before
+
+
 def test_correction_is_atomic_one_shot_and_lost_ack_observable(original_owner):
     owner, original = original_owner
     published(owner)

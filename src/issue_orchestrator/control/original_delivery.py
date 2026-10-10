@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..domain.claim import Claim, ClaimFetchError
-from ..domain.models import OrchestratorState, PendingRework, Session, SessionKind
+from ..domain.models import OrchestratorState, PendingRework, Session
 from ..domain.original_delivery import OriginalDelivery
 from ..ports.original_delivery import OriginalDeliveryClaims
 from ..ports.repository_host import RepositoryHost
@@ -177,7 +177,7 @@ class OriginalDeliveryOwner:
         if (run.run_id, session.terminal_id, run.started_at, session.lease_id) != (
                 command.run_id, command.session_name, command.started_at, command.lease_id):
             raise ValueError("Original session identity changed")
-        if session.key.kind is not SessionKind.CODE or session.rework_cycle:
+        if not session.key.kind.capabilities.open_pr_means_done or session.rework_cycle:
             raise ValueError("Original session does not own initial implementation custody")
         if claim.is_expired():
             raise ValueError("Original lease is expired")
