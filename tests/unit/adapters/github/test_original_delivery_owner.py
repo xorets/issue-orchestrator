@@ -338,3 +338,56 @@ def test_foreign_serving_engine_cannot_terminate_original_session(original_owner
     with pytest.raises(ValueError, match='original engine'):
         owner.execute(42, command(owner, 'reconcile'))
     owner.terminate.assert_not_called()
+
+
+@pytest.mark.parametrize('operation', ['cancel', 'reconcile', 'correct', 'handoff', 'launch', 'track', 'resume'])
+@pytest.mark.parametrize('labelled_cancel', [False, True])
+def test_foreign_live_engine_refusal_preserves_exact_remote_claim(original_owner, operation, labelled_cancel):
+    owner, session = original_owner
+    published(owner)
+    owner.identity = lambda: ('host', 11, 'foreign-birth')
+    owner.quiescent.side_effect = ValueError('Original engine is still running')
+    owner.terminate = MagicMock()
+    owner.launch = MagicMock()
+    if labelled_cancel:
+        owner.repository.get_issue.return_value = replace(session.issue, labels=['dispatch:cancel-requested'])
+    request = command(owner, operation, feedback='Fix finding')
+    before = owner.observe(42)
+    owner.working_copy.reset_mock()
+    with pytest.raises(ValueError):
+        owner.execute(42, request)
+    assert owner.observe(42) == before
+    owner.terminate.assert_not_called()
+    owner.launch.assert_not_called()
+    owner.working_copy.matches_exact_commit.assert_not_called()
+
+
+@pytest.mark.parametrize('offline', [False, True])
+def test_legitimate_cancel_persists_before_incomplete_terminal_quiescence(original_owner, offline):
+    owner, _ = original_owner
+    published(owner)
+    if offline:
+        owner.state = None
+    def incomplete(record, is_offline):
+        assert is_offline is offline
+        assert record.cancelled and owner.observe(42)['owner']['cancelled']
+        raise ValueError('Original run process remains')
+    owner.quiescent.side_effect = incomplete
+    with pytest.raises(ValueError, match='process remains'):
+        owner.execute(42, command(owner, 'cancel'))
+    after = owner.observe(42)
+    assert after['owner']['cancelled'] and not after['owner']['released']
+
+
+@pytest.mark.parametrize('operation', ['../../kill/43', 'unknown', 'observe'])
+def test_invalid_original_command_preserves_label_cancellation_and_foreign_claim(original_owner, operation):
+    owner, session = original_owner
+    published(owner)
+    assert owner.claims.attempt_claim(43).success
+    foreign = owner.claims.original_claim(43)
+    owner.repository.get_issue.return_value = replace(session.issue, labels=['dispatch:cancel-requested'])
+    before = owner.observe(42)
+    with pytest.raises(ValueError):
+        owner.execute(42, command(owner, operation))
+    assert owner.observe(42) == before
+    assert owner.claims.original_claim(43) == foreign

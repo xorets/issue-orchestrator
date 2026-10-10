@@ -2,7 +2,21 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
+from enum import StrEnum
 import re
+
+
+class OriginalDeliveryOperation(StrEnum):
+    """Bounded original-owner mutations; observation is a separate read."""
+
+    REGISTER = "register"
+    HANDOFF = "handoff"
+    CORRECT = "correct"
+    LAUNCH = "launch"
+    TRACK = "track"
+    RESUME = "resume"
+    CANCEL = "cancel"
+    RECONCILE = "reconcile"
 
 
 @dataclass(frozen=True, slots=True)

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from ..domain.claim import Claim, ClaimFetchError
 from ..domain.models import OrchestratorState, PendingRework, Session
-from ..domain.original_delivery import OriginalDelivery
+from ..domain.original_delivery import OriginalDelivery, OriginalDeliveryOperation
 from ..infra.runtime_artifacts import builtin_cleanup_root
 from ..ports.original_delivery import OriginalDeliveryClaims
 from ..ports.repository_host import RepositoryHost
@@ -34,6 +34,9 @@ class OriginalDeliveryCommand:
     head_sha: str = ""
     base_sha: str = ""
     feedback: str = ""
+
+    def __post_init__(self) -> None:
+        OriginalDeliveryOperation(self.operation)
 
 
 @dataclass
@@ -72,6 +75,7 @@ class OriginalDeliveryOwner:
         if command.operation == "register":
             return self._register(issue_number, command, claim)
         owner = self._owner(claim, command)
+        self._require_serving_custody(owner, command.operation)
         claim, fence, owner = self._record_remote_cancel(issue_number, claim, fence, owner)
         if command.operation in {"cancel", "reconcile"}:
             return self._terminal(issue_number, command, owner, claim, fence)
@@ -123,6 +127,12 @@ class OriginalDeliveryOwner:
             assert claim.original is not None
             owner = claim.original
         return claim, fence, owner
+
+    def _require_serving_custody(self, owner: OriginalDelivery, operation: str) -> None:
+        if self.state is not None and self.identity() != (owner.engine_host, owner.engine_pid, owner.engine_birth):
+            if operation != "resume":
+                raise ValueError("Operation requires the original engine; resume explicitly after restart")
+            self.quiescent(owner, True)
 
     def _require_live(self, owner: OriginalDelivery, claim: Claim) -> None:
         if owner.cancelled or owner.released or claim.is_expired():
@@ -239,7 +249,6 @@ class OriginalDeliveryOwner:
             raise ValueError("Original restart custody is unavailable or cancelled")
         self.verify_contract(owner)
         if self.identity() != (owner.engine_host, owner.engine_pid, owner.engine_birth):
-            self.quiescent(owner, True)
             if not self.claims.resume_original(issue_number, claim.lease_id, fence, self.identity()):
                 raise ValueError("Original restart fence changed")
         self.retained_issues.add(issue_number)
@@ -253,8 +262,6 @@ class OriginalDeliveryOwner:
             claim, fence = self.claims.original_claim(issue_number)
             assert claim.original is not None
             owner = claim.original
-        if self.state is not None and self.identity() != (owner.engine_host, owner.engine_pid, owner.engine_birth):
-            raise ValueError("Terminal reconciliation requires the original engine or offline custody proof")
         if self.state is not None and any(s.issue.number == issue_number for s in self.state.active_sessions):
             for session in self.state.active_sessions:
                 if session.issue.number == issue_number:

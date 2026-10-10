@@ -8,6 +8,7 @@ from mcp.types import CallToolResult, TextContent
 from ..contracts.original_delivery import OriginalDeliveryRequest
 from ..contracts.ui_openapi_models import OriginalDeliveryPayload
 from ..domain.claim import ClaimFetchError
+from ..domain.original_delivery import OriginalDeliveryOperation
 from ..execution.orchestrator_http_api import OrchestratorAsyncHttpApi
 from ..infra.config import Config
 from .bootstrap_original_delivery import build_offline_original_delivery_owner
@@ -21,6 +22,8 @@ async def original_delivery_result(api: OrchestratorAsyncHttpApi, config_path: P
     try:
         if type(issue_number) is not int or issue_number <= 0:
             raise ValueError("A positive original Issue is required")
+        if operation != "observe":
+            OriginalDeliveryOperation(operation)
         request = None if operation == "observe" else OriginalDeliveryRequest.model_validate(payload)
         if running:
             observed = await api.original_delivery(issue_number, operation,

@@ -9,6 +9,7 @@ import threading
 import httpx
 
 from ..domain.pause_state import PauseActor
+from ..domain.original_delivery import OriginalDeliveryOperation
 from ..ports.orchestrator_api import OrchestratorApi
 
 
@@ -249,6 +250,8 @@ class OrchestratorAsyncHttpApi:
 
     async def original_delivery(self, issue_number: int, operation: str = "observe",
                                 payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if operation != "observe":
+            OriginalDeliveryOperation(operation)
         path = f"/api/original-delivery/{issue_number}"
         try:
             return await self._request("GET", path) if operation == "observe" else await self._request("POST", f"{path}/{operation}", payload)

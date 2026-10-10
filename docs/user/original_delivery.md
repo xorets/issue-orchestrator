@@ -28,8 +28,11 @@ Every mutation requires `lease_id`, `fence`, `contract_sha256`, `run_id`, and a
 bounded `request_id`. `fence` is the current remote claim commit SHA returned by
 observe. `run_id` is the original native engine run, distinct from a controller's
 execution-contract generation ID. Unknown fields and malformed identity values
-are refused. After a stale fence or lost acknowledgment, observe the remote
-record before retrying; a successful historical acknowledgment is not authority.
+are refused. Mutations accept only the eight operation values below, validated
+before transport or owner activity; arbitrary path fragments and unknown values
+are refused. Omitted observation payloads remain read-only. After a stale fence
+or lost acknowledgment, observe the remote record before retrying; a successful
+historical acknowledgment is not authority.
 
 | Operation | Additional inputs and behavior |
 | --- | --- |
@@ -100,6 +103,12 @@ protected processes do not grant custody and are not termination targets.
 
 Terminal reconciliation retains files, unpublished work, native handoff assets,
 and evidence; it does not clean a workspace or activate a replacement payload.
+Live serving engines validate the original PID/birth identity before any
+explicit or label-triggered cancellation intent write. A foreign live engine
+cannot change intent, fence or budget merely by sharing repository/configuration
+and claimant. Explicit restart proves the old custody quiescent before it can
+record cancellation or resume; legitimate cancellation still persists before
+terminal process activity, including incomplete offline reconciliation.
 Candidate qualification must separately demonstrate real worker termination,
 remote before/after observations, foreign-Issue and other-engine isolation,
 restart and acknowledgment recovery, cancellation races, and drain-before-swap
