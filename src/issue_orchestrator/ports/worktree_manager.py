@@ -63,9 +63,9 @@ class WorktreeReuseOptions:
     allow_remote_branch_delete: bool = True
     disable_reuse: bool = False
     # When True, worktree reuse must NOT rebase or hard-reset the branch. Used
-    # for tech_lead investigations, which read the subject's branch as evidence and
-    # must never mutate it — the reuse path leaves the branch exactly as-is
-    # instead of freshening it onto the base branch.
+    # for tech_lead evidence workspaces and admitted original delivery corrections:
+    # reuse leaves the branch and retained untracked evidence exactly as-is
+    # instead of resetting/cleaning it onto the base branch.
     preserve_branch: bool = False
 
 

@@ -172,6 +172,68 @@ def test_original_handoff_does_not_accept_checkout_runtime_ignore_policy(real_gi
     assert (unpublished.read_bytes(), feedback.read_bytes(), owner.observe(42)) == before
 
 
+def test_second_original_correction_preserves_prior_feedback_through_actual_git_reuse(
+        original_owner, tmp_path, mock_event_sink):
+    from pathlib import Path
+    from issue_orchestrator.adapters.worktree.api import create_worktree
+    from issue_orchestrator.ports.worktree_manager import WorktreeInfo, WorktreeManager
+    from issue_orchestrator.ports.worktree_policy import WorktreePolicy, ValidationResult, SyncResult
+    from tests.unit.worktree_git_helpers import make_git_worktree
+    from tests.unit.test_session_launcher import _build_launcher_bundle, MockCommandRunner
+
+    owner, original = original_owner
+    rig = make_git_worktree(tmp_path, name='main-42', branch='delivery')
+    remote = tmp_path/'remote.git'
+    git_command(tmp_path, 'clone', '--bare', str(rig.main_repo), str(remote))
+    git_command(rig.main_repo, 'remote', 'add', 'origin', str(remote))
+    base = git_command(rig.main_repo, 'branch', '--show-current')
+    head = git_command(rig.worktree_path, 'rev-parse', 'HEAD')
+    original.worktree_path = rig.worktree_path
+    original.run_assets = SessionRunAssets.from_paths(session_name='coding-1', run_id='original', started_at='start',
+        worktree_path=rig.worktree_path, run_dir=rig.worktree_path/'.issue-orchestrator/sessions/original__coding-1',
+        manifest_path=rig.worktree_path/'.issue-orchestrator/sessions/original__coding-1/manifest.json',
+        terminal_recording_path=rig.worktree_path/'.issue-orchestrator/sessions/original__coding-1/log')
+    owner.config.repo_root = rig.main_repo
+    owner.config.max_rework_cycles = 2
+    owner.config.refresh_config_fingerprint()
+    owner.working_copy = GitWorkingCopy()
+    owner.repository.get_pr.return_value = replace(owner.repository.get_pr.return_value, head_sha=head, base_sha=head)
+    owner.repository.get_pr_reviews.return_value = []
+    policy = MagicMock(spec=WorktreePolicy)
+    policy.validate_for_reuse.return_value = ValidationResult(True, 'fixture branch')
+    policy.sync_remote_refs.return_value = SyncResult(True)
+    manager = MagicMock(spec=WorktreeManager)
+    def create(**kwargs):
+        result = create_worktree(rig.main_repo, 42, 'Original correction', worktree_base=tmp_path,
+            base_branch=base, branch_name='delivery', enforce_hooks=False,
+            reuse_options=kwargs['reuse_options'], policy=policy)
+        assert result[2] == 'reused'
+        return WorktreeInfo(result[0], result[1], reuse_status=result[2])
+    manager.create.side_effect = create
+    bundle = _build_launcher_bundle(owner.config, mock_event_sink, owner.repository, manager,
+        owner.working_copy, MockCommandRunner(), claim_manager=owner.claims, original_runtime_identity=owner.identity)
+    owner.launch = lambda rework: bundle.launcher.launch_rework_session(rework, active_sessions=[]).session
+    fields = {'head_sha': head, 'base_sha': head}
+    owner.execute(42, command(owner, 'register'))
+    owner.state.active_sessions.clear()
+    owner.execute(42, command(owner, 'handoff', **fields))
+    owner.execute(42, command(owner, 'correct', request_id='first', feedback='First finding', **fields))
+    owner.execute(42, command(owner, 'launch', request_id='first', **fields))
+    feedback = rig.worktree_path/'.issue-orchestrator/review-feedback/cycle-1.md'
+    feedback.chmod(0o400)
+    git_dir = Path(git_command(rig.worktree_path, 'rev-parse', '--absolute-git-dir'))
+    before = (feedback.read_bytes(), feedback.stat().st_mode, (git_dir/'index').read_bytes())
+    owner.execute(42, command(owner, 'handoff', request_id='first-handoff', **fields))
+    owner.execute(42, command(owner, 'correct', request_id='second', feedback='Second finding', **fields))
+    final = owner.execute(42, command(owner, 'launch', request_id='second', **fields))
+    assert (feedback.read_bytes(), feedback.stat().st_mode, (git_dir/'index').read_bytes()) == before
+    assert (feedback.parent/'cycle-2.md').exists()
+    assert git_command(rig.worktree_path, 'rev-parse', 'HEAD') == head
+    assert final['owner']['cycles'] == 2
+    assert len(bundle.create_session_calls) == 2
+    assert all(call.kwargs['reuse_options'].preserve_branch for call in manager.create.call_args_list)
+
+
 def test_register_requires_current_terminal_phase_hold_and_original_budget(original_owner):
     owner, session = original_owner
     before = owner.observe(42)

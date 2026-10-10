@@ -94,10 +94,8 @@ class SessionSecretEnvFn(Protocol):
 
 class WorktreeReuseOptionsFactory(Protocol):
     def __call__(
-        self,
-        *,
-        allow_remote_branch_delete: bool = True,
-        force_fresh: bool = False,
+        self, *, allow_remote_branch_delete: bool = True,
+        force_fresh: bool = False, preserve_branch: bool = False,
     ) -> WorktreeReuseOptions: ...
 
 
@@ -296,16 +294,14 @@ def _rework_launch_identity(
 
 def original_rework_guard(rework: PendingRework, deps: ReworkLaunchDependencies, *, reserve: bool = False) -> LaunchResult | None:
     """Every rework consumer uses the original claim's existing budget grant."""
-    if deps.claim_manager is None:
-        return None
     issue_number = rework.resolve_issue_number()
     if issue_number is None:
         return LaunchResult(None, False, "Original rework Issue is unknown")
     try:
-        claim = deps.claim_manager.get_current_claim(issue_number)
+        claim = deps.claim_manager.get_current_claim(issue_number) if deps.claim_manager is not None else None
     except ClaimFetchError as error:
         return LaunchResult(None, False, f"Original claim observation refused: {error}")
-    if claim is None or claim.original is None:
+    if deps.claim_manager is None or claim is None or claim.original is None:
         if rework.source.startswith("original-owner:"):
             return LaunchResult(None, False, "Original rework owner is absent")
         return None
@@ -425,7 +421,10 @@ def launch_rework_session(
         branch_name=branch_name,
         enforce_hooks=deps.config.enforce_hooks,
         pre_push_hook=deps.config.pre_push_hook,
-        reuse_options=deps.worktree_reuse_options(allow_remote_branch_delete=False),
+        reuse_options=deps.worktree_reuse_options(
+            allow_remote_branch_delete=False,
+            preserve_branch=rework.source.startswith("original-owner:"),
+        ),
         phase_name=phase_name,
         stack_base_branch=stack_base_branch,
         rework_target=ReworkTarget(pr_number, rework.rework_cycle),

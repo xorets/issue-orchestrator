@@ -617,6 +617,7 @@ def _build_launcher_bundle(
     issue_run_ledger: IssueRunLedger | None = None,
     refresh_issue_fn: Callable[[int], Any] | None = None,
     recovery_holds: Any = None,
+    original_runtime_identity: Callable[[], tuple[str, int, str]] | None = None,
 ) -> LauncherTestBundle:
     """Create a SessionLauncher with mock dependencies and tracking.
 
@@ -677,6 +678,8 @@ def _build_launcher_bundle(
 
     mock_action_applier = MagicMock()
     launcher_kwargs = {}
+    if original_runtime_identity is not None:
+        launcher_kwargs["original_runtime_identity"] = original_runtime_identity
     if coder_prompt_addendum is not None:
         launcher_kwargs["coder_prompt_addendum"] = coder_prompt_addendum
     if provider_resilience is not None:
@@ -2685,6 +2688,23 @@ class TestLaunchRetrospectiveReviewSession:
 class TestLaunchReworkSession:
     """Tests for launch_rework_session method (lines 585, 597-599, 604-605, 611-765)."""
 
+    @pytest.mark.parametrize("manager_present", [False, True], ids=["no-manager", "manager"])
+    def test_original_tag_without_owned_grant_refuses_before_git_or_worker(
+        self, manager_present, ordinary_current_claim, sample_config, mock_events,
+        mock_repo_host, mock_worktree_manager, mock_working_copy, mock_command_runner,
+    ):
+        claims = MagicMock() if manager_present else None
+        if claims is not None:
+            claims.get_current_claim.return_value = ordinary_current_claim
+        bundle = _build_launcher_bundle(sample_config, mock_events, mock_repo_host,
+            mock_worktree_manager, mock_working_copy, mock_command_runner, claim_manager=claims)
+        rework = PendingRework(issue_key=GitHubIssueKey(repo="test/repo", external_id="123"),
+            agent_type="agent:web", rework_cycle=1, source="original-owner:forged")
+        result = bundle.launcher.launch_rework_session(rework, active_sessions=[])
+        assert mock_worktree_manager.create_calls == []
+        assert not result.success and result.reason == "Original rework owner is absent"
+        assert bundle.create_session_calls == []
+
     @pytest.fixture(autouse=True)
     def _no_feedback_sleep(self, monkeypatch):
         monkeypatch.setattr(
@@ -2963,6 +2983,7 @@ class TestLaunchReworkSession:
         self,
         internal_review_launcher_bundle,
         ordinary_current_claim,
+        mock_worktree_manager,
     ):
         bundle, provider = internal_review_launcher_bundle
         rework = PendingRework(
@@ -2975,6 +2996,7 @@ class TestLaunchReworkSession:
         result = bundle.launcher.launch_rework_session(rework, active_sessions=[])
 
         assert result.success is True
+        assert not mock_worktree_manager.create_calls[0]["reuse_options"].preserve_branch
         assert "INTERNAL-REVIEW-MARKER" in bundle.create_session_calls[0]["cmd"]
         provider.prepare.assert_called_once_with(kind=SessionKind.REWORK)
 

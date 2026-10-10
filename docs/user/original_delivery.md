@@ -65,6 +65,11 @@ against the published commit. Hidden index flags (`assume-unchanged` or
 `skip-worktree`) and unreadable tracked content refuse; a clean Git status is
 insufficient. Checkout filters that transform tracked blob bytes also refuse.
 No checkout contents or index flags are changed by this proof.
+Admitted original corrections reuse the exact published branch through the
+existing preserving-worktree contract: preparation neither rebases/resets the
+branch nor cleans prior feedback. Earlier cycle feedback bytes and modes stay
+intact while the new cycle writes its own feedback file. Unsafe reuse refuses
+destructive recreation.
 
 ## Custody and qualification
 
