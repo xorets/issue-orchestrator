@@ -49,6 +49,7 @@ from .bootstrap_pending_work import (
     require_repository_host,
 )
 from .bootstrap_session_launcher import build_session_launcher_factory
+from .bootstrap_original_delivery import build_original_delivery_owner
 from .bootstrap_run_services import (
     build_session_restorer,
     create_io_adapters as _create_io_adapters,
@@ -866,6 +867,7 @@ def build_orchestrator(
         board_snapshot_builder=create_board_snapshot_builder(
             config, timeline_store, tech_lead_board_publisher, working_copy
         ),
+        original_delivery_owner=build_original_delivery_owner(config, claim_manager, github, working_copy, runtime_state, session_manager),
         claim_manager=claim_manager,
         claim_gate=claim_gate,
         lease_renewer=lease_renewer,
@@ -877,6 +879,9 @@ def build_orchestrator(
     )
 
     orchestrator = Orchestrator(config=config, deps=deps, state=runtime_state)
+    if deps.original_delivery_owner is not None:
+        deps.original_delivery_owner.launch = orchestrator.launch_rework_session
+        deps.original_delivery_owner.terminate = lambda issue: orchestrator.terminate_every_session_for_issue(issue, reason="original-delivery-cancel")
     # Act-level executor wiring closes over live orchestrator state (#6764/#6778).
     wire_tech_lead_act_executors(orchestrator)
     return orchestrator
@@ -1289,6 +1294,7 @@ def build_orchestrator_for_testing(
         board_snapshot_builder=create_board_snapshot_builder(
             config, timeline_store, tech_lead_board_publisher_for_testing, working_copy
         ),
+        original_delivery_owner=build_original_delivery_owner(config, claim_manager, github, working_copy, runtime_state, session_manager),
         claim_manager=claim_manager,
         claim_gate=claim_gate,
         lease_renewer=lease_renewer,
@@ -1299,4 +1305,8 @@ def build_orchestrator_for_testing(
         services=infra_services,
     )
 
-    return Orchestrator(config=config, deps=deps, state=runtime_state)
+    orchestrator = Orchestrator(config=config, deps=deps, state=runtime_state)
+    if deps.original_delivery_owner is not None:
+        deps.original_delivery_owner.launch = orchestrator.launch_rework_session
+        deps.original_delivery_owner.terminate = lambda issue: orchestrator.terminate_every_session_for_issue(issue, reason="original-delivery-cancel")
+    return orchestrator

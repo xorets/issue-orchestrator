@@ -216,6 +216,7 @@ class PRInfo:
     base_branch: str | None = None
     merged_at: str | None = None
     head_sha: str | None = None
+    base_sha: str | None = None
 
     @property
     def is_closed_unmerged(self) -> bool:

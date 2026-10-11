@@ -10,6 +10,7 @@ from enum import Enum
 from typing import TYPE_CHECKING
 
 from .host_rate_limit import HostRateLimit
+from .original_delivery import OriginalDelivery
 
 if TYPE_CHECKING:
     pass
@@ -56,6 +57,7 @@ class Claim:
     started_at: datetime
     expires_at: datetime
     priority: int
+    original: OriginalDelivery | None = None
 
     def is_expired(self, now: datetime | None = None) -> bool:
         """Check if this claim has expired.

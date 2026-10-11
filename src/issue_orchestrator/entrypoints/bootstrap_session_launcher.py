@@ -9,6 +9,8 @@ rather than handing the whole bundle across a layer boundary
 
 from __future__ import annotations
 
+from ..execution.original_delivery_processes import engine_identity
+
 from typing import TYPE_CHECKING, Callable, Optional
 
 from ..control.needs_human_block import SharedNeedsHumanBlock
@@ -106,6 +108,7 @@ def build_session_launcher_factory(
             needs_human_block=needs_human_block,
             coder_prompt_addendum=coder_prompt_addendum,
             recovery_holds=recovery_holds,
+            original_runtime_identity=engine_identity,
         )
 
     return _factory

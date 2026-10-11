@@ -208,6 +208,14 @@
       "rule_id": "control_policy_branch_sites",
       "value": 5
     },
+    "control_policy_branch_sites:src/issue_orchestrator/control/original_delivery.py": {
+      "detail": "5 branch site(s) mention lifecycle/control terms",
+      "kind": "control_policy_branch_sites",
+      "metric_id": "src/issue_orchestrator/control/original_delivery.py",
+      "path": "src/issue_orchestrator/control/original_delivery.py",
+      "rule_id": "control_policy_branch_sites",
+      "value": 5
+    },
     "control_policy_branch_sites:src/issue_orchestrator/control/pause_controller.py": {
       "detail": "4 branch site(s) mention lifecycle/control terms",
       "kind": "control_policy_branch_sites",
@@ -1625,12 +1633,12 @@
       "value": 1274
     },
     "oversized_control_hotspots:src/issue_orchestrator/infra/orchestrator.py": {
-      "detail": "1136 lines exceeds budget 800",
+      "detail": "1148 lines exceeds budget 800",
       "kind": "file_line_budget",
       "metric_id": "src/issue_orchestrator/infra/orchestrator.py",
       "path": "src/issue_orchestrator/infra/orchestrator.py",
       "rule_id": "oversized_control_hotspots",
-      "value": 1136
+      "value": 1148
     },
     "oversized_control_hotspots:src/issue_orchestrator/infra/supervisor.py": {
       "detail": "984 lines exceeds budget 800",

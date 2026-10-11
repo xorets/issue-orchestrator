@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 from ..domain.completion_processing import CompletionPublication
 from ..domain.completion_intake import CompletionIntakeReceipt
 from ..domain.issue_key import GitHubIssueKey, IssueKey
+from ..domain.original_delivery import OriginalDelivery
 from ..domain.models import (
     PendingRework,
     Session,
@@ -436,32 +437,10 @@ def handle_session_completion(  # noqa: C901, PLR0912 - handles validation, acti
     # Observer handles session-level cleanup (kill sessions, close tabs)
     observer.handle_completion(session, effective_status)
 
-    # Release claim if session had one
+    # Registered supervised handoffs retain remote custody until fenced terminal
+    # reconciliation. Ordinary completion releases only with positive observation.
     if claim_manager and session.lease_id:
-        try:
-            claim_manager.release_claim(session.issue.number, session.lease_id)
-            logger.info(
-                "[COMPLETION] Released claim for issue #%d: lease_id=%s",
-                session.issue.number,
-                session.lease_id,
-            )
-            if events:
-                events.publish(
-                    make_trace_event(
-                        EventName.CLAIM_RELEASED,
-                        {
-                            "issue_number": session.issue.number,
-                            "lease_id": session.lease_id,
-                            "status": effective_status.value,
-                        },
-                    )
-                )
-        except Exception as e:
-            logger.warning(
-                "[COMPLETION] Failed to release claim for issue #%d: %s",
-                session.issue.number,
-                e,
-            )
+        _release_completed_claim(session, claim_manager, events=events, status=effective_status.value)
 
     # Terminalize through the required-act-level outcome boundary (ADR-0031 §2,
     # #6764 F2, #6777): a mandated reset that failed — or an apply that raised —
@@ -548,6 +527,7 @@ def process_active_sessions(
     completion_dispatcher: "CompletionDispatcher | None" = None,
     provider_resilience: "ProviderResilienceManager | None" = None,
     publish_recovery: "PublishRecoveryService | None" = None,
+    claim_manager: "ClaimManager | None" = None,
 ) -> None:
     """Process active sessions - moved from Orchestrator per method table.
 
@@ -586,6 +566,7 @@ def process_active_sessions(
             session_output=session_controller.session_output,
             provider_resilience=provider_resilience,
             publish_recovery=publish_recovery,
+            claim_manager=claim_manager,
             pending_work_claims=pending_work_claims,
         )
 
@@ -712,6 +693,7 @@ def _apply_completed_decision(
     pending_work_claims: PendingWorkClaimStore,
     provider_resilience: "ProviderResilienceManager | None" = None,
     publish_recovery: "PublishRecoveryService | None" = None,
+    claim_manager: "ClaimManager | None" = None,
 ) -> None:
     """Apply a finished completion decision on the tick thread."""
     if completed.error is not None:
@@ -777,6 +759,7 @@ def _apply_completed_decision(
         blocked_reason=decision.blocked_reason,
         completion_detail=decision.completion_detail,
         publish_recovery=publish_recovery,
+        claim_manager=claim_manager,
         provider_error_type=decision.provider_error_type,
         intake_receipt=decision.processing_result.intake_receipt if decision.processing_result else None,
         pending_work_claims=pending_work_claims,
@@ -791,3 +774,24 @@ def _apply_completed_decision(
             session.issue.number,
         )
 
+
+
+def _release_completed_claim(session: Session, claims: "ClaimManager", *, events: EventSink | None,
+                             status: str) -> None:
+    try:
+        current = claims.get_current_claim(session.issue.number)
+        if current is not None and current.lease_id == session.lease_id and isinstance(getattr(current, "original", None), OriginalDelivery):
+            logger.info("[COMPLETION] Retained original handoff claim for issue #%d", session.issue.number)
+            return
+        assert session.lease_id is not None
+        claims.release_claim(session.issue.number, session.lease_id)
+        current = claims.get_current_claim(session.issue.number)
+        if current is not None and current.lease_id == session.lease_id:
+            raise RuntimeError("Remote completed claim release was not acknowledged")
+        logger.info("[COMPLETION] Observed claim release for issue #%d", session.issue.number)
+        if events:
+            events.publish(make_trace_event(EventName.CLAIM_RELEASED, {
+                "issue_number": session.issue.number, "lease_id": session.lease_id, "status": status,
+            }))
+    except Exception:
+        logger.warning("[COMPLETION] Claim release unproven for issue #%d", session.issue.number, exc_info=True)

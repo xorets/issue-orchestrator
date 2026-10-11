@@ -15,6 +15,9 @@ from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from ..control.label_manager import LabelManager
+from ..contracts.original_delivery import OriginalDeliveryRequest
+from ..contracts.ui_openapi_models import OriginalDeliveryPayload
+from ..domain.claim import ClaimFetchError
 from ..control.abandoned_queued_work import retire_abandoned_queued_work
 from .operator_termination import (
     TerminationDeferred,
@@ -180,6 +183,27 @@ def _hold_queued_issue(orchestrator: Any, issue_number: int) -> dict[str, Any]:
         "hold_label": lm.blocked_failed,
         "linked_pr_numbers": pr_numbers,
     }
+
+
+@web_operator_router.get("/api/original-delivery/{issue_number}", response_model=OriginalDeliveryPayload)
+async def original_delivery_status(issue_number: int, orchestrator: WebOrchestratorDependency) -> JSONResponse:
+    if orchestrator is None:
+        return JSONResponse({"error": "Original engine is not running"}, status_code=503)
+    try:
+        return JSONResponse(OriginalDeliveryPayload.model_validate(orchestrator.original_delivery(issue_number)).model_dump(mode="json"))
+    except (ValueError, ClaimFetchError) as refusal:
+        return JSONResponse({"error": str(refusal)}, status_code=409)
+
+
+@web_operator_router.post("/api/original-delivery/{issue_number}/{operation}", response_model=OriginalDeliveryPayload)
+async def original_delivery_command(issue_number: int, operation: str, body: OriginalDeliveryRequest,
+                                    orchestrator: WebOrchestratorDependency) -> JSONResponse:
+    if orchestrator is None:
+        return JSONResponse({"error": "Original engine is not running"}, status_code=503)
+    try:
+        return JSONResponse(OriginalDeliveryPayload.model_validate(orchestrator.original_delivery(issue_number, body.command(operation))).model_dump(mode="json"))
+    except (ValueError, ClaimFetchError) as refusal:
+        return JSONResponse({"error": str(refusal)}, status_code=409)
 
 
 @web_operator_router.post("/api/kill/{issue_number}")
