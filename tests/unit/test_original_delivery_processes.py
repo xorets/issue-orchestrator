@@ -23,8 +23,9 @@ def test_changed_cwd_sigterm_resistant_worker_blocks_terminal_custody(tmp_path):
     owner = OriginalDelivery(repository='test/repo', config_fingerprint='config', contract_sha256='a'*64,
         run_id='original', session_name='issue-42', native_phase_name='coding-1', logical_child='code:42', started_at='start', branch='delivery', worktree=str(owned),
         run_dir=str(owned/'run'), agent='agent:web', engine_host=host, engine_pid=pid, engine_birth=birth, max_cycles=1)
-    script = "import signal,sys; signal.signal(signal.SIGTERM,signal.SIG_IGN); print('ready',flush=True); signal.pause()"
-    child = subprocess.Popen([sys.executable, '-c', script], cwd=foreign,
+    # SIGALRM caps leaked fixtures even when pytest dies before its finally block.
+    script = "import signal,sys; signal.alarm(30); signal.signal(signal.SIGTERM,signal.SIG_IGN); print('ready',flush=True); signal.pause()"
+    child = subprocess.Popen([sys.executable, '-c', script], cwd=foreign, start_new_session=True,
         env={**os.environ, 'ISSUE_ORCHESTRATOR_RUN_DIR':owner.run_dir}, stdout=subprocess.PIPE, text=True)
     try:
         assert child.stdout is not None
@@ -63,11 +64,11 @@ def test_retained_session_finds_scrubbed_detached_descendant_after_root_exit(tmp
     owner = OriginalDelivery(repository='test/repo', config_fingerprint='config', contract_sha256='a'*64,
         run_id='original', session_name='issue-42', native_phase_name='coding-1', logical_child='code:42', started_at='start', branch='delivery', worktree=str(owned),
         run_dir=str(owned/'run'), agent='agent:web', engine_host=host, engine_pid=pid, engine_birth=birth, max_cycles=1)
-    descendant = "import os,signal; os.setpgid(0,0); signal.signal(signal.SIGTERM,signal.SIG_IGN); print('descendant-ready',flush=True); signal.pause()"
-    script = "import subprocess,sys; print('root-ready',flush=True); sys.stdin.readline(); subprocess.Popen([sys.executable,'-c',sys.argv[1]],env={});"
+    descendant = "import os,signal; signal.alarm(30); os.setpgid(0,0); signal.signal(signal.SIGTERM,signal.SIG_IGN); print('descendant-ready',flush=True); signal.pause()"
+    script = "import signal,subprocess,sys; signal.alarm(30); print('root-ready',flush=True); sys.stdin.readline(); subprocess.Popen([sys.executable,'-c',sys.argv[1]],env={});"
     root = subprocess.Popen([sys.executable, '-c', script, descendant], cwd=foreign, start_new_session=True,
         env={**os.environ, 'ISSUE_ORCHESTRATOR_RUN_DIR':owner.run_dir}, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-    other = subprocess.Popen([sys.executable, '-c', "import signal; signal.pause()"], cwd=foreign, start_new_session=True)
+    other = subprocess.Popen([sys.executable, '-c', "import signal; signal.alarm(30); signal.pause()"], cwd=foreign, start_new_session=True)
     try:
         assert root.stdout is not None and root.stdin is not None
         assert select.select([root.stdout], [], [], 5)[0]
@@ -110,7 +111,7 @@ def test_reused_root_and_session_numbers_do_not_authorize_foreign_termination(tm
         run_id='original',session_name='issue-42',native_phase_name='coding-1',logical_child='code:42',started_at='start',
         branch='delivery',worktree=str(owned),run_dir=str(owned/'run'),agent='agent:web',engine_host=host,
         engine_pid=pid,engine_birth=birth,max_cycles=1)
-    child=subprocess.Popen([sys.executable,'-c',"import signal; signal.pause()"],cwd=foreign,start_new_session=True)
+    child=subprocess.Popen([sys.executable,'-c',"import signal; signal.alarm(30); signal.pause()"],cwd=foreign,start_new_session=True)
     try:
         observed_birth=process_birth(child.pid)
         assert observed_birth is not None
@@ -132,9 +133,9 @@ def test_orphan_run_marker_cannot_register_current_engine_worker_custody(tmp_pat
         run_id='original',session_name='issue-42',native_phase_name='coding-1',logical_child='code:42',started_at='start',
         branch='delivery',worktree=str(tmp_path),run_dir=str(tmp_path/'run'),agent='agent:web',
         engine_host=host,engine_pid=pid,engine_birth=birth,max_cycles=1)
-    worker = "import signal; print('ready',flush=True); signal.pause()"
-    script = "import subprocess,sys; child=subprocess.Popen([sys.executable,'-c',sys.argv[1]],start_new_session=True); print(child.pid,flush=True)"
-    previous = subprocess.Popen([sys.executable,'-c',script,worker],cwd=tmp_path,
+    worker = "import signal; signal.alarm(30); print('ready',flush=True); signal.pause()"
+    script = "import signal,subprocess,sys; signal.alarm(30); child=subprocess.Popen([sys.executable,'-c',sys.argv[1]],start_new_session=True); print(child.pid,flush=True)"
+    previous = subprocess.Popen([sys.executable,'-c',script,worker],cwd=tmp_path,start_new_session=True,
         env={**os.environ,'ISSUE_ORCHESTRATOR_RUN_DIR':owner.run_dir},stdout=subprocess.PIPE,text=True)
     orphan_pid = None
     try:
