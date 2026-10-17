@@ -119,14 +119,27 @@ def build_session_env_exports(
 
 
 def completion_capability_export(
-    allocator: "IssueRunAllocator", run: "SessionRunAssets"
+    allocator: "IssueRunAllocator", run: "SessionRunAssets", *, docker: bool = False
 ) -> str:
-    """Use the allocation owner's secret file; command logging sees only a locator."""
+    """Native reads an owned file; Docker requires privately injected authority."""
     import shlex
 
+    if docker:
+        return (' ISSUE_ORCHESTRATOR_COMPLETION_CAPABILITY="${ISSUE_ORCHESTRATOR_COMPLETION_CAPABILITY:'
+            '?allocation-bound completion capability required}"')
     artifact = allocator.submission_capability_file(run)
     return (
         " ISSUE_ORCHESTRATOR_COMPLETION_CAPABILITY=$(cat "
         + shlex.quote(str(artifact.path))
         + ")"
     )
+
+
+def docker_session_secret_env(
+    allocator: "IssueRunAllocator", run: "SessionRunAssets", provider: dict[str, str],
+) -> dict[str, str]:
+    """Only the allocation owner supplies a Docker run's completion authority."""
+    name = "ISSUE_ORCHESTRATOR_COMPLETION_CAPABILITY"
+    if name in provider:
+        raise ValueError("Docker provider cannot supply completion authority")
+    return {**provider, name: allocator.submission_capability(run)}

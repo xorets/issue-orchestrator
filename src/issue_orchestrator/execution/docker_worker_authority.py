@@ -76,6 +76,9 @@ def worker_environment(packet: dict, provider: dict[str, str], callback_token: s
     if any(name in reserved or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) or "\x00" in value
             for name, value in provider.items()):
         raise ValueError("Docker provider environment overrides controller authority")
+    if packet.get("worker_authority") is not None and not re.fullmatch(
+            r"[A-Za-z0-9_-]{64}", provider.get("ISSUE_ORCHESTRATOR_COMPLETION_CAPABILITY", "")):
+        raise ValueError("Docker worker authority requires allocation-bound completion capability")
     environment = {**provider, **_authority_environment(packet)}
     if callback_token:
         if not re.fullmatch(r"[0-9a-f]{64}", callback_token):

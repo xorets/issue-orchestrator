@@ -36,9 +36,14 @@ def test_projects_only_verified_outer_authority_and_explicit_callback(authority,
     packet, path, _ = authority
     monkeypatch.setenv("ISSUE_ORCHESTRATOR_API_TOKEN", "admin-must-not-leak")
     monkeypatch.setenv("GH_TOKEN", "github-must-not-leak")
-    result = worker_environment(packet, {"PROVIDER_KEY": "provider-secret"}, "d" * 64)
+    before = canonical(packet)
+    result = worker_environment(packet, {"PROVIDER_KEY": "provider-secret", "ISSUE_ORCHESTRATOR_COMPLETION_CAPABILITY": "e" * 64}, "d" * 64)
     assert result == {"XORETS_EXECUTION_CONTRACT": str(path), "XORETS_EXECUTION_DIGEST": sha256(path.read_bytes()).hexdigest(),
-        "PROVIDER_KEY": "provider-secret", "ISSUE_ORCHESTRATOR_AGENT_CALLBACK_TOKEN": "d" * 64}
+        "PROVIDER_KEY": "provider-secret", "ISSUE_ORCHESTRATOR_AGENT_CALLBACK_TOKEN": "d" * 64,
+        "ISSUE_ORCHESTRATOR_COMPLETION_CAPABILITY": "e" * 64}
+
+    assert canonical(packet) == before
+    assert b"e" * 64 not in before
 
 
 @pytest.mark.parametrize("change", ["subject", "inner", "image", "writable", "ancestor", "missing-mount"])
@@ -51,7 +56,7 @@ def test_refuses_changed_authority_or_writable_projection(authority, change):
     if change == "ancestor": packet["mounts"].append({"source": str(path.parent), "target": str(path.parent), "read_only": False})
     if change == "missing-mount": packet["mounts"].pop()
     path.chmod(0o600); path.write_bytes(canonical(outer)); path.chmod(0o400)
-    with pytest.raises(ValueError): worker_environment(packet, {}, "d" * 64)
+    with pytest.raises(ValueError): worker_environment(packet, {"ISSUE_ORCHESTRATOR_COMPLETION_CAPABILITY": "e" * 64}, "d" * 64)
 
 
 @pytest.mark.parametrize("name", ["XORETS_EXECUTION_CONTRACT", "XORETS_EXECUTION_DIGEST", "ISSUE_ORCHESTRATOR_AGENT_CALLBACK_TOKEN", "ISSUE_ORCHESTRATOR_API_TOKEN", "GH_TOKEN"])
@@ -62,3 +67,11 @@ def test_provider_credentials_cannot_override_authority_or_add_controller_creden
 def test_unprojected_primitive_receives_no_controller_authority(monkeypatch):
     monkeypatch.setenv("XORETS_EXECUTION_CONTRACT", "/private/controller.json")
     assert worker_environment({}, {"PROVIDER_KEY": "secret"}, None) == {"PROVIDER_KEY": "secret"}
+
+
+@pytest.mark.parametrize("capability", [None, "", "wrong-format"])
+def test_projected_worker_requires_private_completion_capability(authority, monkeypatch, capability):
+    monkeypatch.setenv("ISSUE_ORCHESTRATOR_COMPLETION_CAPABILITY", "e" * 64)
+    supplied = {} if capability is None else {"ISSUE_ORCHESTRATOR_COMPLETION_CAPABILITY": capability}
+    with pytest.raises(ValueError, match="completion capability"):
+        worker_environment(authority[0], supplied, "d" * 64)

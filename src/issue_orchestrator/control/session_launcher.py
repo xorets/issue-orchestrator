@@ -136,7 +136,7 @@ from .launch_guards import (
     callback_endpoint_not_ready,
     retrospective_session_conflict,
 )
-from .session_env import completion_capability_export, build_session_env_exports
+from .session_env import completion_capability_export, build_session_env_exports, docker_session_secret_env
 from .provider_command_wrapper import ProviderCommandWrapper
 from .session_worktree_briefing import (
     describe_worktree_state,
@@ -425,7 +425,8 @@ class SessionLauncher:
             run_dir=run_assets.run_dir,
             worktree_path=worktree_path,
             callback_endpoint=self._agent_callback_endpoint,
-        ) + completion_capability_export(self._issue_run_allocator, run_assets)
+        ) + completion_capability_export(self._issue_run_allocator, run_assets,
+            docker=self.config.terminal_adapter == "issue_orchestrator.execution.terminal_docker:DockerPlugin")
 
     # ─────────────────────────────────────────────────────────────────────────
     # Phase helpers for launch_issue_session
@@ -2127,6 +2128,8 @@ class SessionLauncher:
         work_claim: LaunchWorkClaim = NO_LAUNCH_WORK_CLAIM,
     ) -> LaunchResult:
         """Launch a rework session to fix issues found in review."""
+        if self.config.terminal_adapter == "issue_orchestrator.execution.terminal_docker:DockerPlugin":
+            raise ValueError("Docker rework requires allocation-bound completion authority")
         if result := callback_endpoint_not_ready(self._agent_callback_endpoint):
             return result
         from .scoped_rework_launch import ScopedReworkLaunch
@@ -2226,9 +2229,11 @@ class SessionLauncher:
         empty mapping distinguishes "this provider supplies its own login" from
         "the key resolved to nothing".
         """
+        secret_env = dict(self._provider_credentials.session_env(agent_config.provider))
+        if self.config.terminal_adapter == "issue_orchestrator.execution.terminal_docker:DockerPlugin":
+            secret_env = docker_session_secret_env(self._issue_run_allocator, run, secret_env)
         if self._session_preparation is not None:
             self._session_preparation.prepare_session(run, name, command)
-        secret_env = dict(self._provider_credentials.session_env(agent_config.provider))
         return self._create_session(name, command, worktree, title, secret_env or None)
 
     def _check_provider_ready(

@@ -100,9 +100,16 @@ read-only mounts with no writable ancestor. The backend verifies the outer
 envelope's inner checksum, mirrored subject, image and packet intent, then
 derives the worker's `XORETS_EXECUTION_CONTRACT` and digest from those sealed
 bytes. The path-only descriptor avoids a checksum cycle. Provider secrets
-cannot replace these seals or inject controller/GitHub credentials. Only the
-existing scoped callback token crosses separately in the Unix exec payload;
-ambient controller environment is not copied. A primitive without this
+cannot replace these seals or inject controller/GitHub credentials. The existing
+scoped callback token and exact allocation-owned completion
+capability cross separately in the private Unix exec payload. The trusted
+launcher rejects provider overrides and resolves the capability from its typed
+run; Docker commands require that injected value instead of reading a controller
+capability file. Neither secret enters command text, launch packets or public
+receipts, and ambient controller environment is not copied. Docker rework
+remains explicitly unsupported until its separate spawn seam carries that
+allocation authority; synthetic acceptance keeps its correction budget at zero.
+A primitive without this
 descriptor receives no execution authority. This projection grants no model
 admission.
 Native keeps its previous callback allowlist. Reaching an origin alone does
