@@ -486,13 +486,19 @@ class TestRunWebDashboard:
                     set_server(None)
 
     @pytest.mark.asyncio
-    async def test_run_web_dashboard_port_zero_reports_bound_port_to_callback(self):
-        """When port=0, startup callback receives the OS-assigned port."""
+    @pytest.mark.parametrize("bind_host", [None, "0.0.0.0"])
+    @pytest.mark.parametrize("port", [0, 8080])
+    async def test_run_web_dashboard_reports_bound_port_to_callback(self, monkeypatch, bind_host, port):
+        """Explicit binds publish their port without killing other listeners."""
         from issue_orchestrator.entrypoints.web import run_web_dashboard
         import asyncio
         from tests.unit.threading_helpers import wait_for_async_event
 
         mock_orch = create_mock_orchestrator()
+        if bind_host is None:
+            monkeypatch.delenv("ISSUE_ORCHESTRATOR_CALLBACK_BIND", raising=False)
+        else:
+            monkeypatch.setenv("ISSUE_ORCHESTRATOR_CALLBACK_BIND", bind_host)
 
         mock_socket = MagicMock()
         mock_socket.getsockname.return_value = ("127.0.0.1", 54321)
@@ -517,12 +523,15 @@ class TestRunWebDashboard:
 
         mock_server.serve = AsyncMock(side_effect=serve)
 
-        with patch("uvicorn.Server", return_value=mock_server):
-            with patch("uvicorn.Config"):
+        with (
+            patch("uvicorn.Server", return_value=mock_server),
+            patch("issue_orchestrator.entrypoints.web.ensure_port_available") as free_port,
+        ):
+            with patch("uvicorn.Config") as configure_server:
                 task = asyncio.create_task(
                     run_web_dashboard(
                         mock_orch,
-                        port=0,
+                        port=port,
                         open_browser=False,
                         on_server_started=on_server_started,
                     )
@@ -531,7 +540,13 @@ class TestRunWebDashboard:
                 await wait_for_async_event(serve_started, timeout=1.0, label="serve_started")
                 await wait_for_async_event(callback_seen, timeout=1.0, label="callback_seen")
 
-                assert captured["port"] == 54321
+                assert captured["port"] == (54321 if port == 0 else 8080)
+                assert configure_server.call_args.kwargs["host"] == (bind_host or "127.0.0.1")
+                assert configure_server.call_args.kwargs["port"] == port
+                if port != 0 and bind_host is None:
+                    free_port.assert_called_once_with(8080)
+                else:
+                    free_port.assert_not_called()
 
                 task.cancel()
                 try:

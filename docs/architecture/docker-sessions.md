@@ -80,7 +80,12 @@ authorize stop. A wrong daemon/foreign label cannot authorize termination.
 
 Native callback addressing remains loopback. Trusted deployment may set
 `ISSUE_ORCHESTRATOR_CALLBACK_BIND` and `ISSUE_ORCHESTRATOR_CALLBACK_HOST`;
-the runtime endpoint publishes the actual bound port and passes a validated
+both the Control API server and web dashboard honor the selected binding.
+An explicit non-loopback binding leaves occupied-port failure to the server
+instead of trying to terminate other listeners. For an automatically assigned
+port, start paused, verify the published bound endpoint, and install the exact
+network exception before attaching a worker. Restart requires re-verification.
+The runtime endpoint publishes the actual bound port and passes a validated
 `ISSUE_ORCHESTRATOR_API_ORIGIN` to all agent callback clients. The Docker server
 and dashboard select an authenticated callback scope admitting only completion
 submissions and exact issue-resume routes, with existing per-run capabilities.
