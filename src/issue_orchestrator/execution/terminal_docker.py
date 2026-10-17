@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from hashlib import sha256
 import json
+import ipaddress
 import logging
 import os
 from pathlib import Path
@@ -22,7 +23,7 @@ from ..domain.docker_execution import DockerSessionState
 from ..domain.session_run import SessionRunAssets
 from ..infra.hooks.hookspec import hookimpl
 from .docker_engine import DockerEngine
-from .docker_launch_input import canonical as canonical, sealed_bytes as sealed_bytes
+from .docker_launch_input import canonical as canonical, sealed_bytes as sealed_bytes, network_arguments
 from .docker_worker_authority import worker_environment
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,7 @@ def require_create_intent(config: dict, packet: dict) -> None:
         "--security-opt=no-new-privileges:true", "--log-driver=none", "--network", packet["network_id"],
         "--memory", str(limits["memory_bytes"]), "--memory-swap", str(limits["swap_bytes"]),
         "--pids-limit", str(limits["pids"]), "--cpus", str(limits["cpu_nano"] / 1000000000)]
+    args.extend(network_arguments(packet))
     for target, options in sorted(packet["tmpfs"].items()):
         args.extend(("--tmpfs", target + ":" + options))
     workspace_mount = None
@@ -67,6 +69,52 @@ def require_create_intent(config: dict, packet: dict) -> None:
             config.get("overrideCommand") is not True or config.get("runArgs") != args or
             config.get("workspaceMount") != workspace_mount):
         raise ValueError("Docker generated configuration differs from sealed create intent")
+
+
+def require_bridge_endpoint(endpoint: dict, packet: dict, address: str) -> None:
+    network = packet["network"]
+    if (endpoint.get("NetworkID") != packet["network_id"] or endpoint.get("IPAddress") != address or
+            endpoint.get("IPPrefixLen") != ipaddress.IPv4Network(network["subnet"]).prefixlen or
+            endpoint.get("Gateway") != network["gateway"] or endpoint.get("GlobalIPv6Address") or
+            endpoint.get("GlobalIPv6PrefixLen") or endpoint.get("IPv6Gateway")):
+        raise ValueError("Docker bridge endpoint differs from selected IPv4 membership")
+    ipam = endpoint.get("IPAMConfig") or {}
+    if ipam.get("IPv6Address") or ipam.get("LinkLocalIPs"):
+        raise ValueError("Docker bridge endpoint has unadmitted additional addresses")
+
+
+def require_selected_bridge(engine: DockerEngine, packet: dict, controller: dict) -> None:
+    if "network" not in packet:
+        return
+    network = packet["network"]
+    actual = engine.request("GET", "/networks/" + packet["network_id"])
+    if (actual.get("Id") != packet["network_id"] or actual.get("Driver") != "bridge" or
+            actual.get("Scope") != "local" or actual.get("Internal") is not False or
+            actual.get("EnableIPv6") is not False or
+            actual.get("IPAM", {}).get("Driver") != "default" or
+            actual.get("IPAM", {}).get("Config") != [{"Subnet": network["subnet"], "Gateway": network["gateway"]}] or
+            actual.get("Options", {}).get("com.docker.network.bridge.name") != network["bridge_name"] or
+            actual.get("Options", {}).get("com.docker.network.bridge.enable_icc") != "false"):
+        raise ValueError("Docker bridge properties differ from sealed network")
+    endpoints = controller.get("NetworkSettings", {}).get("Networks", {})
+    selected = [value for value in endpoints.values() if value.get("NetworkID") == packet["network_id"]]
+    if len(selected) != 1:
+        raise ValueError("Docker controller is not attached to selected bridge")
+    require_bridge_endpoint(selected[0], packet, network["controller_ipv4"])
+
+
+def require_worker_network(actual: dict, packet: dict) -> None:
+    if "network" not in packet:
+        return
+    network = packet["network"]
+    host = actual.get("HostConfig", {})
+    settings = actual.get("NetworkSettings", {})
+    endpoints = settings.get("Networks", {})
+    if (host.get("Dns") != network["dns"] or host.get("DnsOptions") or host.get("DnsSearch") or
+            host.get("Sysctls") != {"net.ipv6.conf.all.disable_ipv6": "1"} or len(endpoints) != 1 or
+            settings.get("LinkLocalIPv6Address") or settings.get("LinkLocalIPv6PrefixLen")):
+        raise ValueError("Docker worker DNS, IPv6 or network membership differs from sealed intent")
+    require_bridge_endpoint(next(iter(endpoints.values())), packet, network["worker_ipv4"])
 
 
 def run_cli(argv: list[str], *, environment: dict[str, str], timeout: float, diagnostic_path: Path | None = None) -> bytes:
@@ -265,6 +313,7 @@ class DockerPlugin:
         controller = self.engine.request("GET", f"/containers/{packet['controller_container_id']}/json")
         if controller.get("Id") != packet["controller_container_id"] or controller.get("State", {}).get("Running") is not True:
             raise ValueError("Docker controller identity is unavailable")
+        require_selected_bridge(self.engine, packet, controller)
         return packet
 
     def receipt_path(self) -> Path:
@@ -346,6 +395,12 @@ class DockerPlugin:
             raise ValueError("Docker created mounts differ from admitted mounts")
         if any(item.get("Destination") not in packet["tmpfs"] for item in actual.get("Mounts", []) if item.get("Type") == "tmpfs"):
             raise ValueError("Docker created an unbounded temporary mount")
+        require_worker_network(actual, packet)
+        if "network" in packet:
+            controller = self.engine.request("GET", f"/containers/{packet['controller_container_id']}/json")
+            if controller.get("Id") != packet["controller_container_id"] or controller.get("State", {}).get("Running") is not True:
+                raise ValueError("Docker controller identity is unavailable")
+            require_selected_bridge(self.engine, packet, controller)
         return actual
 
     @hookimpl

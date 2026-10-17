@@ -78,6 +78,23 @@ authorize stop. A wrong daemon/foreign label cannot authorize termination.
 
 ## Explicit callback addressing and remaining gates
 
+The launch packet's sealed `network` selects `worker_ipv4`, `controller_ipv4`,
+canonical RFC1918 `subnet`, `gateway`, safe `br-` interface `bridge_name`, and one
+to three unique public IPv4 `dns` servers. The generated create intent fixes the
+worker IP, DNS and `net.ipv6.conf.all.disable_ipv6=1`. Full `worker_authority`
+projection requires this descriptor; only the isolated `network_id:none`
+source primitive may omit it.
+
+Before create and again before hooks/provider exec, the existing Docker
+transport verifies the exact selected local bridge, subnet/gateway, IPv6 off,
+non-internal mode, bridge interface and ICC off, plus the controller's selected
+IPv4 membership. Created worker inspection requires exactly one selected IPv4
+endpoint, matching DNS, and the fixed IPv6 sysctl. No bridge/firewall is
+configured here. These readbacks and the sealed firewall-policy hash do not
+prove egress filtering or DNS forwarding; actual-host #169 acceptance remains
+separate. See Docker's [network flags](https://docs.docker.com/reference/cli/docker/container/run/)
+and [bridge options](https://docs.docker.com/engine/network/drivers/bridge/#options).
+
 Native callback addressing remains loopback. Trusted deployment may set
 `ISSUE_ORCHESTRATOR_CALLBACK_BIND` and `ISSUE_ORCHESTRATOR_CALLBACK_HOST`;
 both the Control API server and web dashboard honor the selected binding.

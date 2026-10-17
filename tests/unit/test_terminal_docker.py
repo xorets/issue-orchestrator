@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import pytest
 import time
+import copy
 
 from issue_orchestrator.execution.terminal_docker import DockerPlugin, canonical
 
@@ -137,6 +138,145 @@ def test_wrong_command_never_creates_worker(launch):
     runner, engine, packet, calls = launch
     assert not runner.create_session(42, "unadmitted", packet["working_dir"], None, "issue-42")
     assert calls == [] and engine.starts == 0
+
+
+class BridgeEngine(Engine):
+    def __init__(self, packet):
+        super().__init__(packet)
+        self.bridge = {"Id": "5" * 64, "Driver": "bridge", "Scope": "local", "Internal": False,
+            "EnableIPv6": False, "IPAM": {"Driver": "default",
+                "Config": [{"Subnet": "172.28.64.0/28", "Gateway": "172.28.64.1"}]},
+            "Options": {"com.docker.network.bridge.name": "br-fixture169",
+                "com.docker.network.bridge.enable_icc": "false"}}
+        self.controller_endpoint = {"NetworkID": "5" * 64, "IPAddress": "172.28.64.2",
+            "IPPrefixLen": 28, "Gateway": "172.28.64.1", "GlobalIPv6Address": "", "IPv6Gateway": ""}
+        self.worker_endpoint = {**self.controller_endpoint, "IPAddress": "172.28.64.3",
+            "IPAMConfig": {"IPv4Address": "172.28.64.3"}}
+        self.dns = ["1.1.1.1", "8.8.8.8"]
+        self.sysctls = {"net.ipv6.conf.all.disable_ipv6": "1"}
+        self.extra_worker_endpoint = False
+
+    def worker(self):
+        actual = super().worker()
+        actual["HostConfig"].update(Dns=self.dns, Sysctls=self.sysctls)
+        actual["NetworkSettings"] = {"Networks": {"fixture": self.worker_endpoint}}
+        if self.extra_worker_endpoint:
+            actual["NetworkSettings"]["Networks"]["foreign"] = self.controller_endpoint
+        return actual
+
+    def request(self, method, route, payload=None):
+        if route == "/networks/" + "5" * 64:
+            return self.bridge
+        actual = super().request(method, route, payload)
+        if route == "/containers/" + "1" * 64 + "/json":
+            actual["NetworkSettings"] = {"Networks": {"fixture": self.controller_endpoint}}
+        return actual
+
+
+@pytest.fixture
+def bridge_launch(launch):
+    runner, _, packet, calls = launch
+    packet["network_id"] = "5" * 64
+    packet["network"] = {"worker_ipv4": "172.28.64.3", "controller_ipv4": "172.28.64.2",
+        "subnet": "172.28.64.0/28", "gateway": "172.28.64.1",
+        "bridge_name": "br-fixture169", "dns": ["1.1.1.1", "8.8.8.8"]}
+    config = Path(packet["devcontainer_config"])
+    content = json.loads(config.read_bytes())
+    content["runArgs"][content["runArgs"].index("none")] = "5" * 64
+    content["runArgs"].extend(["--ip", "172.28.64.3", "--dns", "1.1.1.1", "--dns", "8.8.8.8",
+        "--sysctl", "net.ipv6.conf.all.disable_ipv6=1"])
+    config.chmod(0o600)
+    config.write_bytes(canonical(content))
+    config.chmod(0o400)
+    packet["devcontainer_config_sha256"] = sha256(config.read_bytes()).hexdigest()
+    runner.launch_path.chmod(0o600)
+    runner.launch_path.write_bytes(canonical(packet))
+    runner.launch_path.chmod(0o400)
+    engine = BridgeEngine(packet)
+    engine.record_path = runner.receipt_path()
+    return DockerPlugin(launch_path=runner.launch_path, engine=engine), engine, packet, calls
+
+
+def test_selected_bridge_launch_preserves_verified_endpoints(bridge_launch):
+    runner, engine, packet, _ = bridge_launch
+    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    runner.on_orchestrator_shutdown()
+    assert engine.starts == 1
+    assert runner.public_receipt("issue-42")["container_id"] == "2" * 64
+
+
+def test_controller_membership_is_rechecked_after_create_before_any_exec(bridge_launch, monkeypatch):
+    runner, engine, packet, calls = bridge_launch
+    def create(*args, **kwargs):
+        calls.append((args, kwargs))
+        engine.controller_endpoint["IPAddress"] = "172.28.64.4"
+        return json.dumps({"containerId": "2" * 64}).encode()
+    monkeypatch.setattr("issue_orchestrator.execution.terminal_docker.run_cli", create)
+    assert not runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    assert len(calls) == 1 and engine.created_exec is None
+
+
+@pytest.mark.parametrize("change", [
+    {"worker_ipv4": "172.28.64.2"}, {"controller_ipv4": "172.28.65.2"},
+    {"subnet": "172.28.64.1/28"}, {"dns": ["192.168.1.1"]},
+    {"bridge_name": "eth0"}, {"gateway": "172.28.64.15"},
+])
+def test_invalid_sealed_network_refuses_before_cli(bridge_launch, change):
+    runner, engine, packet, calls = bridge_launch
+    packet["network"].update(change)
+    runner.launch_path.chmod(0o600)
+    runner.launch_path.write_bytes(canonical(packet))
+    runner.launch_path.chmod(0o400)
+    assert not runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    assert calls == [] and engine.created_exec is None
+
+
+@pytest.mark.parametrize("subject,change", [
+    ("bridge", {"Id": "6" * 64}), ("bridge", {"Driver": "overlay"}),
+    ("bridge", {"Scope": "swarm"}), ("bridge", {"Internal": True}),
+    ("bridge", {"EnableIPv6": True}),
+    ("bridge", {"IPAM": {"Config": [{"Subnet": "172.28.65.0/28", "Gateway": "172.28.65.1"}]}}),
+    ("bridge", {"Options": {"com.docker.network.bridge.name": "br-foreign",
+        "com.docker.network.bridge.enable_icc": "false"}}),
+    ("bridge", {"Options": {"com.docker.network.bridge.name": "br-fixture169",
+        "com.docker.network.bridge.enable_icc": "true"}}),
+    ("controller_endpoint", {"IPAddress": "172.28.64.4"}),
+    ("controller_endpoint", {"NetworkID": "6" * 64}),
+])
+def test_network_or_controller_drift_refuses_before_cli(bridge_launch, subject, change):
+    runner, engine, packet, calls = bridge_launch
+    getattr(engine, subject).update(copy.deepcopy(change))
+    accepted = runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    if accepted:
+        runner.on_orchestrator_shutdown()
+    assert not accepted
+    assert calls == [] and engine.created_exec is None
+
+
+@pytest.mark.parametrize("subject,change", [
+    ("worker_endpoint", {"IPAddress": "172.28.64.4"}),
+    ("worker_endpoint", {"NetworkID": "6" * 64}),
+    ("worker_endpoint", {"IPPrefixLen": 24}),
+    ("worker_endpoint", {"Gateway": "172.28.64.4"}),
+    ("worker_endpoint", {"GlobalIPv6Address": "2001:db8::3"}),
+    ("worker_endpoint", {"IPAMConfig": {"IPv4Address": "172.28.64.3", "IPv6Address": "2001:db8::3"}}),
+    ("dns", ["192.168.1.1"]), ("sysctls", {}), ("extra_worker_endpoint", True),
+])
+def test_created_worker_network_drift_refuses_before_hooks_and_provider(bridge_launch, subject, change):
+    runner, engine, packet, calls = bridge_launch
+    packet["hooks"] = {"postCreateCommand": ["echo", "must-not-run"]}
+    runner.launch_path.chmod(0o600)
+    runner.launch_path.write_bytes(canonical(packet))
+    runner.launch_path.chmod(0o400)
+    if subject == "worker_endpoint":
+        getattr(engine, subject).update(copy.deepcopy(change))
+    else:
+        setattr(engine, subject, change)
+    accepted = runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    if accepted:
+        runner.on_orchestrator_shutdown()
+    assert not accepted
+    assert len(calls) == 1 and engine.created_exec is None
 
 
 def test_docker_exec_receives_only_the_explicit_scoped_callback_token(launch, monkeypatch):
