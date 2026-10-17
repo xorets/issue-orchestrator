@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -21,6 +22,27 @@ repository = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(repository / "src"))
 from issue_orchestrator.execution.terminal_docker import DockerPlugin, canonical
 from issue_orchestrator.execution.docker_engine import DockerEngine
+
+
+def docker_cli(*args):
+    """Every fixture Docker operation uses the same explicit local daemon."""
+    return subprocess.check_output(
+        ["/usr/bin/docker", "--host", "unix:///var/run/docker.sock", *args],
+        timeout=15,
+        text=True,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "HOME": "/nonexistent",
+            "DOCKER_CONFIG": "/nonexistent",
+        },
+    ).strip()
+
+
+def validate_image(image):
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9./:_-]*@sha256:[0-9a-f]{64}", image):
+        raise ValueError(
+            "Non-model probe requires an immutable repository@sha256 image"
+        )
 
 
 def main():  # noqa: C901, PLR0912 - One bounded disposable lifecycle with unconditional cleanup.
@@ -38,6 +60,7 @@ def main():  # noqa: C901, PLR0912 - One bounded disposable lifecycle with uncon
     )
     parser.add_argument("--evidence-root", required=True, type=Path)
     args = parser.parse_args()
+    validate_image(args.image)
     if subprocess.check_output(
         ["git", "-C", str(repository), "status", "--porcelain"], text=True
     ).strip():
@@ -51,11 +74,6 @@ def main():  # noqa: C901, PLR0912 - One bounded disposable lifecycle with uncon
     workspace = root / "workspace"
     workspace.mkdir(mode=0o755)
     image = args.image
-
-    def cli(*args):
-        return subprocess.check_output(
-            ["/usr/bin/docker", *args], timeout=15, text=True
-        ).strip()
 
     def checksum(p):
         with Path(p).open("rb") as f:
@@ -78,8 +96,9 @@ def main():  # noqa: C901, PLR0912 - One bounded disposable lifecycle with uncon
     try:
         info = engine.request("GET", "/info")
         img = engine.request("GET", "/images/" + image + "/json")
-        controller = cli(
+        controller = docker_cli(
             "run",
+            "--pull=never",
             "-d",
             "--name",
             "builder27-controller-" + root.name,
@@ -250,7 +269,7 @@ def main():  # noqa: C901, PLR0912 - One bounded disposable lifecycle with uncon
                 pass
         for cid in known:
             try:
-                cli("rm", "-f", cid)
+                docker_cli("rm", "-f", cid)
             except Exception as exc:
                 cleanup.append({"id": cid, "removed": False})
                 continue
