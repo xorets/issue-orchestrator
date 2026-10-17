@@ -583,15 +583,16 @@ async def run_web_dashboard(
     from .control_api import set_orchestrator as set_control_orchestrator
     set_control_orchestrator(orchestrator)
 
-    if port != 0:
-        # Ensure fixed port is available before starting
+    bind_host = os.environ.get("ISSUE_ORCHESTRATOR_CALLBACK_BIND", "127.0.0.1")
+    if port != 0 and bind_host == "127.0.0.1":
+        # Preserve Native restart behavior; other binds must never kill listeners.
         ensure_port_available(port)
 
     import uvicorn
 
     config = uvicorn.Config(
         app,
-        host="127.0.0.1",
+        host=bind_host,
         port=port,
         log_level="warning",  # Reduce noise, we have our own logging
         timeout_graceful_shutdown=0,  # Exit immediately when shutdown requested
@@ -616,7 +617,7 @@ async def run_web_dashboard(
             logger.info("[web] Starting uvicorn server on %s", url)
             webbrowser.open(url)
             return
-        logger.info("[web] Starting uvicorn server on 127.0.0.1:%d", actual_port)
+        logger.info("[web] Starting uvicorn server on %s:%d", bind_host, actual_port)
 
     asyncio.create_task(after_server_started())
 

@@ -78,9 +78,35 @@ authorize stop. A wrong daemon/foreign label cannot authorize termination.
 
 ## Explicit callback addressing and remaining gates
 
+The launch packet's sealed `network` selects `worker_ipv4`, `controller_ipv4`,
+canonical RFC1918 `subnet`, `gateway`, safe `br-` interface `bridge_name`, and one
+to three unique public IPv4 `dns` servers. The generated create intent fixes the
+worker IP, DNS and `net.ipv6.conf.all.disable_ipv6=1`. Full `worker_authority`
+projection requires this descriptor; only the isolated `network_id:none`
+source primitive may omit it.
+
+Before create and again before hooks/provider exec, the existing Docker
+transport verifies the exact selected local bridge, subnet/gateway, IPv6 off,
+non-internal mode, bridge interface and ICC on, plus the controller's selected
+IPv4 membership. Created worker inspection requires exactly one selected IPv4
+endpoint, matching DNS, and the fixed IPv6 sysctl. No bridge/firewall is
+configured here. These readbacks and the sealed firewall-policy hash do not
+prove egress filtering or DNS forwarding; actual-host #169 acceptance remains
+separate. See Docker's [network flags](https://docs.docker.com/reference/cli/docker/container/run/)
+and [bridge options](https://docs.docker.com/engine/network/drivers/bridge/#options).
+ICC on is not an isolation claim: a separately qualified native bridge-family
+fence must deny other switched traffic. This avoids Docker's ICC-off path that
+can load `br_netfilter` and enable host-wide bridge filtering; the selected
+daemon's userland proxy must remain enabled. Admission remains closed.
+
 Native callback addressing remains loopback. Trusted deployment may set
 `ISSUE_ORCHESTRATOR_CALLBACK_BIND` and `ISSUE_ORCHESTRATOR_CALLBACK_HOST`;
-the runtime endpoint publishes the actual bound port and passes a validated
+both the Control API server and web dashboard honor the selected binding.
+An explicit non-loopback binding leaves occupied-port failure to the server
+instead of trying to terminate other listeners. For an automatically assigned
+port, start paused, verify the published bound endpoint, and install the exact
+network exception before attaching a worker. Restart requires re-verification.
+The runtime endpoint publishes the actual bound port and passes a validated
 `ISSUE_ORCHESTRATOR_API_ORIGIN` to all agent callback clients. The Docker server
 and dashboard select an authenticated callback scope admitting only completion
 submissions and exact issue-resume routes, with existing per-run capabilities.
@@ -95,9 +121,16 @@ read-only mounts with no writable ancestor. The backend verifies the outer
 envelope's inner checksum, mirrored subject, image and packet intent, then
 derives the worker's `XORETS_EXECUTION_CONTRACT` and digest from those sealed
 bytes. The path-only descriptor avoids a checksum cycle. Provider secrets
-cannot replace these seals or inject controller/GitHub credentials. Only the
-existing scoped callback token crosses separately in the Unix exec payload;
-ambient controller environment is not copied. A primitive without this
+cannot replace these seals or inject controller/GitHub credentials. The existing
+scoped callback token and exact allocation-owned completion
+capability cross separately in the private Unix exec payload. The trusted
+launcher rejects provider overrides and resolves the capability from its typed
+run; Docker commands require that injected value instead of reading a controller
+capability file. Neither secret enters command text, launch packets or public
+receipts, and ambient controller environment is not copied. Docker rework
+remains explicitly unsupported until its separate spawn seam carries that
+allocation authority; synthetic acceptance keeps its correction budget at zero.
+A primitive without this
 descriptor receives no execution authority. This projection grants no model
 admission.
 Native keeps its previous callback allowlist. Reaching an origin alone does
