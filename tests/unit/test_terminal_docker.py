@@ -139,6 +139,17 @@ def test_wrong_command_never_creates_worker(launch):
     assert calls == [] and engine.starts == 0
 
 
+def test_docker_exec_receives_only_the_explicit_scoped_callback_token(launch, monkeypatch):
+    runner, engine, packet, calls = launch
+    monkeypatch.setenv("ISSUE_ORCHESTRATOR_AGENT_CALLBACK_TOKEN", "d" * 64)
+    monkeypatch.setenv("ISSUE_ORCHESTRATOR_API_TOKEN", "admin-not-forwarded")
+    monkeypatch.setenv("GH_TOKEN", "github-not-forwarded")
+    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    runner.on_orchestrator_shutdown()
+    assert engine.created_exec["Env"] == ["ISSUE_ORCHESTRATOR_AGENT_CALLBACK_TOKEN=" + "d" * 64]
+    assert "d" * 64 not in repr(calls)
+
+
 def test_changed_daemon_never_stops_a_foreign_worker(launch):
     runner, engine, packet, calls = launch
     assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")

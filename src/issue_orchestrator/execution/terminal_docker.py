@@ -13,7 +13,6 @@ from pathlib import Path
 import re
 import selectors
 import signal
-import stat
 import subprocess
 import threading
 import time
@@ -23,31 +22,10 @@ from ..domain.docker_execution import DockerSessionState
 from ..domain.session_run import SessionRunAssets
 from ..infra.hooks.hookspec import hookimpl
 from .docker_engine import DockerEngine
+from .docker_launch_input import canonical as canonical, sealed_bytes as sealed_bytes
+from .docker_worker_authority import worker_environment
 
 logger = logging.getLogger(__name__)
-
-
-def sealed_bytes(path: Path, *, expected: str | None = None, limit: int = 1024 * 1024) -> bytes:
-    """Read the controller's sealed input without following a replacement link."""
-    if not path.is_absolute() or path.resolve(strict=True) != path:
-        raise ValueError("Docker launch input path is not canonical")
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    try:
-        info = os.fstat(descriptor)
-        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
-                info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o400):
-            raise ValueError("Docker launch input is not a sealed owned file")
-        with os.fdopen(descriptor, "rb", closefd=False) as source:
-            raw = source.read(limit + 1)
-        if len(raw) > limit or expected is not None and sha256(raw).hexdigest() != expected:
-            raise ValueError("Docker launch input digest/size changed")
-        return raw
-    finally:
-        os.close(descriptor)
-
-
-def canonical(value: dict) -> bytes:
-    return (json.dumps(value, sort_keys=True, indent=2) + "\n").encode()
 
 
 def require_worker_identity(actual: dict, container_id: str, launch_digest: str) -> None:
@@ -140,7 +118,8 @@ def run_cli(argv: list[str], *, environment: dict[str, str], timeout: float, dia
 
 class DockerPlugin:
     """SessionRunner implementation; an absent/mismatched packet always refuses."""
-    def __init__(self, *, launch_path: Path | None = None, engine: DockerEngine | None = None):
+    def __init__(self, *, launch_path: Path | None = None, engine: DockerEngine | None = None, callback_token: str | None = None):
+        self._callback_token = callback_token
         raw = launch_path or os.environ.get("ISSUE_ORCHESTRATOR_DOCKER_LAUNCH")
         self.launch_path = Path(raw) if raw else None
         template = os.environ.get("ISSUE_ORCHESTRATOR_DOCKER_TEMPLATE")
@@ -176,6 +155,8 @@ class DockerPlugin:
                 session_name, str(run.worktree_path), os.environ.get("XORETS_EXECUTION_DIGEST")):
             raise ValueError("Docker template session/worktree/contract binding changed")
         contract_path = Path(os.environ.get("XORETS_EXECUTION_CONTRACT", ""))
+        if packet.get("worker_authority", {}).get("engine_contract_path", str(contract_path)) != str(contract_path):
+            raise ValueError("Docker worker projection differs from controller contract path")
         contract = json.loads(sealed_bytes(contract_path, expected=packet["contract_sha256"]))
         declaration = contract.get("execution", {}).get("docker_launch", {})
         intent = {key: value for key, value in packet.items() if key not in {"contract_sha256", "run_id", "engine_run_dir", "command_sha256"}}
@@ -377,6 +358,8 @@ class DockerPlugin:
             assert self.launch_path is not None
             if (packet["session_name"], packet["working_dir"], packet["command_sha256"]) != (session_name, working_dir, sha256(command.encode()).hexdigest()):
                 raise ValueError("Docker launch command/session/worktree changed")
+            environment_values = worker_environment(packet, secret_env or {},
+                self._callback_token or os.environ.get("ISSUE_ORCHESTRATOR_AGENT_CALLBACK_TOKEN"))
             launch_digest = sha256(canonical(packet)).hexdigest()
             with self._lock:
                 descriptor = os.open(self.receipt_path(), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -417,7 +400,7 @@ class DockerPlugin:
             # API payload is over the trusted Unix socket, never provider argv.
             payload = {"AttachStdout": True, "AttachStderr": True, "AttachStdin": False, "Tty": False,
                 "User": packet["user"], "WorkingDir": working_dir, "Cmd": ["/bin/sh", "-c", command],
-                "Env": [name + "=" + value for name, value in (secret_env or {}).items()]}
+                "Env": [name + "=" + value for name, value in environment_values.items()]}
             exec_id = self.engine.request("POST", f"/containers/{container_id}/exec", payload)["Id"]
             if not re.fullmatch(r"[0-9a-f]{64}", exec_id):
                 raise ValueError("Docker did not return immutable provider exec identity")

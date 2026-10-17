@@ -88,6 +88,18 @@ Host Git preflight, review exchange and all operator routes refuse that token;
 workers cannot choose a host worktree and execute its Git hooks through the
 service. Managed `coding-done` already delegates publication to the controller;
 direct Docker preflight/exchange helpers report unsupported rather than a pass.
+
+An optional `worker_authority` packet descriptor binds exact canonical outer
+Builder and inner engine authority file paths. Both files require exact
+read-only mounts with no writable ancestor. The backend verifies the outer
+envelope's inner checksum, mirrored subject, image and packet intent, then
+derives the worker's `XORETS_EXECUTION_CONTRACT` and digest from those sealed
+bytes. The path-only descriptor avoids a checksum cycle. Provider secrets
+cannot replace these seals or inject controller/GitHub credentials. Only the
+existing scoped callback token crosses separately in the Unix exec payload;
+ambient controller environment is not copied. A primitive without this
+descriptor receives no execution authority. This projection grants no model
+admission.
 Native keeps its previous callback allowlist. Reaching an origin alone does
 not establish cross-run authorization or network qualification.
 
