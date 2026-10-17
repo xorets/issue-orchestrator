@@ -33,6 +33,9 @@ Host initialization, build inputs and implicit image volumes are refused. The
 returned container is checked against exact daemon/image/name/mount/user,
 network, read-only root, no capabilities, no-new-privileges, no logging and
 memory/swap/CPU/PID bounds before any admitted project hook or provider runs.
+Image references may be a registry `repository@sha256` manifest digest or an
+exact local `sha256:<image ID>` whose selected value equals inspected `Id`.
+Tags and fabricated registry digests are not accepted.
 Lifecycle hooks run by Docker exec inside that verified worker; `postAttach`
 and interactive input are unsupported in this first noninteractive backend.
 
@@ -78,9 +81,15 @@ authorize stop. A wrong daemon/foreign label cannot authorize termination.
 Native callback addressing remains loopback. Trusted deployment may set
 `ISSUE_ORCHESTRATOR_CALLBACK_BIND` and `ISSUE_ORCHESTRATOR_CALLBACK_HOST`;
 the runtime endpoint publishes the actual bound port and passes a validated
-`ISSUE_ORCHESTRATOR_API_ORIGIN` to all agent callback clients. Existing route
-allowlists and run completion capabilities remain authoritative. Reaching an
-origin is not evidence that cross-run callback authorization passed.
+`ISSUE_ORCHESTRATOR_API_ORIGIN` to all agent callback clients. The Docker server
+and dashboard select an authenticated callback scope admitting only completion
+submissions and exact issue-resume routes, with existing per-run capabilities.
+Host Git preflight, review exchange and all operator routes refuse that token;
+workers cannot choose a host worktree and execute its Git hooks through the
+service. Managed `coding-done` already delegates publication to the controller;
+direct Docker preflight/exchange helpers report unsupported rather than a pass.
+Native keeps its previous callback allowlist. Reaching an origin alone does
+not establish cross-run authorization or network qualification.
 
 This source does not provision storage quotas, daemon capacity accounting,
 private-network protection, image/tool installation, credentials or provider

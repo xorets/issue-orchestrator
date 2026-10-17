@@ -26,10 +26,10 @@ from ._auth_middleware import (
     AuthSurfaceConfig,
     evaluate_request,
     handle_login_post,
-    is_agent_callback_route,
     issue_sse_token_response,
 )
 from .brand_assets import read_logo_svg
+from .control_api import is_configured_agent_callback_route
 from .timeline_presentation import (
     _decorate_timeline_events,
     _is_agent_scoped_event,
@@ -126,7 +126,7 @@ _DASHBOARD_SURFACE = AuthSurfaceConfig(
     public_paths=_DASHBOARD_UNAUTHENTICATED_PATHS,
     name="web_dashboard",
     public_prefixes=_DASHBOARD_UNAUTHENTICATED_PREFIXES,
-    agent_callback_matcher=is_agent_callback_route,
+    agent_callback_matcher=is_configured_agent_callback_route,
 )
 
 

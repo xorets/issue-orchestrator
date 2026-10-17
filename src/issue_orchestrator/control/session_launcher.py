@@ -55,7 +55,7 @@ from ..domain.coder_prompt import (
 )
 from ..domain.session_run import SessionRunAssets
 from ..ports.issue_run_allocator import IssueRunAllocator
-from ..ports.session_preparation import SessionPreparation
+from ..ports.session_preparation import NO_SESSION_PREPARATION, SessionPreparation
 from .worktree import WorktreeSetupError
 from .worktree_context import WorktreeContext, worktree_reuse_options
 from .published_review_launch_gate import refuse_launch_over_published_review
@@ -2141,7 +2141,7 @@ class SessionLauncher:
             label_manager=self._lm,
             session_exists=self._session_exists,
             create_session=self._create_session,
-            session_preparation=self._session_preparation,
+            session_preparation=self._session_preparation or NO_SESSION_PREPARATION,
             apply_actions=self._apply_actions,
             worktree_reuse_options=self._worktree_reuse_options,
             session_identity_launch_metadata=self._session_identity_launch_metadata,

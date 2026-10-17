@@ -689,6 +689,8 @@ def run_preflight_push_check(worktree: Path, verbose: bool = False) -> tuple[boo
     Returns:
         Tuple of (would_succeed, error_message, fix_hint)
     """
+    if os.environ.get("ISSUE_ORCHESTRATOR_CALLBACK_SCOPE") == "docker":
+        return False, "Docker host Git preflight is not admitted; controller owns publication", None
     import urllib.request
     import urllib.error
 

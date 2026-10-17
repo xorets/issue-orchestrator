@@ -70,6 +70,8 @@ _AGENT_CALLBACK_ROUTES: frozenset[str] = frozenset(
         "/api/completion/submissions",
     }
 )
+_SCOPED_CALLBACK_ROUTES = {"native": _AGENT_CALLBACK_ROUTES,
+    "docker": frozenset({"/api/completion/submissions"})}
 
 # ``/api/issues/{issue_number}/resume`` has a variable segment, so it is
 # matched against the declared route template exactly. A prefix+suffix
@@ -81,19 +83,25 @@ _AGENT_CALLBACK_ROUTE_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 
-def is_agent_callback_route(path: str) -> bool:
+def is_agent_callback_route(path: str, *, scope: str = "native") -> bool:
     """Whether ``path`` is reachable with the scoped agent-callback token.
 
     Shared by every surface that serves these routes. The Web Dashboard
     mounts ``control_app`` at ``""``, so it serves them too and must
     apply the same answer — see the module docstring.
     """
-    if path in _AGENT_CALLBACK_ROUTES:
+    if scope not in _SCOPED_CALLBACK_ROUTES:
+        return False
+    if path in _SCOPED_CALLBACK_ROUTES[scope]:
         return True
     return any(
         pattern.match(path) is not None
         for pattern in _AGENT_CALLBACK_ROUTE_PATTERNS
     )
+
+
+def callback_scope_for(config: object) -> str:
+    return "docker" if getattr(config, "terminal_adapter", None) == "issue_orchestrator.execution.terminal_docker:DockerPlugin" else "native"
 
 
 BROWSER_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})

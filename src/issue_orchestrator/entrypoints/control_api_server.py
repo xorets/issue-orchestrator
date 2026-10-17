@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from ..infra import browser_session
 from ..infra.api_token import resolve_agent_callback_token, resolve_api_token
-from ._auth_middleware import install_access_log_redaction
+from ._auth_middleware import callback_scope_for, install_access_log_redaction
 from .control_api import configure_api_token, control_app, set_orchestrator
 
 if TYPE_CHECKING:
@@ -67,7 +67,8 @@ class ControlAPIServer:
         # See security #5987 (F3) and #6017 review (P2).
         admin_token = resolve_api_token()
         agent_callback_token = resolve_agent_callback_token()
-        configure_api_token(admin_token, agent_callback=agent_callback_token)
+        configure_api_token(admin_token, agent_callback=agent_callback_token,
+            agent_callback_scope=callback_scope_for(getattr(self.orchestrator, "config", None)))
         # Initialize the browser-session HMAC secret + tunables so the
         # Control Center UI can establish an ``io_session`` cookie on
         # first visit (#6017 re-review P3). YAML config supplies the

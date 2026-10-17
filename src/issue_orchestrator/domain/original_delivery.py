@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
 import re
+from typing import Any
 
 
 class OriginalDeliveryOperation(StrEnum):
@@ -139,11 +140,11 @@ class OriginalDelivery:
             value = {**value, "execution_backend": "native", "docker_custody": []}
         if type(value) is not dict or set(value) != set(cls.__dataclass_fields__):
             raise ValueError("original delivery field set is invalid")
-        decoded = dict(value)
+        decoded: dict[str, Any] = dict(value)
         if type(decoded["docker_custody"]) not in {tuple, list} or any(type(item) is not dict for item in decoded["docker_custody"]):
             raise ValueError("Docker custody history must be a sequence")
         try:
-            decoded["docker_custody"] = tuple(DockerCustody(**item) for item in decoded["docker_custody"])
+            decoded["docker_custody"] = tuple(DockerCustody(**dict(item)) for item in decoded["docker_custody"])
         except TypeError as exc:
             raise ValueError("Docker custody field set is invalid") from exc
         for field in ("corrections", "correction_runs", "launches", "engine_history", "process_roots"):

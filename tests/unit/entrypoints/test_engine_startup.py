@@ -22,6 +22,7 @@ from issue_orchestrator.entrypoints.control_api import (
     configure_api_token,
     get_configured_agent_callback_token,
     get_configured_api_token,
+    is_configured_agent_callback_route,
 )
 from issue_orchestrator.entrypoints.engine_startup import EngineStartup
 from issue_orchestrator.entrypoints.web import (
@@ -42,6 +43,7 @@ class _FakeConfig:
     browser_session_ttl_seconds: int = 900
     sse_token_ttl_seconds: int = 10
     browser_session_max: int = 7
+    terminal_adapter: str | None = None
 
 
 @pytest.fixture
@@ -73,6 +75,18 @@ def _restore_auth_state():
 
 
 class TestConfigureAuth:
+    def test_docker_startup_publishes_only_capability_scoped_routes(self, startup, monkeypatch):
+        monkeypatch.setenv("ISSUE_ORCHESTRATOR_API_TOKEN", ADMIN_TOKEN)
+        monkeypatch.setenv(AGENT_CALLBACK_TOKEN_ENV_VAR, "synthetic-docker-callback-token")
+        config = _FakeConfig(terminal_adapter="issue_orchestrator.execution.terminal_docker:DockerPlugin")
+        startup.configure_auth(dev_no_auth=False, config=config)
+        assert is_configured_agent_callback_route("/api/completion/submissions")
+        assert is_configured_agent_callback_route("/api/issues/42/resume")
+        assert not is_configured_agent_callback_route("/api/preflight-push")
+        assert not is_configured_agent_callback_route("/api/review-exchange/respond")
+        with pytest.raises(ValueError, match="authenticated"):
+            startup.configure_auth(dev_no_auth=True, config=config)
+
     def test_publishes_the_callback_token_agents_inherit(
         self, startup: EngineStartup, monkeypatch: pytest.MonkeyPatch
     ) -> None:

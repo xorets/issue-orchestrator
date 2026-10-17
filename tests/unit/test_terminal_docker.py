@@ -235,6 +235,24 @@ def test_unsafe_generated_configuration_is_refused_before_cli_start(launch):
     assert calls == [] and engine.starts == 0
 
 
+def test_exact_local_image_id_is_supported_without_a_registry_digest(launch):
+    runner, engine, packet, calls = launch
+    packet["image"] = packet["image_id"]
+    config = Path(packet["devcontainer_config"])
+    content = json.loads(config.read_bytes())
+    content["image"] = packet["image"]
+    config.chmod(0o600)
+    config.write_bytes(canonical(content))
+    config.chmod(0o400)
+    packet["devcontainer_config_sha256"] = sha256(config.read_bytes()).hexdigest()
+    runner.launch_path.chmod(0o600)
+    runner.launch_path.write_bytes(canonical(packet))
+    runner.launch_path.chmod(0o400)
+    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    runner.on_orchestrator_shutdown()
+    assert runner.public_receipt("issue-42")["provider_exec_id"] == "3" * 64
+
+
 def test_cli_timeout_kills_descendants_after_the_cli_leader_exits(tmp_path):
     import sys
     import select

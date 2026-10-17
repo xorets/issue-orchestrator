@@ -131,6 +131,8 @@ def build_verdict(args: argparse.Namespace) -> ExchangeVerdict:
 
 def _deliver(key: str, port: str, verdict: ExchangeVerdict) -> tuple[bool, str]:
     """POST the verdict to the Control API. Returns (accepted, message)."""
+    if os.environ.get("ISSUE_ORCHESTRATOR_CALLBACK_SCOPE") == "docker":
+        return False, "Docker review-exchange callbacks are not admitted"
     url = callback_url("/api/review-exchange/respond", port)
     body = json.dumps({"key": key, "payload": dict(verdict.to_wire())}).encode("utf-8")
     req = urllib.request.Request(

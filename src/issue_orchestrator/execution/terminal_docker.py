@@ -19,6 +19,7 @@ import threading
 import time
 
 from ..domain.original_delivery import DockerCustody
+from ..domain.docker_execution import DockerSessionState
 from ..domain.session_run import SessionRunAssets
 from ..infra.hooks.hookspec import hookimpl
 from .docker_engine import DockerEngine
@@ -47,6 +48,12 @@ def sealed_bytes(path: Path, *, expected: str | None = None, limit: int = 1024 *
 
 def canonical(value: dict) -> bytes:
     return (json.dumps(value, sort_keys=True, indent=2) + "\n").encode()
+
+
+def require_worker_identity(actual: dict, container_id: str, launch_digest: str) -> None:
+    if (actual.get("Id") != container_id or
+            actual.get("Config", {}).get("Labels", {}).get("io.builder.launch") != launch_digest):
+        raise ValueError("Docker worker custody changed")
 
 
 def hook_argv(command: object) -> list[str]:
@@ -108,7 +115,8 @@ def run_cli(argv: list[str], *, environment: dict[str, str], timeout: float, dia
                     raise ValueError("Dev Container CLI output bound exhausted")
                 else:
                     key.data.extend(chunk)
-        if child.wait(timeout=max(0.001, deadline - time.monotonic())) != 0:
+        exit_code = child.wait(timeout=max(0.001, deadline - time.monotonic()))
+        if exit_code != 0:
             raise ValueError("Dev Container CLI refused")
         completed = True
         return bytes(output)
@@ -224,8 +232,13 @@ class DockerPlugin:
                      "docker_cli_sha256", "node_sha256", "storage_policy_sha256", "network_policy_sha256", "controller_container_id"):
             if type(packet.get(name)) is not str or not re.fullmatch(r"[0-9a-f]{64}", packet[name]):
                 raise ValueError("Docker launch digest is invalid: " + name)
-        if not re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", packet.get("image", "")) or not re.fullmatch(r"sha256:[0-9a-f]{64}", packet.get("image_id", "")):
+        image = packet.get("image", "")
+        if (type(image) is not str or not (re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", image) or
+                re.fullmatch(r"sha256:[0-9a-f]{64}", image)) or
+                not re.fullmatch(r"sha256:[0-9a-f]{64}", packet.get("image_id", ""))):
             raise ValueError("Docker image is not immutable")
+        if image.startswith("sha256:") and image != packet["image_id"]:
+            raise ValueError("Docker local image identity changed")
         if packet.get("read_only") is not True or not re.fullmatch(r"[1-9][0-9]*:[1-9][0-9]*", packet["user"]):
             raise ValueError("Docker root/user policy is invalid")
 
@@ -308,8 +321,7 @@ class DockerPlugin:
         if self.engine.request("GET", "/info").get("ID") != record["daemon_id"]:
             raise ValueError("Docker daemon identity changed")
         actual = self.engine.request("GET", f"/containers/{record['container_id']}/json")
-        if actual.get("Id") != record["container_id"] or actual.get("Config", {}).get("Labels", {}).get("io.builder.launch") != record["launch_sha256"]:
-            raise ValueError("Docker worker custody changed")
+        require_worker_identity(actual, record["container_id"], record["launch_sha256"])
         return actual
 
     def _recover_created_identity(self, packet: dict) -> None:
@@ -321,9 +333,9 @@ class DockerPlugin:
             raise ValueError("Docker daemon changed during create reconciliation")
         actual = self.engine.request("GET", f"/containers/{packet['container_name']}/json")
         container_id = actual.get("Id", "")
-        if (not re.fullmatch(r"[0-9a-f]{64}", container_id) or
-                actual.get("Config", {}).get("Labels", {}).get("io.builder.launch") != self._record["launch_sha256"]):
+        if not re.fullmatch(r"[0-9a-f]{64}", container_id):
             raise ValueError("Docker unacknowledged create identity is unknown")
+        require_worker_identity(actual, container_id, self._record["launch_sha256"])
         self._record["container_id"] = container_id
         self._save()
 
@@ -332,9 +344,10 @@ class DockerPlugin:
         host = actual.get("HostConfig", {})
         config = actual.get("Config", {})
         limits = packet["limits"]
-        if (actual.get("Id") != container_id or actual.get("Image") != packet["image_id"] or
+        require_worker_identity(actual, container_id, launch_digest)
+        if (actual.get("Image") != packet["image_id"] or
                 actual.get("Name") != "/" + packet["container_name"] or
-                config.get("User") != packet["user"] or config.get("Labels", {}).get("io.builder.launch") != launch_digest or
+                config.get("User") != packet["user"] or
                 config.get("Volumes") or host.get("ReadonlyRootfs") is not True or host.get("Privileged") is not False or
                 host.get("CapAdd") or set(host.get("CapDrop") or []) != {"ALL"} or
                 set(host.get("SecurityOpt") or []) != {"no-new-privileges:true"} or
@@ -374,7 +387,7 @@ class DockerPlugin:
                     "run_id": packet["run_id"], "session_name": session_name, "issue_number": session_id,
                     "contract_sha256": packet["contract_sha256"], "launch_sha256": launch_digest,
                     "daemon_id": packet["daemon_id"], "controller_container_id": packet["controller_container_id"],
-                    "container_id": "", "provider_exec_id": "", "state": "reserved", "output_bytes": 0,
+                    "container_id": "", "provider_exec_id": "", "state": DockerSessionState.RESERVED, "output_bytes": 0,
                     "overflow": False, "provider_exit_code": None, "error": ""}
                 self._record["hook_execs"] = []
                 self._save()
@@ -397,7 +410,7 @@ class DockerPlugin:
             if not re.fullmatch(r"[0-9a-f]{64}", container_id):
                 raise ValueError("Dev Container CLI did not return immutable container identity")
             self._record["container_id"] = container_id
-            self._record["state"] = "created"
+            self._record["state"] = DockerSessionState.CREATED
             self._save()
             self._validate_created(packet, container_id, launch_digest)
             self._run_hooks(packet)
@@ -409,7 +422,7 @@ class DockerPlugin:
             if not re.fullmatch(r"[0-9a-f]{64}", exec_id):
                 raise ValueError("Docker did not return immutable provider exec identity")
             self._record["provider_exec_id"] = exec_id
-            self._record["state"] = "exec-created"
+            self._record["state"] = DockerSessionState.EXEC_CREATED
             self._save()  # Durable before the only allowed exec start.
             self._watcher = threading.Thread(target=self._run_provider, daemon=True)
             self._watcher.start()
@@ -418,7 +431,7 @@ class DockerPlugin:
             logger.exception("Docker session creation refused; no Native fallback")
             if reserved and self._record is not None:
                 self._record["error"] = "launch-refused-or-uncertain"
-                self._record["state"] = "retained"
+                self._record["state"] = DockerSessionState.RETAINED
                 self._save()
                 if not self._record.get("container_id") and packet is not None:
                     try:
@@ -430,7 +443,7 @@ class DockerPlugin:
                         self.kill_session(session_id, session_name)
                     except Exception:
                         self._record["error"] = "container-stop-unproven"
-                        self._record["state"] = "retained"
+                        self._record["state"] = DockerSessionState.RETAINED
                         self._save()
             return False
 
@@ -441,7 +454,7 @@ class DockerPlugin:
             self.kill_session(self._record["issue_number"], self._record["session_name"])
         except Exception:
             self._record["error"] = "deadline-stop-unproven"
-            self._record["state"] = "retained"
+            self._record["state"] = DockerSessionState.RETAINED
             self._save()
 
     def _run_hooks(self, packet: dict) -> None:
@@ -507,7 +520,7 @@ class DockerPlugin:
                     destination.write(chunk)
                     destination.flush()
                     record["output_bytes"] += len(chunk)
-                record["state"] = "starting"
+                record["state"] = DockerSessionState.STARTING
                 self._save()
                 remaining = (packet["deadline_unix_ns"] - time.time_ns()) / 1e9
                 if remaining <= 0:
@@ -526,7 +539,7 @@ class DockerPlugin:
                 self.kill_session(record["issue_number"], record["session_name"])
             except Exception:
                 record["error"] = "container-stop-unproven"
-                record["state"] = "retained"
+                record["state"] = DockerSessionState.RETAINED
                 self._save()
 
     def custody(self, session_name: str) -> DockerCustody:
@@ -566,7 +579,7 @@ class DockerPlugin:
             raise ValueError("Docker stop target is unknown; retain evidence")
         self._inspect_owned(record)
         self.engine.stop(record["container_id"])
-        record["state"] = "stopped"
+        record["state"] = DockerSessionState.STOPPED
         self._save()
 
     @hookimpl

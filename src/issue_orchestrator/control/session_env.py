@@ -100,6 +100,7 @@ def build_session_env_exports(
     orch_bin = Path(sys.executable).parent
     orch_src = Path(__file__).resolve().parents[2]
     runtime_tool_assignments = " ".join(build_agent_tool_env_assignments(worktree_path))
+    callback_scope = " ISSUE_ORCHESTRATOR_CALLBACK_SCOPE='docker'" if getattr(config, "terminal_adapter", None) == "issue_orchestrator.execution.terminal_docker:DockerPlugin" else ""
     return (
         f"export {ENV_PREFIX}COMPLETION_PATH='{completion_path}'"
         f" {ENV_PREFIX}SESSION_ID='{session_id}'"
@@ -107,6 +108,7 @@ def build_session_env_exports(
         f" {ENV_PREFIX}ISSUE_NUMBER='{issue_number}'"
         f"{config_exports(config.config_path, config.configuration_mode)}"
         f"{api_port_export(config.control_api_port, callback_endpoint)}"
+        f"{callback_scope}"
         f" {ENV_PREFIX}VALIDATION_OUTPUT_DIR='{run_dir}'"
         f" {ENV_PREFIX}RUN_DIR='{run_dir}'"
         f" {ENV_PREFIX}WORKTREE='{worktree_path}'"
