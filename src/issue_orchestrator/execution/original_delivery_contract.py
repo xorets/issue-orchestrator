@@ -47,6 +47,8 @@ def _require_contract_binding(contract: object, owner: OriginalDelivery, config:
     supervised = contract.get("supervised", {})
     if not all(isinstance(part, dict) for part in (repository, execution, branch, supervised)):
         raise ValueError("Original supervised contract binding is invalid")
+    if execution.get("backend", "native") != owner.execution_backend:
+        raise ValueError("Original supervised execution backend changed")
     if (repository.get("name"), repository.get("engine_root"), execution.get("workspace"),
             execution.get("agent_label"), execution.get("session_name"), execution.get("logical_child"), branch.get("name")) != (
             owner.repository, str(config.repo_root), owner.worktree, owner.agent, owner.session_name, owner.logical_child, owner.branch):

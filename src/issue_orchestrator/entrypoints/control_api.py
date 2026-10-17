@@ -221,6 +221,11 @@ if STATIC_DIR.exists():
 # left the engine with no callback token at all (#6924).
 _admin_token: str | None = None
 _agent_callback_token: str | None = None
+_agent_callback_scope = "native"
+
+
+def is_configured_agent_callback_route(path: str) -> bool:
+    return is_agent_callback_route(path, scope=_agent_callback_scope)
 
 # Paths that must remain accessible without any authentication —
 # browser chrome, static assets, the login form, and favicon. The
@@ -247,7 +252,7 @@ _CONTROL_API_SURFACE = AuthSurfaceConfig(
     public_paths=_UNAUTHENTICATED_PATHS,
     name="control_api",
     public_prefixes=_UNAUTHENTICATED_PREFIXES,
-    agent_callback_matcher=is_agent_callback_route,
+    agent_callback_matcher=is_configured_agent_callback_route,
 )
 
 
@@ -273,6 +278,7 @@ def configure_api_token(
     admin: str | None,
     *,
     agent_callback: str | None = None,
+    agent_callback_scope: str = "native",
 ) -> None:
     """Enable (or disable) bearer-token enforcement on the Control API.
 
@@ -284,9 +290,14 @@ def configure_api_token(
     ``Authorization: Bearer <agent_callback>`` is accepted on the
     allowlisted routes.
     """
-    global _admin_token, _agent_callback_token
+    if agent_callback_scope not in {"native", "docker"}:
+        raise ValueError("Unknown agent callback scope")
+    if agent_callback_scope == "docker" and (admin is None or agent_callback is None):
+        raise ValueError("Docker callbacks require authenticated operator and agent tokens")
+    global _admin_token, _agent_callback_token, _agent_callback_scope
     _admin_token = admin
     _agent_callback_token = agent_callback
+    _agent_callback_scope = agent_callback_scope
 
 
 def get_configured_api_token() -> str | None:

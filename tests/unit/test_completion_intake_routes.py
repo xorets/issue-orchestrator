@@ -217,8 +217,19 @@ def test_historical_endpoint_returns_real_failed_validation_then_parked_admissio
     assert parked.json()["evidence_id"].startswith("e1:")
 
 
+@pytest.fixture(params=["native", "docker"])
+def resume_callback_scope(request, fake_browser_auth):
+    from issue_orchestrator.entrypoints.control_api import configure_api_token
+    configure_api_token(fake_browser_auth.admin_token, agent_callback=fake_browser_auth.agent_callback_token,
+        agent_callback_scope=request.param)
+    try:
+        yield request.param
+    finally:
+        configure_api_token(fake_browser_auth.admin_token, agent_callback=fake_browser_auth.agent_callback_token)
+
+
 def test_resume_requires_capability_bound_exact_receipt_and_ignores_canonical_file(
-    auth_enabled_control_client, fake_browser_auth, intake_route_engine, monkeypatch
+    auth_enabled_control_client, fake_browser_auth, intake_route_engine, monkeypatch, resume_callback_scope
 ):
     import json
     from dataclasses import replace

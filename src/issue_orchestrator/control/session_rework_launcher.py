@@ -30,7 +30,7 @@ from ..events import EventName
 from ..infra.config import Config
 from ..infra.repo_scope import require_repo
 from ..infra.logging_config import issue_log, log_context
-from ..ports import EventSink, RepositoryHost
+from ..ports import EventSink, RepositoryHost, NO_SESSION_PREPARATION, SessionPreparation
 from ..ports.event_sink import make_run_scoped_event, make_trace_event
 from ..ports.session_output import SessionOutput
 from ..ports.coder_prompt import CoderPromptAddendumProvider
@@ -153,7 +153,6 @@ class StackDecisionResolverFn(Protocol):
 @dataclass(frozen=True)
 class ReworkLaunchDependencies:
     """Dependencies needed by the rework launch coordinator."""
-
     config: Config
     events: EventSink
     repository_host: RepositoryHost
@@ -178,6 +177,7 @@ class ReworkLaunchDependencies:
     scoped_rework: ScopedReworkLaunch
     claim_manager: ClaimManager | None = None
     original_runtime_identity: Callable[[], tuple[str, int, str]] | None = None
+    session_preparation: SessionPreparation = NO_SESSION_PREPARATION
 
 
 @dataclass(frozen=True)
@@ -587,6 +587,7 @@ def launch_rework_session(
 
         if failure := deps.scoped_rework.before_spawn(scoped.keys, run.identity):
             return failure
+        deps.session_preparation.prepare_session(run, session_name, command)
         session_created = deps.create_session(
             session_name,
             command,

@@ -23,7 +23,7 @@ from ...domain.claim import (
 )
 from ...domain.lease_config import LeaseConfig
 from ...domain.session_run import SessionRunAssets
-from ...domain.original_delivery import OriginalDelivery, bind_correction_run, transition
+from ...domain.original_delivery import DockerCustody, OriginalDelivery, bind_correction_run, transition
 from ...domain.run_ledger import (
     RunLedger,
     RunLedgerDecodeError,
@@ -477,11 +477,21 @@ class GitHubRefClaimAdapter(ClaimManager):
     def bind_original_processes(self, issue_number: int, lease_id: str, fence: str,
                                 roots: tuple[tuple[str, int, str, int, str], ...]) -> bool:
         claim, current = self.original_claim(issue_number)
-        if current != fence or claim.original is None or claim.original.released:
+        if current != fence or claim.original is None or claim.original.released or claim.original.execution_backend != "native":
             return False
         merged = tuple(dict.fromkeys((*claim.original.process_roots, *roots)))
         return self._replace_original(issue_number, lease_id, fence,
             dataclasses.replace(claim.original, process_roots=merged))
+
+    def bind_original_docker_custody(self, issue_number: int, lease_id: str, fence: str,
+                                    custody: tuple[DockerCustody, ...]) -> bool:
+        claim, current = self.original_claim(issue_number)
+        owner = claim.original
+        if current != fence or owner is None or owner.released or owner.execution_backend != "docker":
+            return False
+        merged = tuple(dict.fromkeys((*owner.docker_custody, *custody)))
+        return self._replace_original(issue_number, lease_id, fence,
+            dataclasses.replace(owner, docker_custody=merged))
 
     def _replace_original(self, issue_number: int, lease_id: str, fence: str,
                           owner: OriginalDelivery, *, renew: bool = False) -> bool:

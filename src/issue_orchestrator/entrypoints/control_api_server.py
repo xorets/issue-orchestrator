@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from ..infra import browser_session
 from ..infra.api_token import resolve_agent_callback_token, resolve_api_token
-from ._auth_middleware import install_access_log_redaction
+from ._auth_middleware import callback_scope_for, install_access_log_redaction
 from .control_api import configure_api_token, control_app, set_orchestrator
 
 if TYPE_CHECKING:
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 class ControlAPIServer:
     """Manages the control API server lifecycle."""
 
-    def __init__(self, orchestrator: "Orchestrator", port: int = 19080):
+    def __init__(self, orchestrator: "Orchestrator", port: int = 19080, *, bind_host: str | None = None):
         """Initialize the control API server.
 
         Args:
@@ -41,6 +41,7 @@ class ControlAPIServer:
         """
         self.orchestrator = orchestrator
         self.port = port
+        self.bind_host = bind_host or os.environ.get("ISSUE_ORCHESTRATOR_CALLBACK_BIND", "127.0.0.1")
         self._server: Optional[Any] = None  # uvicorn.Server (imported inside start())
         self._task: Optional[asyncio.Task] = None
 
@@ -66,7 +67,8 @@ class ControlAPIServer:
         # See security #5987 (F3) and #6017 review (P2).
         admin_token = resolve_api_token()
         agent_callback_token = resolve_agent_callback_token()
-        configure_api_token(admin_token, agent_callback=agent_callback_token)
+        configure_api_token(admin_token, agent_callback=agent_callback_token,
+            agent_callback_scope=callback_scope_for(getattr(self.orchestrator, "config", None)))
         # Initialize the browser-session HMAC secret + tunables so the
         # Control Center UI can establish an ``io_session`` cookie on
         # first visit (#6017 re-review P3). YAML config supplies the
@@ -94,7 +96,7 @@ class ControlAPIServer:
         os.environ["ISSUE_ORCHESTRATOR_AGENT_CALLBACK_TOKEN"] = agent_callback_token
         config = uvicorn.Config(
             control_app,
-            host="127.0.0.1",
+            host=self.bind_host,
             port=self.port,
             log_level="warning",  # Quiet logging
             access_log=False,
@@ -142,7 +144,7 @@ class ControlAPIServer:
         self.orchestrator.deps.agent_callback_endpoint.publish_bound_port(
             self.port
         )
-        logger.info(f"Control API started on http://127.0.0.1:{self.port}")
+        logger.info("Control API started on http://%s:%s", self.bind_host, self.port)
 
     async def stop(self) -> None:
         """Stop the control API server."""

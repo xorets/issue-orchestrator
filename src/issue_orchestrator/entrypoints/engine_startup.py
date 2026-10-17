@@ -69,11 +69,14 @@ class EngineStartup:
             resolve_api_token,
         )
         from .control_api import configure_api_token
+        from ._auth_middleware import callback_scope_for
         from .web import configure_dashboard_admin_token
 
         session_ttl = getattr(config, "browser_session_ttl_seconds", None)
         sse_ttl = getattr(config, "sse_token_ttl_seconds", None)
         max_sessions = getattr(config, "browser_session_max", None)
+        if dev_no_auth and callback_scope_for(config) == "docker":
+            raise ValueError("Docker session callbacks require authenticated scope")
 
         if dev_no_auth:
             logger.error(
@@ -104,7 +107,7 @@ class EngineStartup:
         admin_token = resolve_api_token()
         configure_dashboard_admin_token(admin_token)
         agent_callback_token = resolve_agent_callback_token()
-        configure_api_token(admin_token, agent_callback=agent_callback_token)
+        configure_api_token(admin_token, agent_callback=agent_callback_token, agent_callback_scope=callback_scope_for(config))
         os.environ[AGENT_CALLBACK_TOKEN_ENV_VAR] = agent_callback_token
         # Derive the HMAC secret from the admin token so a session cookie
         # minted by the Control Center on port 19080 validates here too —

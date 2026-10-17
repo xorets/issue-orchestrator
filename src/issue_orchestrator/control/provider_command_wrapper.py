@@ -26,6 +26,7 @@ class ProviderCommandWrapper:
 
     retry_config: ShortRetryConfig
     lane_for_agent: Callable[[AgentConfig], ProviderLane] | None = None
+    maximum_attempts: int | None = None
 
     def runs_interactively(
         self,
@@ -81,7 +82,7 @@ class ProviderCommandWrapper:
             "--timeout-seconds",
             str(agent_config.timeout_minutes * 60),
             "--max-attempts",
-            str(self.retry_config.max_attempts),
+            str(self.retry_config.max_attempts if self.maximum_attempts is None else min(self.retry_config.max_attempts, self.maximum_attempts)),
             "--initial-backoff-seconds",
             str(self.retry_config.initial_backoff_seconds),
             "--max-backoff-seconds",

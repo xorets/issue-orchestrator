@@ -359,6 +359,16 @@ export interface DialogSectionPayload {
   title: string;
 }
 
+export interface DockerCustodyPayload {
+  container_id: string;
+  controller_container_id: string;
+  daemon_id: string;
+  launch_sha256: string;
+  provider_exec_id: string;
+  run_id: string;
+  schema_version: 1;
+}
+
 export interface DoctorCheckPayload {
   detail?: string | null;
   name?: string | null;
@@ -1035,10 +1045,12 @@ export interface OriginalDeliveryOwnerPayload {
   correction_runs: (string | number)[][];
   corrections: (string | number)[][];
   cycles: number;
+  docker_custody: DockerCustodyPayload[];
   engine_birth: string;
   engine_history: (string | number)[][];
   engine_host: string;
   engine_pid: number;
+  execution_backend: "native" | "docker";
   feedback: string;
   head_sha: string;
   launches: string[];

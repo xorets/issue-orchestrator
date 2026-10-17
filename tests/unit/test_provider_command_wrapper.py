@@ -46,6 +46,14 @@ def test_codex_exec_mode_uses_provider_runner(tmp_path: Path) -> None:
     assert "--no-jitter" in argv
 
 
+def test_admitted_one_launch_ceiling_disables_provider_retries(tmp_path: Path) -> None:
+    from dataclasses import replace
+    agent = AgentConfig(prompt_path=tmp_path / "prompt.md", provider="codex", provider_args={"execution_mode": "exec"})
+    wrapped = replace(_wrapper(), maximum_attempts=1).wrap("codex exec task", agent, tmp_path)
+    argv = shlex.split(wrapped)
+    assert argv[argv.index("--max-attempts") + 1] == "1"
+
+
 def test_codex_extra_exec_mode_uses_provider_runner(tmp_path: Path) -> None:
     agent = AgentConfig(prompt_path=tmp_path / "prompt.md", provider="codex")
 

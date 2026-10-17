@@ -1583,6 +1583,43 @@
             ],
             "type": "object"
         },
+        "DockerCustodyPayload": {
+            "additionalProperties": false,
+            "properties": {
+                "container_id": {
+                    "type": "string"
+                },
+                "controller_container_id": {
+                    "type": "string"
+                },
+                "daemon_id": {
+                    "type": "string"
+                },
+                "launch_sha256": {
+                    "type": "string"
+                },
+                "provider_exec_id": {
+                    "type": "string"
+                },
+                "run_id": {
+                    "type": "string"
+                },
+                "schema_version": {
+                    "const": 1,
+                    "type": "integer"
+                }
+            },
+            "required": [
+                "run_id",
+                "daemon_id",
+                "controller_container_id",
+                "container_id",
+                "provider_exec_id",
+                "launch_sha256",
+                "schema_version"
+            ],
+            "type": "object"
+        },
         "DoctorCheckPayload": {
             "additionalProperties": false,
             "properties": {
@@ -4731,6 +4768,12 @@
                     "minimum": 0,
                     "type": "integer"
                 },
+                "docker_custody": {
+                    "items": {
+                        "$ref": "#/components/schemas/DockerCustodyPayload"
+                    },
+                    "type": "array"
+                },
                 "engine_birth": {
                     "type": "string"
                 },
@@ -4756,6 +4799,13 @@
                 "engine_pid": {
                     "minimum": 0,
                     "type": "integer"
+                },
+                "execution_backend": {
+                    "enum": [
+                        "native",
+                        "docker"
+                    ],
+                    "type": "string"
                 },
                 "feedback": {
                     "type": "string"
@@ -4854,7 +4904,9 @@
                 "process_roots",
                 "pending",
                 "cancelled",
-                "released"
+                "released",
+                "execution_backend",
+                "docker_custody"
             ],
             "type": "object"
         },

@@ -18,6 +18,7 @@ Entry points are registered in pyproject.toml:
 """
 
 import pluggy
+from ...domain.session_run import SessionRunAssets
 
 # Project name for hook markers
 PROJECT_NAME = "issue_orchestrator"
@@ -36,6 +37,10 @@ class TerminalSpec:
     All hooks use firstresult=True, meaning the first plugin to return
     a non-None value wins. This allows plugin priority ordering.
     """
+
+    @hookspec(firstresult=True)
+    def prepare_session(self, run: SessionRunAssets, session_name: str, command: str) -> bool | None:
+        """Bind engine-assigned assets to an already admitted terminal template."""
 
     @hookspec(firstresult=True)
     def create_session(

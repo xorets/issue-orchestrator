@@ -24,11 +24,24 @@ def build_original_delivery_owner(config: Config, claims: object, repository: Re
                                   state: OrchestratorState | None, session_manager: SessionManager | None = None) -> OriginalDeliveryOwner | None:
     if not isinstance(claims, OriginalDeliveryClaims):
         return None
+    docker = None
+    terminal = config.terminal_adapter
+    if terminal == "issue_orchestrator.execution.terminal_docker:DockerPlugin":
+        from ..execution.original_delivery_docker import DockerOriginalCustody
+        from ..execution.terminal_docker import DockerPlugin
+        docker = DockerOriginalCustody(DockerPlugin())
+    def verify(owner):
+        sealed_execution_contract(owner, config)
+        if docker:
+            docker.verify_contract(owner)
     return OriginalDeliveryOwner(claims, repository, working_copy, config, state, engine_identity,
-        lambda owner, offline: require_original_quiescent(owner, offline=offline),
-        lambda owner: sealed_execution_contract(owner, config), capture_original_processes,
-        LabelManager(config).extract_rework_cycle, require_native_session_assets, require_original_termination_scope,
-        lambda session: session_manager is not None and session_manager.exists(SessionRef.from_name(session.terminal_id)))
+        (lambda owner, offline: docker.quiescent(owner, offline=offline)) if docker else
+            (lambda owner, offline: require_original_quiescent(owner, offline=offline)),
+        verify, capture_original_processes,
+        LabelManager(config).extract_rework_cycle, docker.verify_session if docker else require_native_session_assets,
+        docker.termination_scope if docker else require_original_termination_scope,
+        lambda session: session_manager is not None and session_manager.exists(SessionRef.from_name(session.terminal_id)),
+        docker_custody=docker)
 
 
 @contextmanager

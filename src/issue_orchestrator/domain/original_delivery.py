@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, replace
 from enum import StrEnum
 import re
+from typing import Any
 
 
 class OriginalDeliveryOperation(StrEnum):
@@ -17,6 +18,29 @@ class OriginalDeliveryOperation(StrEnum):
     RESUME = "resume"
     CANCEL = "cancel"
     RECONCILE = "reconcile"
+
+
+@dataclass(frozen=True, slots=True)
+class DockerCustody:
+    """Immutable Docker identity held in the original remote fenced claim."""
+    schema_version: int
+    run_id: str
+    daemon_id: str
+    controller_container_id: str
+    container_id: str
+    provider_exec_id: str
+    launch_sha256: str
+
+    def __post_init__(self) -> None:
+        if type(self.schema_version) is not int or self.schema_version != 1:
+            raise ValueError("unsupported Docker custody schema")
+        for name in ("run_id", "daemon_id"):
+            if type(getattr(self, name)) is not str or not getattr(self, name).strip():
+                raise ValueError("Docker custody identity is missing")
+        for name in ("controller_container_id", "container_id", "provider_exec_id", "launch_sha256"):
+            value = getattr(self, name)
+            if type(value) is not str or not re.fullmatch(r"[0-9a-f]{64}", value):
+                raise ValueError("Docker custody digest/ID is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,10 +75,21 @@ class OriginalDelivery:
     pending: bool = False
     cancelled: bool = False
     released: bool = False
+    execution_backend: str = "native"
+    docker_custody: tuple[DockerCustody, ...] = ()
 
     def __post_init__(self) -> None:
         self._validate_identity()
         self._validate_history()
+        if self.execution_backend not in {"native", "docker"}:
+            raise ValueError("unknown original execution backend")
+        if type(self.docker_custody) is not tuple or any(type(item) is not DockerCustody for item in self.docker_custody):
+            raise ValueError("invalid Docker custody history")
+        if self.execution_backend == "native" and self.docker_custody or self.execution_backend == "docker" and self.process_roots:
+            raise ValueError("mixed original execution custody")
+        run_ids = [item.run_id for item in self.docker_custody]
+        if len(set(run_ids)) != len(run_ids) or not set(run_ids) <= {self.run_id, *(row[1] for row in self.correction_runs)}:
+            raise ValueError("Docker custody does not match original runs")
         for name in ("head_sha", "base_sha"):
             value = getattr(self, name)
             if type(value) is not str or value and not re.fullmatch(r"[0-9a-f]{40}", value):
@@ -101,9 +136,17 @@ class OriginalDelivery:
 
     @classmethod
     def from_dict(cls, value: object) -> OriginalDelivery:
+        if type(value) is dict and set(value) == set(cls.__dataclass_fields__) - {"execution_backend", "docker_custody"}:
+            value = {**value, "execution_backend": "native", "docker_custody": []}
         if type(value) is not dict or set(value) != set(cls.__dataclass_fields__):
             raise ValueError("original delivery field set is invalid")
-        decoded = dict(value)
+        decoded: dict[str, Any] = dict(value)
+        if type(decoded["docker_custody"]) not in {tuple, list} or any(type(item) is not dict for item in decoded["docker_custody"]):
+            raise ValueError("Docker custody history must be a sequence")
+        try:
+            decoded["docker_custody"] = tuple(DockerCustody(**dict(item)) for item in decoded["docker_custody"])
+        except TypeError as exc:
+            raise ValueError("Docker custody field set is invalid") from exc
         for field in ("corrections", "correction_runs", "launches", "engine_history", "process_roots"):
             if type(decoded[field]) not in {list, tuple}:
                 raise ValueError("original correction history must be a sequence")
