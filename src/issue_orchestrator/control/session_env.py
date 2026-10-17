@@ -14,6 +14,7 @@ standing up a launcher.
 from __future__ import annotations
 
 import sys
+import shlex
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
@@ -54,7 +55,9 @@ def api_port_export(
     port = callback_endpoint.resolve_port(control_api_port)
     if port is None:
         return ""
-    return f" {ENV_PREFIX}API_PORT='{port}'"
+    origin = callback_endpoint.resolve_origin(control_api_port)
+    suffix = "" if origin == f"http://localhost:{port}" else f" {ENV_PREFIX}API_ORIGIN={shlex.quote(origin or '')}"
+    return f" {ENV_PREFIX}API_PORT='{port}'" + suffix
 
 
 def config_exports(config_path: Path | None, mode: str = "default") -> str:

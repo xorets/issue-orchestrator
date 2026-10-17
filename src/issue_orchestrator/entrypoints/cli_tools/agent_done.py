@@ -58,6 +58,7 @@ from ...domain.session_run import ValidationArtifactPaths
 from ...execution.run_evidence import RunEvidenceRecorder
 from ...execution.session_output_adapter import FileSystemSessionOutput
 from .agent_callback import (
+    callback_url,
     api_request_headers as _api_request_headers,
     resolve_control_api_port as _resolve_control_api_port,
 )
@@ -701,7 +702,7 @@ def run_preflight_push_check(worktree: Path, verbose: bool = False) -> tuple[boo
             print("Note: ISSUE_ORCHESTRATOR_API_PORT not set, skipping push preflight check")
         return True, None, None
 
-    url = f"http://localhost:{port}/api/preflight-push"
+    url = callback_url("/api/preflight-push", port)
     payload = json.dumps({"worktree": str(worktree)}).encode("utf-8")
 
     if verbose:

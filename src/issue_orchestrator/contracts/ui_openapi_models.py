@@ -393,6 +393,16 @@ class DialogSectionPayload(BaseModel):
     rows: list[DialogRowPayload]
     title: str
 
+class DockerCustodyPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    container_id: str
+    controller_container_id: str
+    daemon_id: str
+    launch_sha256: str
+    provider_exec_id: str
+    run_id: str
+    schema_version: Literal[1]
+
 class DoctorCheckPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
     detail: str | None = None
@@ -1117,10 +1127,12 @@ class OriginalDeliveryOwnerPayload(BaseModel):
     correction_runs: list[list[str | int]]
     corrections: list[list[str | int]]
     cycles: int = Field(..., ge=0, strict=True)
+    docker_custody: list[DockerCustodyPayload]
     engine_birth: str
     engine_history: list[list[str | int]]
     engine_host: str
     engine_pid: int = Field(..., ge=0, strict=True)
+    execution_backend: Literal['native', 'docker']
     feedback: str
     head_sha: str
     launches: list[str]

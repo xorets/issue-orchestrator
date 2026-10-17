@@ -1226,6 +1226,43 @@
   },
   "components": {
     "schemas": {
+      "DockerCustodyPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "run_id",
+          "daemon_id",
+          "controller_container_id",
+          "container_id",
+          "provider_exec_id",
+          "launch_sha256",
+          "schema_version"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "string"
+          },
+          "daemon_id": {
+            "type": "string"
+          },
+          "controller_container_id": {
+            "type": "string"
+          },
+          "container_id": {
+            "type": "string"
+          },
+          "provider_exec_id": {
+            "type": "string"
+          },
+          "launch_sha256": {
+            "type": "string"
+          },
+          "schema_version": {
+            "type": "integer",
+            "const": 1
+          }
+        }
+      },
       "OriginalDeliveryOwnerPayload": {
         "type": "object",
         "additionalProperties": false,
@@ -1259,7 +1296,9 @@
           "process_roots",
           "pending",
           "cancelled",
-          "released"
+          "released",
+          "execution_backend",
+          "docker_custody"
         ],
         "properties": {
           "repository": {
@@ -1410,6 +1449,19 @@
           },
           "released": {
             "type": "boolean"
+          },
+          "execution_backend": {
+            "type": "string",
+            "enum": [
+              "native",
+              "docker"
+            ]
+          },
+          "docker_custody": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DockerCustodyPayload"
+            }
           }
         }
       },

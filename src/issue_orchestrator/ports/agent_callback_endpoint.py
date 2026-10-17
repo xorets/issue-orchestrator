@@ -29,6 +29,10 @@ from typing import Protocol, runtime_checkable
 class AgentCallbackEndpoint(Protocol):
     """The reachable Control API endpoint for agent callbacks."""
 
+    def resolve_origin(self, configured_port: int) -> str | None:
+        """Explicit trusted address reachable by the worker, including bound port."""
+        ...
+
     def publish_bound_port(self, port: int) -> None:
         """Record the port the server actually bound.
 

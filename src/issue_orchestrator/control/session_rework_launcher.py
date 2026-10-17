@@ -26,6 +26,7 @@ from ..domain.models import (
 )
 from ..domain.session_run import SessionRunAssets
 from ..ports.issue_run_allocator import IssueRunAllocator
+from ..ports.session_preparation import SessionPreparation
 from ..events import EventName
 from ..infra.config import Config
 from ..infra.repo_scope import require_repo
@@ -178,6 +179,7 @@ class ReworkLaunchDependencies:
     scoped_rework: ScopedReworkLaunch
     claim_manager: ClaimManager | None = None
     original_runtime_identity: Callable[[], tuple[str, int, str]] | None = None
+    session_preparation: SessionPreparation | None = None
 
 
 @dataclass(frozen=True)
@@ -342,7 +344,7 @@ def bind_original_rework_run(rework: PendingRework, deps: ReworkLaunchDependenci
     return None
 
 
-def launch_rework_session(
+def launch_rework_session(  # noqa: C901 - Typed terminal preparation remains inside the launch transaction.
     rework: PendingRework,
     active_sessions: list[Session],
     deps: ReworkLaunchDependencies,
@@ -587,6 +589,8 @@ def launch_rework_session(
 
         if failure := deps.scoped_rework.before_spawn(scoped.keys, run.identity):
             return failure
+        if deps.session_preparation is not None:
+            deps.session_preparation.prepare_session(run, session_name, command)
         session_created = deps.create_session(
             session_name,
             command,

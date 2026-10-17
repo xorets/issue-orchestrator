@@ -11,6 +11,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from ..ports.session_runner import DiscoveredSession
+from ..domain.session_run import SessionRunAssets
 
 if TYPE_CHECKING:
     import pluggy
@@ -34,6 +35,10 @@ class PluggySessionRunner:
             plugin_manager: A pluggy PluginManager with terminal hooks registered.
         """
         self._pm = plugin_manager
+
+    def prepare_session(self, run: SessionRunAssets, session_name: str, command: str) -> None:
+        if self._pm.hook.prepare_session(run=run, session_name=session_name, command=command) is not True:
+            raise ValueError("Selected terminal did not prepare the admitted typed session")
 
     def create_session(
         self,

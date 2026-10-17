@@ -1,7 +1,7 @@
 """The original delivery shares the issue claim's remote CAS cell."""
 from typing import Protocol, runtime_checkable
 from ..domain.claim import Claim
-from ..domain.original_delivery import OriginalDelivery
+from ..domain.original_delivery import DockerCustody, OriginalDelivery
 from ..domain.session_run import SessionRunAssets
 
 
@@ -18,3 +18,9 @@ class OriginalDeliveryClaims(Protocol):
                         identity: tuple[str, int, str]) -> bool: ...
     def bind_original_processes(self, issue_number: int, lease_id: str, fence: str,
                                 roots: tuple[tuple[str, int, str, int, str], ...]) -> bool: ...
+
+
+@runtime_checkable
+class DockerOriginalDeliveryClaims(Protocol):
+    def bind_original_docker_custody(self, issue_number: int, lease_id: str, fence: str,
+                                    custody: tuple[DockerCustody, ...]) -> bool: ...

@@ -12,7 +12,9 @@ all.
 from __future__ import annotations
 
 import logging
+import os
 import threading
+from .callback_address import validate_callback_origin
 
 logger = logging.getLogger(__name__)
 
@@ -23,12 +25,20 @@ AUTO_ASSIGN_PORT = 0
 class RuntimeAgentCallbackEndpoint:
     """Holds the bound Control API port for the process serving it."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, advertised_host: str | None = None) -> None:
+        self._host = advertised_host or os.environ.get("ISSUE_ORCHESTRATOR_CALLBACK_HOST", "localhost")
+        validate_callback_origin(f"http://{self._host}:1", 1)
         self._lock = threading.Lock()
         self._bound_port: int | None = None
         # Distinct from "no port": tells us the question has been
         # answered, so readiness is not just "port is None".
         self._unavailable = False
+
+    def resolve_origin(self, configured_port: int) -> str | None:
+        port = self.resolve_port(configured_port)
+        if port is None:
+            return None
+        return validate_callback_origin(f"http://{self._host}:{port}", port)
 
     def publish_bound_port(self, port: int) -> None:
         """Publish the port uvicorn actually bound.

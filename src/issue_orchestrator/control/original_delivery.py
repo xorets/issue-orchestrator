@@ -12,6 +12,7 @@ from ..domain.models import OrchestratorState, PendingRework, Session
 from ..domain.original_delivery import OriginalDelivery, OriginalDeliveryOperation
 from ..infra.runtime_artifacts import builtin_cleanup_root
 from ..ports.original_delivery import OriginalDeliveryClaims
+from ..ports.original_docker_custody import OriginalDockerCustody
 from ..ports.repository_host import RepositoryHost
 from ..ports.working_copy import WorkingCopy
 from .issue_termination import IssueTerminationOutcome
@@ -57,6 +58,30 @@ class OriginalDeliveryOwner:
     launch: Callable[[PendingRework], Session | None] | None = None
     terminate: Callable[[int], IssueTerminationOutcome] | None = None
     retained_issues: set[int] = field(default_factory=set)
+    docker_custody: OriginalDockerCustody | None = None
+
+    def _capture_custody(self, owner: OriginalDelivery) -> OriginalDelivery:
+        if owner.execution_backend == "docker":
+            if self.docker_custody is None:
+                raise ValueError("Docker original custody adapter is unavailable")
+            captured = self.docker_custody.capture(owner)
+            previous = next((row for row in owner.docker_custody if row.run_id == captured.run_id), None)
+            if previous is not None and previous != captured:
+                raise ValueError("Docker original run custody changed")
+            return replace(owner, docker_custody=tuple(dict.fromkeys((*owner.docker_custody, captured))))
+        roots = self.capture_processes(owner)
+        if not roots:
+            raise ValueError("Current original worker process custody is unavailable")
+        return replace(owner, process_roots=tuple(dict.fromkeys((*owner.process_roots, *roots))))
+
+    def _bind_custody(self, issue_number: int, lease_id: str, fence: str, owner: OriginalDelivery) -> bool:
+        captured = self._capture_custody(owner)
+        if captured.execution_backend == "docker":
+            from ..ports.original_delivery import DockerOriginalDeliveryClaims
+            if not isinstance(self.claims, DockerOriginalDeliveryClaims):
+                raise ValueError("Docker original claim storage is unavailable")
+            return self.claims.bind_original_docker_custody(issue_number, lease_id, fence, captured.docker_custody)
+        return self.claims.bind_original_processes(issue_number, lease_id, fence, captured.process_roots)
 
     def observe(self, issue_number: int) -> dict[str, object]:
         claim, fence = self.claims.original_claim(issue_number)
@@ -155,8 +180,7 @@ class OriginalDeliveryOwner:
         self.verify_session(session)
         claim, fence = self.claims.original_claim(issue_number)
         assert claim.original is not None
-        roots = self.capture_processes(claim.original)
-        if not roots or not self.claims.bind_original_processes(issue_number, claim.lease_id, fence, roots):
+        if not self._bind_custody(issue_number, claim.lease_id, fence, claim.original):
             raise ValueError("Correction process custody unproven; observe exact admitted run before retry")
         return self.observe(issue_number)
 
@@ -169,8 +193,7 @@ class OriginalDeliveryOwner:
                 sessions[0].run_assets.started_at) not in runs:
             raise ValueError("Current correction native run changed")
         self.verify_session(sessions[0])
-        roots = self.capture_processes(owner)
-        if not roots or not self.claims.bind_original_processes(issue_number, command.lease_id, command.fence, roots):
+        if not self._bind_custody(issue_number, command.lease_id, command.fence, owner):
             raise ValueError("Current correction process fence changed")
         return self.observe(issue_number)
 
@@ -202,12 +225,10 @@ class OriginalDeliveryOwner:
             contract_sha256=command.contract_sha256, run_id=run.run_id, session_name=session.terminal_id, native_phase_name=run.identity.session_name, logical_child=session.key.stable_id(),
             started_at=run.started_at, branch=session.branch_name, worktree=str(run.worktree_path),
             run_dir=str(run.run_dir), agent=session.agent_label or session.issue.agent_type or "", engine_host=host, engine_pid=pid,
-            engine_birth=birth, max_cycles=self.config.max_rework_cycles)
+            engine_birth=birth, max_cycles=self.config.max_rework_cycles,
+            execution_backend="docker" if self.docker_custody is not None else "native")
         self.verify_contract(owner)
-        roots = self.capture_processes(owner)
-        if not roots:
-            raise ValueError("Current original worker process custody is unavailable")
-        owner = replace(owner, process_roots=roots)
+        owner = self._capture_custody(owner)
         if not self.claims.bind_original(issue_number, claim.lease_id, command.fence, owner):
             raise ValueError("Original registration fence changed")
         self.retained_issues.add(issue_number)
@@ -222,6 +243,8 @@ class OriginalDeliveryOwner:
             raise ValueError("An existing rework budget cannot be reset by original registration")
 
     def _require_scope(self, owner: OriginalDelivery) -> None:
+        if owner.execution_backend != ("docker" if self.docker_custody is not None else "native"):
+            raise ValueError("Original execution backend changed")
         if (owner.repository, owner.config_fingerprint) != (self.config.repo, self.config.config_fingerprint):
             raise ValueError("Original repository or configuration changed")
 

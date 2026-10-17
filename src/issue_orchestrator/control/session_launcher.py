@@ -55,6 +55,7 @@ from ..domain.coder_prompt import (
 )
 from ..domain.session_run import SessionRunAssets
 from ..ports.issue_run_allocator import IssueRunAllocator
+from ..ports.session_preparation import SessionPreparation
 from .worktree import WorktreeSetupError
 from .worktree_context import WorktreeContext, worktree_reuse_options
 from .published_review_launch_gate import refuse_launch_over_published_review
@@ -212,10 +213,12 @@ class SessionLauncher:
         # for a hold that owner confirms, never for a lingering label alone.
         recovery_holds: RecoveryHolds = NO_RECOVERY_HOLDS,
         original_runtime_identity: Callable[[], tuple[str, int, str]] | None = None,
+        session_preparation: SessionPreparation | None = None,
     ):
         self.config = config
         self._recovery_holds = recovery_holds
         self._original_runtime_identity = original_runtime_identity
+        self._session_preparation = session_preparation
         self.events = events
         self.repository_host = repository_host
         self._action_applier = action_applier
@@ -1042,7 +1045,7 @@ class SessionLauncher:
 
             # Create terminal session
             step_start = time.time()
-            session_created = self._spawn(session_name, command, worktree_path, issue.title, agent_config)
+            session_created = self._spawn(session_name, command, worktree_path, issue.title, agent_config, run)
             logger.info(
                 "[launch] Issue session create result: issue=%s session=%s created=%s",
                 issue.number,
@@ -1391,7 +1394,7 @@ class SessionLauncher:
                 command,
             )
 
-            session_created = self._spawn(session_name, command, worktree_path, issue.title, agent_config)
+            session_created = self._spawn(session_name, command, worktree_path, issue.title, agent_config, run)
             if not session_created:
                 log_transition("issue", issue.number, "LAUNCHING", "FAILED", "session creation failed")
                 self._retry_in_progress(
@@ -1754,7 +1757,7 @@ class SessionLauncher:
             )
 
             # Create session
-            session_created = self._spawn(session_name, command, worktree_path, f"Review PR #{review.pr_number}", agent_config)
+            session_created = self._spawn(session_name, command, worktree_path, f"Review PR #{review.pr_number}", agent_config, run)
             logger.info(
                 "[launch] Review session create result: issue=%s pr=%s session=%s created=%s",
                 review.issue_number,
@@ -2052,7 +2055,7 @@ class SessionLauncher:
                 command,
             )
 
-            session_created = self._spawn(session_name, command, worktree_path, issue_title, agent_config)
+            session_created = self._spawn(session_name, command, worktree_path, issue_title, agent_config, run)
             logger.info(
                 "[launch] Retrospective review create result: issue=%s session=%s created=%s",
                 review.issue_number,
@@ -2138,6 +2141,7 @@ class SessionLauncher:
             label_manager=self._lm,
             session_exists=self._session_exists,
             create_session=self._create_session,
+            session_preparation=self._session_preparation,
             apply_actions=self._apply_actions,
             worktree_reuse_options=self._worktree_reuse_options,
             session_identity_launch_metadata=self._session_identity_launch_metadata,
@@ -2202,6 +2206,7 @@ class SessionLauncher:
         if self._provider_command_wrapper is None:
             self._provider_command_wrapper = ProviderCommandWrapper(
                 self.config.provider_resilience.short_retry, self._provider_gate.lane_for_agent if self._provider_gate else None,
+                maximum_attempts=1 if self._session_preparation is not None else None,
             )
         return self._provider_command_wrapper
 
@@ -2210,7 +2215,7 @@ class SessionLauncher:
         return dict(self._provider_credentials.session_env(provider)) or None
 
     def _spawn(
-        self, name: str, command: str, worktree: Path, title: str, agent_config: "AgentConfig",
+        self, name: str, command: str, worktree: Path, title: str, agent_config: "AgentConfig", run: SessionRunAssets,
     ) -> bool:
         """Start one agent session, always with its provider credentials.
 
@@ -2221,6 +2226,8 @@ class SessionLauncher:
         empty mapping distinguishes "this provider supplies its own login" from
         "the key resolved to nothing".
         """
+        if self._session_preparation is not None:
+            self._session_preparation.prepare_session(run, name, command)
         secret_env = dict(self._provider_credentials.session_env(agent_config.provider))
         return self._create_session(name, command, worktree, title, secret_env or None)
 

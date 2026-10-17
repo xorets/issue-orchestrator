@@ -30,7 +30,7 @@ import urllib.error
 import urllib.request
 
 from ...domain.review_exchange_verdict import ExchangeVerdict
-from .agent_callback import api_request_headers, resolve_control_api_port
+from .agent_callback import api_request_headers, callback_url, resolve_control_api_port
 
 _VALID_RESPONSE_TYPES = ("ok", "changes_requested", "disagree")
 
@@ -131,7 +131,7 @@ def build_verdict(args: argparse.Namespace) -> ExchangeVerdict:
 
 def _deliver(key: str, port: str, verdict: ExchangeVerdict) -> tuple[bool, str]:
     """POST the verdict to the Control API. Returns (accepted, message)."""
-    url = f"http://localhost:{port}/api/review-exchange/respond"
+    url = callback_url("/api/review-exchange/respond", port)
     body = json.dumps({"key": key, "payload": dict(verdict.to_wire())}).encode("utf-8")
     req = urllib.request.Request(
         url,

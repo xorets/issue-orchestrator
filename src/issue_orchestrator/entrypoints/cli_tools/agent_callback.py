@@ -17,6 +17,7 @@ exactly how the surfaces disagreed in #6913.
 from __future__ import annotations
 
 import os
+from ...infra.callback_address import validate_callback_origin
 from collections.abc import MutableMapping
 from dataclasses import dataclass
 
@@ -30,6 +31,14 @@ _PORT_ENV_VARS = ("ISSUE_ORCHESTRATOR_API_PORT", "ORCHESTRATOR_API_PORT")
 # ``control_api_port: 0`` means "bind any free port". A literal "0" is
 # therefore a *request*, never a reachable destination.
 _AUTO_ASSIGN_SENTINEL = "0"
+
+
+def callback_url(route: str, port: str, *, native_host: str = "localhost") -> str:
+    """Use the launch-inherited origin for sibling workers; Native stays loopback."""
+    origin = os.environ.get("ISSUE_ORCHESTRATOR_API_ORIGIN", f"http://{native_host}:{port}")
+    if not route.startswith("/api/") or "?" in route or "#" in route:
+        raise ValueError("invalid callback route")
+    return validate_callback_origin(origin, int(port)) + route
 
 
 @dataclass(frozen=True, slots=True)
