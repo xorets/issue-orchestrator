@@ -84,7 +84,7 @@ def require_create_intent(config: dict, packet: dict) -> None:
         raise ValueError("Docker generated configuration differs from sealed create intent")
 
 
-def run_cli(argv: list[str], *, environment: dict[str, str], timeout: float) -> bytes:
+def run_cli(argv: list[str], *, environment: dict[str, str], timeout: float, diagnostic_path: Path | None = None) -> bytes:
     """Bound both CLI pipes before allocation and kill descendants on timeout."""
     child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, env=environment, start_new_session=True)
@@ -122,6 +122,12 @@ def run_cli(argv: list[str], *, environment: dict[str, str], timeout: float) -> 
         child.wait(timeout=5)
         child.stdout.close()
         child.stderr.close()
+        if diagnostic_path is not None:
+            descriptor = os.open(diagnostic_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(descriptor, "wb") as destination:
+                destination.write(bytes(output) + b"\n--- stderr ---\n" + bytes(errors))
+                destination.flush()
+                os.fsync(destination.fileno())
 
 
 class DockerPlugin:
@@ -311,6 +317,8 @@ class DockerPlugin:
         assert self._record is not None
         if self._record.get("container_id"):
             return
+        if self.engine.request("GET", "/info").get("ID") != packet["daemon_id"]:
+            raise ValueError("Docker daemon changed during create reconciliation")
         actual = self.engine.request("GET", f"/containers/{packet['container_name']}/json")
         container_id = actual.get("Id", "")
         if (not re.fullmatch(r"[0-9a-f]{64}", container_id) or
@@ -378,8 +386,12 @@ class DockerPlugin:
                 "--config", packet["devcontainer_config"], "--docker-path", packet["docker_cli"],
                 "--skip-post-create", "--skip-non-blocking-commands",
                 "--mount-workspace-git-root", "false",
+                "--default-user-env-probe", "none", "--update-remote-user-uid-default", "never",
+                "--container-data-folder", "/tmp/devcontainer-user", "--container-system-data-folder", "/var/devcontainer",
+                "--container-session-data-folder", "/tmp/devcontainer-session",
                 "--id-label", "io.builder.launch=" + launch_digest],
-                environment=environment, timeout=max(0.001, (packet["deadline_unix_ns"] - time.time_ns()) / 1e9))
+                environment=environment, timeout=max(0.001, (packet["deadline_unix_ns"] - time.time_ns()) / 1e9),
+                diagnostic_path=self.receipt_path().with_name("docker-cli.log"))
             created = json.loads(result)
             container_id = created.get("containerId", "")
             if not re.fullmatch(r"[0-9a-f]{64}", container_id):
@@ -414,8 +426,23 @@ class DockerPlugin:
                     except (OSError, ValueError, KeyError):
                         logger.error("Docker create acknowledgement unknown; immutable reservation retained")
                 if self._record.get("container_id"):
-                    self.kill_session(session_id, session_name)
+                    try:
+                        self.kill_session(session_id, session_name)
+                    except Exception:
+                        self._record["error"] = "container-stop-unproven"
+                        self._record["state"] = "retained"
+                        self._save()
             return False
+
+    def _deadline_stop(self) -> None:
+        assert self._record is not None
+        self._record["error"] = "global-deadline-exhausted"
+        try:
+            self.kill_session(self._record["issue_number"], self._record["session_name"])
+        except Exception:
+            self._record["error"] = "deadline-stop-unproven"
+            self._record["state"] = "retained"
+            self._save()
 
     def _run_hooks(self, packet: dict) -> None:
         hooks = packet.get("hooks", {})
@@ -450,7 +477,7 @@ class DockerPlugin:
                 remaining = (packet["deadline_unix_ns"] - time.time_ns()) / 1e9
                 if remaining <= 0:
                     raise ValueError("Docker lifecycle deadline exhausted")
-                timer = threading.Timer(remaining, self.kill_session, args=(record["issue_number"], record["session_name"]))
+                timer = threading.Timer(remaining, self._deadline_stop)
                 timer.daemon = True
                 timer.start()
                 try:
@@ -468,7 +495,7 @@ class DockerPlugin:
         record, packet = self._record, self._packet
         output = self.receipt_path().with_name("docker-output.log")
         remaining = max(0, (packet["deadline_unix_ns"] - time.time_ns()) / 1e9)
-        deadline = threading.Timer(remaining, self.kill_session, args=(record["issue_number"], record["session_name"]))
+        deadline = threading.Timer(remaining, self._deadline_stop)
         deadline.daemon = True
         deadline.start()
         try:

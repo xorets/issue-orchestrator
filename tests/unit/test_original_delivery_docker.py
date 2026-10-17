@@ -76,3 +76,21 @@ def test_public_docker_owner_payload_accepts_discriminated_claim():
     owner = replace(custody(), execution_backend="docker", docker_custody=(docker_custody(),))
     parsed = OriginalDeliveryOwnerPayload.model_validate(owner.to_dict())
     assert parsed.execution_backend == "docker"
+
+
+def test_missing_correction_custody_after_spawn_crash_never_proves_quiescence():
+    from issue_orchestrator.domain.original_delivery import transition, bind_correction_run
+    from issue_orchestrator.execution.original_delivery_docker import DockerOriginalCustody
+    from issue_orchestrator.execution.terminal_docker import DockerPlugin
+    owner = replace(custody(), execution_backend="docker", docker_custody=(docker_custody(),))
+    owner = transition(owner, "handoff", request_id="handoff", pr_number=1, head_sha="a" * 40)
+    owner = transition(owner, "correct", request_id="correction", feedback="Fix finding")
+    owner = transition(owner, "launch", request_id="correction")
+    owner = bind_correction_run(owner, "correction", "correction-run", "/tmp/correction-run", "rework-42", "started", "coding-2")
+    class Engine:
+        def request(self, *args, **kwargs):
+            raise AssertionError("Missing correction custody cannot be replaced by stopped original observations")
+    adapter = DockerOriginalCustody(DockerPlugin(engine=Engine()))
+    for offline in (False, True):
+        with pytest.raises(ValueError, match="coverage is unknown"):
+            adapter.quiescent(owner, offline=offline)

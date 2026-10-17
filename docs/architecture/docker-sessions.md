@@ -44,6 +44,13 @@ output shares a byte bound and global deadline; Docker's task log driver is
 disabled. Provider exit and complete-container stop are separate observations.
 No automatic container removal discards evidence.
 
+CLI user/session scratch lives under bounded `/tmp`; system patch markers stay
+on the immutable root at `/var/devcontainer`. The selected CLI skips system
+environment/profile patching when it cannot create those markers. A writable
+system-marker directory instead causes it to attempt `/etc/environment` changes
+and is incompatible with this read-only root. Login-shell environment probing
+is explicitly disabled. CLI diagnostics are capped and retained privately.
+
 ## Custody and recovery
 
 The existing remote original claim gains the `execution_backend` discriminator
@@ -84,3 +91,14 @@ policy hashes in a packet identify the subject; they are not proof of installed
 enforcement. Host #167/#169 own those prerequisites and exact-image activation.
 Native qualification does not qualify Docker, and no model, real dispatch,
 deployment or full legacy acceptance matrix is implied by unit tests.
+
+For an explicitly authorized cheap transport check, the committed
+`scripts/probe_docker_sessions.py` accepts an already cached digest image, pinned
+Node/CLI paths plus `tool_files` SHA256 mapping in `--tools`, and an existing
+private `--evidence-root`. It refuses a dirty source checkout. The fixed fixture
+uses network `none`, an inert disposable controller, a read-only canary workspace,
+bounded temporary files and a short deadline. It records source/tree/material
+identities, a technical report, capped logs, artifact digests and independent
+container-removal observations. It does not exercise model/provider projection,
+Git tooling, public egress, callbacks or persistent quota acceptance. Failed
+development probes must remain separate evidence from a committed-source pass.

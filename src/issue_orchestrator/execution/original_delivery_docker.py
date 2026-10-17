@@ -48,6 +48,9 @@ class DockerOriginalCustody:
     def quiescent(self, owner: OriginalDelivery, *, offline: bool) -> None:
         if owner.execution_backend != "docker" or not owner.docker_custody:
             raise ValueError("Docker original custody is unknown")
+        expected_runs = {owner.run_id, *(row[1] for row in owner.correction_runs)}
+        if {row.run_id for row in owner.docker_custody} != expected_runs:
+            raise ValueError("Docker original/correction run custody coverage is unknown")
         for custody in owner.docker_custody:
             actual = self._worker(custody)
             if actual.get("State", {}).get("Running") is not False:
