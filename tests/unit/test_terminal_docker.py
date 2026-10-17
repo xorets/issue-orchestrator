@@ -147,7 +147,7 @@ class BridgeEngine(Engine):
             "EnableIPv6": False, "IPAM": {"Driver": "default",
                 "Config": [{"Subnet": "172.28.64.0/28", "Gateway": "172.28.64.1"}]},
             "Options": {"com.docker.network.bridge.name": "br-fixture169",
-                "com.docker.network.bridge.enable_icc": "false"}}
+                "com.docker.network.bridge.enable_icc": "true"}}
         self.controller_endpoint = {"NetworkID": "5" * 64, "IPAddress": "172.28.64.2",
             "IPPrefixLen": 28, "Gateway": "172.28.64.1", "GlobalIPv6Address": "", "IPv6Gateway": ""}
         self.worker_endpoint = {**self.controller_endpoint, "IPAddress": "172.28.64.3",
@@ -237,9 +237,9 @@ def test_invalid_sealed_network_refuses_before_cli(bridge_launch, change):
     ("bridge", {"EnableIPv6": True}),
     ("bridge", {"IPAM": {"Config": [{"Subnet": "172.28.65.0/28", "Gateway": "172.28.65.1"}]}}),
     ("bridge", {"Options": {"com.docker.network.bridge.name": "br-foreign",
-        "com.docker.network.bridge.enable_icc": "false"}}),
-    ("bridge", {"Options": {"com.docker.network.bridge.name": "br-fixture169",
         "com.docker.network.bridge.enable_icc": "true"}}),
+    ("bridge", {"Options": {"com.docker.network.bridge.name": "br-fixture169",
+        "com.docker.network.bridge.enable_icc": "false"}}),
     ("controller_endpoint", {"IPAddress": "172.28.64.4"}),
     ("controller_endpoint", {"NetworkID": "6" * 64}),
 ])

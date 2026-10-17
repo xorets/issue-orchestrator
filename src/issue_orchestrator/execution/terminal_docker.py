@@ -94,7 +94,7 @@ def require_selected_bridge(engine: DockerEngine, packet: dict, controller: dict
             actual.get("IPAM", {}).get("Driver") != "default" or
             actual.get("IPAM", {}).get("Config") != [{"Subnet": network["subnet"], "Gateway": network["gateway"]}] or
             actual.get("Options", {}).get("com.docker.network.bridge.name") != network["bridge_name"] or
-            actual.get("Options", {}).get("com.docker.network.bridge.enable_icc") != "false"):
+            actual.get("Options", {}).get("com.docker.network.bridge.enable_icc") != "true"):
         raise ValueError("Docker bridge properties differ from sealed network")
     endpoints = controller.get("NetworkSettings", {}).get("Networks", {})
     selected = [value for value in endpoints.values() if value.get("NetworkID") == packet["network_id"]]

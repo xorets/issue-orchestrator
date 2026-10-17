@@ -87,13 +87,17 @@ source primitive may omit it.
 
 Before create and again before hooks/provider exec, the existing Docker
 transport verifies the exact selected local bridge, subnet/gateway, IPv6 off,
-non-internal mode, bridge interface and ICC off, plus the controller's selected
+non-internal mode, bridge interface and ICC on, plus the controller's selected
 IPv4 membership. Created worker inspection requires exactly one selected IPv4
 endpoint, matching DNS, and the fixed IPv6 sysctl. No bridge/firewall is
 configured here. These readbacks and the sealed firewall-policy hash do not
 prove egress filtering or DNS forwarding; actual-host #169 acceptance remains
 separate. See Docker's [network flags](https://docs.docker.com/reference/cli/docker/container/run/)
 and [bridge options](https://docs.docker.com/engine/network/drivers/bridge/#options).
+ICC on is not an isolation claim: a separately qualified native bridge-family
+fence must deny other switched traffic. This avoids Docker's ICC-off path that
+can load `br_netfilter` and enable host-wide bridge filtering; the selected
+daemon's userland proxy must remain enabled. Admission remains closed.
 
 Native callback addressing remains loopback. Trusted deployment may set
 `ISSUE_ORCHESTRATOR_CALLBACK_BIND` and `ISSUE_ORCHESTRATOR_CALLBACK_HOST`;
