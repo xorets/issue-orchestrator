@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import selectors
 import signal
+import stat
 import subprocess
 import threading
 import time
@@ -27,6 +28,16 @@ from .docker_launch_input import canonical as canonical, sealed_bytes as sealed_
 from .docker_worker_authority import worker_environment
 
 logger = logging.getLogger(__name__)
+
+
+def private_directory(path: Path, *, create: bool = False) -> Path:
+    if create:
+        path.mkdir(mode=0o700)
+    info = path.lstat()
+    if (path.resolve(strict=True) != path or not stat.S_ISDIR(info.st_mode) or
+            info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700):
+        raise ValueError("Docker ordinary output directory is not private and canonical")
+    return path
 
 
 def require_worker_identity(actual: dict, container_id: str, launch_digest: str) -> None:
@@ -303,6 +314,7 @@ class DockerPlugin:
         self._validate_identity(packet)
         self._validate_limits(packet)
         self._verify_tools(packet)
+        self._output_root(packet)
         config = json.loads(sealed_bytes(Path(packet["devcontainer_config"]), expected=packet["devcontainer_config_sha256"]))
         require_create_intent(config, packet)
         image = self.engine.request("GET", f"/images/{packet['image_id']}/json")
@@ -315,6 +327,26 @@ class DockerPlugin:
             raise ValueError("Docker controller identity is unavailable")
         require_selected_bridge(self.engine, packet, controller)
         return packet
+
+    def _output_root(self, packet: dict) -> Path:
+        raw = packet.get("output_root")
+        if not isinstance(raw, str) or not re.fullmatch(r"/[A-Za-z0-9_./-]+", raw):
+            raise ValueError("Docker output_root is required")
+        root = Path(raw)
+        if str(root) != raw or ".." in root.parts:
+            raise ValueError("Docker output root is not normalized")
+        if "worker_authority" in packet and root != Path("/srv/builder/tasks") / packet["builder_run_id"] / "controller-output":
+            raise ValueError("Docker output root leaves selected task allocation")
+        assert self.launch_path is not None
+        paths = [self.launch_path.parent, *(Path(m[key]) for m in packet["mounts"] for key in ("source", "target"))]
+        if self.template_path is not None:
+            paths.append(self.template_path.parent)
+        if any(root.is_relative_to(path.resolve()) or path.resolve().is_relative_to(root) for path in paths):
+            raise ValueError("Docker ordinary output overlaps settlement or worker mounts")
+        return private_directory(root)
+
+    def _output_directory(self, packet: dict) -> Path:
+        return private_directory(self._output_root(packet) / packet["run_id"])
 
     def receipt_path(self) -> Path:
         if self.launch_path is None:
@@ -431,7 +463,11 @@ class DockerPlugin:
                 self._save()
             # CLI sees only generated admitted config. The provider command never
             # reaches the service shell or Dev Container lifecycle machinery.
-            environment = {"PATH": str(Path(packet["node"]).parent) + ":/usr/bin:/bin", "HOME": str(self.launch_path.parent),
+            ordinary = private_directory(self._output_root(packet) / packet["run_id"], create=True)
+            home = private_directory(ordinary / "home", create=True)
+            temporary = private_directory(ordinary / "tmp", create=True)
+            environment = {"PATH": str(Path(packet["node"]).parent) + ":/usr/bin:/bin", "HOME": str(home),
+                "TMPDIR": str(temporary),
                 "DOCKER_HOST": "unix:///var/run/docker.sock", "DOCKER_CONFIG": "/nonexistent"}
             result = run_cli([packet["node"], packet["devcontainer_cli"], "up", "--workspace-folder", working_dir,
                 "--config", packet["devcontainer_config"], "--docker-path", packet["docker_cli"],
@@ -442,7 +478,7 @@ class DockerPlugin:
                 "--container-session-data-folder", "/tmp/devcontainer-session",
                 "--id-label", "io.builder.launch=" + launch_digest],
                 environment=environment, timeout=max(0.001, (packet["deadline_unix_ns"] - time.time_ns()) / 1e9),
-                diagnostic_path=self.receipt_path().with_name("docker-cli.log"))
+                diagnostic_path=ordinary / "docker-cli.log")
             created = json.loads(result)
             container_id = created.get("containerId", "")
             if not re.fullmatch(r"[0-9a-f]{64}", container_id):
@@ -504,7 +540,7 @@ class DockerPlugin:
             return
         assert self._record is not None
         record = self._record
-        output = self.receipt_path().with_name("docker-hook-output.log")
+        output = self._output_directory(packet) / "docker-hook-output.log"
         with output.open("xb") as destination:
             for phase in phases:
                 if phase not in hooks:
@@ -544,12 +580,12 @@ class DockerPlugin:
     def _run_provider(self) -> None:
         assert self._record is not None and self._packet is not None
         record, packet = self._record, self._packet
-        output = self.receipt_path().with_name("docker-output.log")
         remaining = max(0, (packet["deadline_unix_ns"] - time.time_ns()) / 1e9)
         deadline = threading.Timer(remaining, self._deadline_stop)
         deadline.daemon = True
         deadline.start()
         try:
+            output = self._output_directory(packet) / "docker-output.log"
             with output.open("xb") as destination:
                 def consume(chunk: bytes) -> None:
                     if record["output_bytes"] + len(chunk) > packet["limits"]["max_output_bytes"]:
@@ -644,7 +680,15 @@ class DockerPlugin:
     def get_session_output(self, session_id: int, lines: int, session_name: str) -> str | None:
         if self._record_for(session_name) is None:
             return None
-        path = self.receipt_path().with_name("docker-output.log")
+        assert self.launch_path is not None
+        packet = json.loads(sealed_bytes(self.launch_path))
+        self._validate_identity(packet)
+        record = self._record_for(session_name)
+        assert record is not None
+        if (sha256(canonical(packet)).hexdigest() != record["launch_sha256"] or
+                packet["run_id"] != record["run_id"]):
+            raise ValueError("Docker output launch identity changed")
+        path = self._output_directory(packet) / "docker-output.log"
         if not path.exists():
             return None
         with path.open("rb") as source:

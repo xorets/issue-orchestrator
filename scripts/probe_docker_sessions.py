@@ -71,6 +71,8 @@ def main():  # noqa: C901, PLR0912 - One bounded disposable lifecycle with uncon
     os.chmod(root, 0o755)
     control = root / "control"
     control.mkdir(mode=0o700)
+    output = root / "output"
+    output.mkdir(mode=0o700)
     workspace = root / "workspace"
     workspace.mkdir(mode=0o755)
     image = args.image
@@ -146,6 +148,7 @@ def main():  # noqa: C901, PLR0912 - One bounded disposable lifecycle with uncon
             "builder_run_id": "run-" + "a" * 32,
             "run_id": "20261017-120000Z-" + "b" * 32,
             "engine_run_dir": str(workspace / "run-assets"),
+            "output_root": str(output),
             "session_name": "issue-27",
             "working_dir": str(workspace),
             "daemon_id": info["ID"],

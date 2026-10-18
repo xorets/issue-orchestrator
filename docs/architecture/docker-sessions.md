@@ -47,7 +47,24 @@ output shares a byte bound and global deadline; Docker's task log driver is
 disabled. Provider exit and complete-container stop are separate observations.
 No automatic container removal discards evidence.
 
-CLI user/session scratch lives under bounded `/tmp`; system patch markers stay
+The required sealed `output_root` separates ordinary controller writes from
+settlement. Builder projects exactly
+`/srv/builder/tasks/<builder_run_id>/controller-output` for a full worker;
+the network-none source primitive supplies an explicit private absolute root.
+There is no implicit legacy path. The root must already exist, be canonical,
+controller-owned mode0700, and overlap neither worker mount sources/targets
+(in either ancestry direction, including read-only mounts) nor the launch/template
+parent. The engine creates one private child named by the allocated engine run ID.
+Raw provider/hook output, capped CLI diagnostics, and CLI `HOME`/`TMPDIR` children
+live there. The existing launch, active-run selector and atomic custody receipt
+stay under the template parent; host acceptance must prove the selected ordinary
+and settlement paths have their declared finite byte/inode allocations. Ordinary
+output exhaustion stops the exact worker and retains the unknown provider result
+in the settlement receipt. Restored output reads the same sealed root and run;
+restart never replays exec. Session-run projections inside the worker worktree
+remain ordinary task data and do not confer custody.
+
+CLI **worker-side** user/session scratch lives under bounded `/tmp`; system patch markers stay
 on the immutable root at `/var/devcontainer`. The selected CLI skips system
 environment/profile patching when it cannot create those markers. A writable
 system-marker directory instead causes it to attempt `/etc/environment` changes

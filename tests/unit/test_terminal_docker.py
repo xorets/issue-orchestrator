@@ -62,13 +62,18 @@ class Engine:
 
 @pytest.fixture
 def launch(tmp_path, monkeypatch):
+    control = tmp_path / "control"
+    control.mkdir(mode=0o700)
+    output = tmp_path / "output"
+    output.mkdir(mode=0o700)
     config = tmp_path / "config.json"
     config.write_text("{}")
     tool = tmp_path / "tool"
     tool.write_text("trusted-tool")
     tool_digest = sha256(tool.read_bytes()).hexdigest()
     packet = {"schema_version": 1, "repository": "local/one", "run_id": "20261017-100000Z-" + "e" * 32,
-        "builder_run_id": "run-" + "f" * 32, "engine_run_dir": str(tmp_path / "run-assets"), "hooks": {},
+        "builder_run_id": "run-" + "f" * 32, "engine_run_dir": str(tmp_path / "run-assets"),
+        "output_root": str(output), "hooks": {},
         "session_name": "issue-42", "working_dir": str(tmp_path),
         "daemon_id": "daemon", "container_name": "builder-run-1", "network_id": "none", "user": "1000:1000", "read_only": True,
         "contract_sha256": "a" * 64, "command_sha256": sha256(b"echo safe").hexdigest(), "controller_container_id": "1" * 64,
@@ -86,7 +91,7 @@ def launch(tmp_path, monkeypatch):
             "--log-driver=none", "--network", "none", "--memory", "33554432", "--memory-swap", "33554432", "--pids-limit", "32", "--cpus", "1.0"]}))
     config.chmod(0o400)
     packet["devcontainer_config_sha256"] = sha256(config.read_bytes()).hexdigest()
-    path = tmp_path / "launch.json"
+    path = control / "launch.json"
     path.write_text(json.dumps(packet))
     path.chmod(0o400)
     engine = Engine(packet)
@@ -309,7 +314,7 @@ def test_output_overflow_retains_unknown_result_and_stops(launch):
     runner.on_orchestrator_shutdown()
     record = json.loads(runner.receipt_path().read_text())
     assert record["overflow"] and record["provider_exit_code"] is None and not engine.running
-    assert runner.receipt_path().with_name("docker-output.log").stat().st_size == 0
+    assert (Path(packet["output_root"]) / packet["run_id"] / "docker-output.log").stat().st_size == 0
 
 
 def test_hooks_are_executed_only_in_the_verified_worker_and_before_provider(launch):
@@ -352,7 +357,7 @@ def test_typed_preparation_binds_engine_run_and_exact_command_through_pluggy(lau
     pm = pluggy.PluginManager("issue_orchestrator")
     pm.add_hookspecs(TerminalSpec)
     pm.register(runner)
-    assets = FileSystemSessionOutput().start_run(root, "coding-1", issue_number=42)
+    assets = FileSystemSessionOutput().start_run(Path(packet["working_dir"]), "coding-1", issue_number=42)
     PluggySessionRunner(pm).prepare_session(assets, "issue-42", "echo safe")
     prepared = json.loads(runner.launch_path.read_bytes())
     assert prepared["run_id"] == assets.run_id
@@ -365,7 +370,7 @@ def test_typed_preparation_binds_engine_run_and_exact_command_through_pluggy(lau
         PluggySessionRunner(pm).prepare_session(assets, "issue-42", "echo safe")
     engine.packet = prepared
     engine.record_path = runner.receipt_path()
-    assert PluggySessionRunner(pm).create_session(42, "echo safe", str(root), None, "issue-42")
+    assert PluggySessionRunner(pm).create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
     runner.on_orchestrator_shutdown()
     assert runner.public_receipt("issue-42")["run_id"] == assets.run_id
 
@@ -424,3 +429,121 @@ def test_cli_timeout_kills_descendants_after_the_cli_leader_exits(tmp_path):
     except (FileNotFoundError, ProcessLookupError):
         status = "gone"
     assert status in {"Z", "gone"}
+
+
+def test_ordinary_output_and_cli_scratch_stay_outside_settlement(launch):
+    runner, engine, packet, calls = launch
+    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    runner.on_orchestrator_shutdown()
+    ordinary = Path(packet["output_root"]) / packet["run_id"]
+    assert calls[0][1]["environment"]["HOME"] == str(ordinary / "home")
+    assert calls[0][1]["environment"]["TMPDIR"] == str(ordinary / "tmp")
+    assert calls[0][1]["diagnostic_path"] == ordinary / "docker-cli.log"
+    assert (ordinary / "docker-output.log").read_bytes() == b"known-output\n"
+    assert runner.get_session_output(42, 10, "issue-42") == "known-output"
+    assert not runner.receipt_path().with_name("docker-output.log").exists()
+    for path in (ordinary, ordinary / "home", ordinary / "tmp"):
+        assert path.stat().st_uid == os.getuid() and path.stat().st_mode & 0o777 == 0o700
+
+
+@pytest.mark.parametrize("change", ["missing", "relative", "normalized", "symlink", "public", "settlement", "receipt-with-template", "mount-parent", "mount-child", "mount-alias", "projected-root", "absent"])
+def test_output_custody_refuses_before_cli_and_exec(launch, change):
+    runner, engine, packet, calls = launch
+    output = Path(packet["output_root"])
+    if change == "missing":
+        packet.pop("output_root")
+    elif change == "relative":
+        packet["output_root"] = "output"
+    elif change == "normalized":
+        packet["output_root"] += "/../output"
+    elif change == "symlink":
+        alias = output.with_name("alias")
+        alias.symlink_to(output, target_is_directory=True)
+        packet["output_root"] = str(alias)
+    elif change == "public":
+        output.chmod(0o755)
+    elif change == "settlement":
+        packet["output_root"] = str(runner.launch_path.parent)
+    elif change == "receipt-with-template":
+        runner.template_path = output.parent / "other-settlement/template.json"
+        packet["output_root"] = str(runner.launch_path.parent)
+    elif change == "mount-alias":
+        alias = output.with_name("alias")
+        alias.symlink_to(output, target_is_directory=True)
+        packet["mounts"] = [{"source": str(alias), "target": "/unused", "read_only": True}]
+    elif change == "projected-root":
+        packet["worker_authority"] = {}
+    elif change == "absent":
+        output.rmdir()
+    else:
+        exposed = output.parent if change == "mount-parent" else output / "child"
+        packet["mounts"] = [{"source": str(exposed), "target": str(exposed), "read_only": True}]
+    runner.launch_path.chmod(0o600)
+    runner.launch_path.write_bytes(canonical(packet))
+    runner.launch_path.chmod(0o400)
+    assert not runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    assert calls == [] and engine.starts == 0
+
+
+def test_ordinary_output_enospc_still_stops_worker_and_persists_receipt(launch, monkeypatch):
+    import errno
+    runner, engine, packet, _ = launch
+    original_open = Path.open
+    def open_file(path, *args, **kwargs):
+        if path.name == "docker-output.log":
+            raise OSError(errno.ENOSPC, "ordinary allocation exhausted")
+        return original_open(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "open", open_file)
+    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    runner.on_orchestrator_shutdown()
+    record = json.loads(runner.receipt_path().read_bytes())
+    assert record["state"] == "stopped" and not engine.running
+    assert record["error"] == "provider-unsettled-or-bound-exhausted"
+    assert record["provider_exit_code"] is None and engine.starts == 0
+    assert runner.public_receipt("issue-42")["container_id"] == "2" * 64
+
+
+def test_restarted_runner_reads_same_ordinary_output_without_replay(launch):
+    runner, engine, packet, calls = launch
+    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    runner.on_orchestrator_shutdown()
+    restored = DockerPlugin(launch_path=runner.launch_path, engine=engine)
+    assert restored.get_session_output(42, 10, "issue-42") == "known-output"
+    restored.on_orchestrator_startup()
+    assert not restored.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    assert engine.starts == 1 and len(calls) == 1
+
+
+def test_run_output_directory_substitution_still_stops_worker(launch, monkeypatch):
+    runner, engine, packet, calls = launch
+    def replace_output(*args, **kwargs):
+        calls.append((args, kwargs))
+        ordinary = Path(packet["output_root"]) / packet["run_id"]
+        ordinary.rename(ordinary.with_name("original"))
+        ordinary.symlink_to(ordinary.with_name("original"), target_is_directory=True)
+        return json.dumps({"containerId": "2" * 64}).encode()
+    monkeypatch.setattr("issue_orchestrator.execution.terminal_docker.run_cli", replace_output)
+    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    runner.on_orchestrator_shutdown()
+    record = json.loads(runner.receipt_path().read_bytes())
+    assert record["state"] == "stopped" and not engine.running
+    assert record["provider_exit_code"] is None and engine.starts == 0
+
+
+def test_cli_writes_only_ordinary_home_and_tmp(launch, monkeypatch):
+    runner, engine, packet, calls = launch
+    def write_scratch(*args, **kwargs):
+        calls.append((args, kwargs))
+        environment = kwargs["environment"]
+        Path(environment["HOME"], "cli-home-canary").write_text("home")
+        Path(environment["TMPDIR"], "cli-tmp-canary").write_text("temporary")
+        kwargs["diagnostic_path"].write_text("cli diagnostic")
+        return json.dumps({"containerId": "2" * 64}).encode()
+    monkeypatch.setattr("issue_orchestrator.execution.terminal_docker.run_cli", write_scratch)
+    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    runner.on_orchestrator_shutdown()
+    ordinary = Path(packet["output_root"]) / packet["run_id"]
+    assert (ordinary / "home/cli-home-canary").read_text() == "home"
+    assert (ordinary / "tmp/cli-tmp-canary").read_text() == "temporary"
+    assert (ordinary / "docker-cli.log").read_text() == "cli diagnostic"
+    assert {p.name for p in runner.receipt_path().parent.iterdir()} == {"launch.json", "docker-session.json"}
