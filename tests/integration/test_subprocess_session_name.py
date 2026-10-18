@@ -82,6 +82,7 @@ class TestSessionNameFlow:
             working_dir=str(worktree),
             title="Review PR #3865",
             session_name="review-3865",  # This is the key parameter!
+            secret_env=None,
         )
 
         try:
@@ -121,6 +122,7 @@ class TestSessionNameFlow:
             working_dir=str(worktree),
             title="Issue #123",
             session_name="issue-123",  # Caller computes name
+            secret_env=None,
         )
 
         try:

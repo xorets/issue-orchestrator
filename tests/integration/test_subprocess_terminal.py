@@ -128,6 +128,7 @@ def test_subprocess_session_writes_completion_and_log(tmp_path, monkeypatch):
         working_dir=str(worktree),
         title="Subprocess integration test",
         session_name=session_name,
+        secret_env=None,
     )
     assert created is True
 
@@ -171,6 +172,7 @@ def test_subprocess_send_input_writes_to_log(tmp_path, monkeypatch):
         working_dir=str(worktree),
         title="Subprocess input test",
         session_name=session_name,
+        secret_env=None,
     )
     assert created is True
 

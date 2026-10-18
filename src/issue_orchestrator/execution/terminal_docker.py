@@ -437,7 +437,7 @@ class DockerPlugin:
 
     @hookimpl
     def create_session(self, session_id: int, command: str, working_dir: str, title: str | None,
-                       session_name: str, secret_env: dict[str, str] | None = None) -> bool:
+                       session_name: str, secret_env: dict[str, str] | None) -> bool:
         reserved = False
         packet = None
         try:

@@ -122,7 +122,7 @@ def test_kill_stops_worker_in_another_group_of_the_agent_session(
         monkeypatch.setenv("ISSUE_ORCHESTRATOR_REPO_ROOT", str(tmp_path))
         plugin = SubprocessPlugin()
         command = f"export ISSUE_ORCHESTRATOR_RUN_DIR='{tmp_path / 'output'}' && {sys.executable} {agent_script}"
-        assert plugin.create_session(42, command, str(tmp_path), "fixture", "issue-42")
+        assert plugin.create_session(42, command, str(tmp_path), "fixture", "issue-42", secret_env=None)
     else:
         session = AgentRunner().start(spec)
     worker_pid: int | None = None

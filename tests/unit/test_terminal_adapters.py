@@ -62,6 +62,47 @@ class TestPluggySessionRunner:
         assert "Creating session via terminal hook" in caplog.text
         assert "id=42" in caplog.text
 
+    def test_real_pluggy_dispatch_supplies_provider_environment_to_subprocess(self, tmp_path, monkeypatch, caplog):
+        import pluggy
+        from issue_orchestrator.execution.session_runner_adapter import PluggySessionRunner
+        from issue_orchestrator.execution.terminal_subprocess import SubprocessPlugin
+        from issue_orchestrator.infra.hooks.hookspec import TerminalSpec
+        from tests.unit.session_run_helpers import make_session_run_assets
+
+        monkeypatch.setenv("ISSUE_ORCHESTRATOR_REPO_ROOT", str(tmp_path))
+        run = make_session_run_assets(tmp_path, session_name="issue-42")
+        private = {"PROVIDER_KEY": "synthetic-provider-secret"}
+        manager = pluggy.PluginManager("issue_orchestrator")
+        manager.add_hookspecs(TerminalSpec)
+        manager.register(SubprocessPlugin())
+
+        def start(runner, spec, *, interaction_handler=None):
+            assert spec.env_overrides == private
+            assert "synthetic-provider-secret" not in repr(spec.command)
+            raise RuntimeError("synthetic process boundary reached")
+
+        monkeypatch.setattr("issue_orchestrator.execution.terminal_subprocess.AgentRunner.start", start)
+        with pytest.raises(RuntimeError, match="synthetic process boundary reached"):
+            PluggySessionRunner(manager).create_session(42,
+                f"export ISSUE_ORCHESTRATOR_RUN_DIR='{run.run_dir}' && echo safe",
+                str(tmp_path), None, "issue-42", secret_env=private)
+        assert "synthetic-provider-secret" not in caplog.text
+
+    def test_real_pluggy_dispatch_keeps_plugins_that_omit_secret_environment(self):
+        import pluggy
+        from issue_orchestrator.execution.session_runner_adapter import PluggySessionRunner
+        from issue_orchestrator.infra.hooks.hookspec import TerminalSpec, hookimpl
+
+        class LegacyPlugin:
+            @hookimpl
+            def create_session(self, session_id, command, working_dir, title, session_name):
+                return session_id == 42 and session_name == "issue-42"
+
+        manager = pluggy.PluginManager("issue_orchestrator")
+        manager.add_hookspecs(TerminalSpec)
+        manager.register(LegacyPlugin())
+        assert PluggySessionRunner(manager).create_session(42, "echo safe", "/workspace", None, "issue-42")
+
     def test_create_session_returns_none(self, session_runner, mock_plugin_manager):
         """create_session returns False when hook returns None."""
         mock_plugin_manager.hook.create_session.return_value = None

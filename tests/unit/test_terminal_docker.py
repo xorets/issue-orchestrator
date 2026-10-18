@@ -107,7 +107,7 @@ def launch(tmp_path, monkeypatch):
 def test_missing_launch_refuses_without_native_fallback(tmp_path, monkeypatch):
     monkeypatch.delenv("ISSUE_ORCHESTRATOR_DOCKER_LAUNCH", raising=False)
     runner = DockerPlugin()
-    assert runner.create_session(42, "echo safe", str(tmp_path), None, "issue-42") is False
+    assert runner.create_session(42, "echo safe", str(tmp_path), None, "issue-42", secret_env=None) is False
     assert runner.terminal_health_check()["healthy"] is False
 
 
@@ -115,11 +115,11 @@ def test_packet_cannot_be_read_from_writable_or_symlinked_file(tmp_path):
     path = tmp_path / "launch.json"
     path.write_text("{}")
     runner = DockerPlugin(launch_path=path)
-    assert runner.create_session(42, "echo safe", str(tmp_path), None, "issue-42") is False
+    assert runner.create_session(42, "echo safe", str(tmp_path), None, "issue-42", secret_env=None) is False
     path.chmod(0o400)
     linked = tmp_path / "link"
     linked.symlink_to(path)
-    assert DockerPlugin(launch_path=linked).create_session(42, "echo safe", str(tmp_path), None, "issue-42") is False
+    assert DockerPlugin(launch_path=linked).create_session(42, "echo safe", str(tmp_path), None, "issue-42", secret_env=None) is False
 
 
 def test_launch_persists_exec_before_start_and_stops_entire_worker(launch):
@@ -134,14 +134,54 @@ def test_launch_persists_exec_before_start_and_stops_entire_worker(launch):
     record = json.loads(runner.receipt_path().read_text())
     assert record["state"] == "stopped" and record["provider_exit_code"] == 0 and not engine.running
     assert runner.custody("issue-42").container_id == "2" * 64
-    assert not runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    assert not runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
     assert json.loads(runner.receipt_path().read_text()) == record
     assert engine.starts == 1
 
 
+def test_real_pluggy_dispatch_preserves_allocated_completion_and_provider_secrets(
+    launch, tmp_path, tmp_path_factory, monkeypatch, caplog,
+):
+    from dataclasses import replace
+    import pluggy
+    from issue_orchestrator.control.session_env import docker_session_secret_env
+    from issue_orchestrator.execution.issue_run_ledger import SqliteIssueRunLedger
+    from issue_orchestrator.execution.session_output_adapter import FileSystemSessionOutput
+    from issue_orchestrator.execution.session_runner_adapter import PluggySessionRunner
+    from issue_orchestrator.infra.hooks.hookspec import TerminalSpec
+    from tests.unit.test_issue_run_evidence import run_record
+
+    plugin, engine, packet, calls = launch
+    run = FileSystemSessionOutput().start_run(Path(packet["working_dir"]), "coding-1", issue_number=42)
+    ledger = SqliteIssueRunLedger(tmp_path_factory.mktemp("controller-state") / "runs.sqlite", repo_slug="local/one")
+    monkeypatch.setattr("secrets.token_urlsafe", lambda count: "s" * 64)
+    ledger.record_run(42, replace(run_record(tmp_path), run=run))
+    private = docker_session_secret_env(ledger, run, {"PROVIDER_KEY": "provider-secret-canary"})
+    capability = ledger.submission_capability(run)
+    packet.update(run_id=run.run_id, engine_run_dir=str(run.run_dir))
+    plugin.launch_path.chmod(0o600)
+    plugin.launch_path.write_bytes(canonical(packet))
+    plugin.launch_path.chmod(0o400)
+    manager = pluggy.PluginManager("issue_orchestrator")
+    manager.add_hookspecs(TerminalSpec)
+    manager.register(plugin)
+    try:
+        assert PluggySessionRunner(manager).create_session(42, "echo safe", packet["working_dir"],
+            None, "issue-42", secret_env=private)
+    finally:
+        plugin.on_orchestrator_shutdown()
+    assert set(engine.created_exec["Env"]) == {"PROVIDER_KEY=provider-secret-canary",
+        "ISSUE_ORCHESTRATOR_COMPLETION_CAPABILITY=" + capability}
+    for secret in (capability, "provider-secret-canary"):
+        assert secret not in caplog.text
+        assert secret not in repr(calls)
+        assert secret not in plugin.launch_path.read_text()
+        assert secret not in plugin.receipt_path().read_text()
+
+
 def test_wrong_command_never_creates_worker(launch):
     runner, engine, packet, calls = launch
-    assert not runner.create_session(42, "unadmitted", packet["working_dir"], None, "issue-42")
+    assert not runner.create_session(42, "unadmitted", packet["working_dir"], None, "issue-42", secret_env=None)
     assert calls == [] and engine.starts == 0
 
 
@@ -204,7 +244,7 @@ def bridge_launch(launch):
 
 def test_selected_bridge_launch_preserves_verified_endpoints(bridge_launch):
     runner, engine, packet, _ = bridge_launch
-    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
     runner.on_orchestrator_shutdown()
     assert engine.starts == 1
     assert runner.public_receipt("issue-42")["container_id"] == "2" * 64
@@ -217,7 +257,7 @@ def test_controller_membership_is_rechecked_after_create_before_any_exec(bridge_
         engine.controller_endpoint["IPAddress"] = "172.28.64.4"
         return json.dumps({"containerId": "2" * 64}).encode()
     monkeypatch.setattr("issue_orchestrator.execution.terminal_docker.run_cli", create)
-    assert not runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    assert not runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
     assert len(calls) == 1 and engine.created_exec is None
 
 
@@ -232,7 +272,7 @@ def test_invalid_sealed_network_refuses_before_cli(bridge_launch, change):
     runner.launch_path.chmod(0o600)
     runner.launch_path.write_bytes(canonical(packet))
     runner.launch_path.chmod(0o400)
-    assert not runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    assert not runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
     assert calls == [] and engine.created_exec is None
 
 
@@ -251,7 +291,7 @@ def test_invalid_sealed_network_refuses_before_cli(bridge_launch, change):
 def test_network_or_controller_drift_refuses_before_cli(bridge_launch, subject, change):
     runner, engine, packet, calls = bridge_launch
     getattr(engine, subject).update(copy.deepcopy(change))
-    accepted = runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    accepted = runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
     if accepted:
         runner.on_orchestrator_shutdown()
     assert not accepted
@@ -277,7 +317,7 @@ def test_created_worker_network_drift_refuses_before_hooks_and_provider(bridge_l
         getattr(engine, subject).update(copy.deepcopy(change))
     else:
         setattr(engine, subject, change)
-    accepted = runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    accepted = runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
     if accepted:
         runner.on_orchestrator_shutdown()
     assert not accepted
@@ -289,7 +329,7 @@ def test_docker_exec_receives_only_the_explicit_scoped_callback_token(launch, mo
     monkeypatch.setenv("ISSUE_ORCHESTRATOR_AGENT_CALLBACK_TOKEN", "d" * 64)
     monkeypatch.setenv("ISSUE_ORCHESTRATOR_API_TOKEN", "admin-not-forwarded")
     monkeypatch.setenv("GH_TOKEN", "github-not-forwarded")
-    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
     runner.on_orchestrator_shutdown()
     assert engine.created_exec["Env"] == ["ISSUE_ORCHESTRATOR_AGENT_CALLBACK_TOKEN=" + "d" * 64]
     assert "d" * 64 not in repr(calls)
@@ -297,7 +337,7 @@ def test_docker_exec_receives_only_the_explicit_scoped_callback_token(launch, mo
 
 def test_changed_daemon_never_stops_a_foreign_worker(launch):
     runner, engine, packet, calls = launch
-    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
     runner.on_orchestrator_shutdown()
     engine.daemon = "foreign-daemon"
     with pytest.raises(ValueError, match="daemon"):
@@ -310,7 +350,7 @@ def test_output_overflow_retains_unknown_result_and_stops(launch):
     runner.launch_path.chmod(0o600)
     runner.launch_path.write_text(json.dumps(packet))
     runner.launch_path.chmod(0o400)
-    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
     runner.on_orchestrator_shutdown()
     record = json.loads(runner.receipt_path().read_text())
     assert record["overflow"] and record["provider_exit_code"] is None and not engine.running
@@ -323,7 +363,7 @@ def test_hooks_are_executed_only_in_the_verified_worker_and_before_provider(laun
     runner.launch_path.chmod(0o600)
     runner.launch_path.write_text(json.dumps(packet))
     runner.launch_path.chmod(0o400)
-    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
     runner.on_orchestrator_shutdown()
     record = json.loads(runner.receipt_path().read_text())
     assert engine.exec_payloads["3" * 64]["Cmd"] == ["/bin/echo", "hook-canary"]
@@ -387,7 +427,7 @@ def test_unsafe_generated_configuration_is_refused_before_cli_start(launch):
     runner.launch_path.chmod(0o600)
     runner.launch_path.write_bytes(canonical(packet))
     runner.launch_path.chmod(0o400)
-    assert not runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    assert not runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
     assert calls == [] and engine.starts == 0
 
 
@@ -404,7 +444,7 @@ def test_exact_local_image_id_is_supported_without_a_registry_digest(launch):
     runner.launch_path.chmod(0o600)
     runner.launch_path.write_bytes(canonical(packet))
     runner.launch_path.chmod(0o400)
-    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
     runner.on_orchestrator_shutdown()
     assert runner.public_receipt("issue-42")["provider_exec_id"] == "3" * 64
 
@@ -433,7 +473,7 @@ def test_cli_timeout_kills_descendants_after_the_cli_leader_exits(tmp_path):
 
 def test_ordinary_output_and_cli_scratch_stay_outside_settlement(launch):
     runner, engine, packet, calls = launch
-    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
     runner.on_orchestrator_shutdown()
     ordinary = Path(packet["output_root"]) / packet["run_id"]
     assert calls[0][1]["environment"]["HOME"] == str(ordinary / "home")
@@ -481,7 +521,7 @@ def test_output_custody_refuses_before_cli_and_exec(launch, change):
     runner.launch_path.chmod(0o600)
     runner.launch_path.write_bytes(canonical(packet))
     runner.launch_path.chmod(0o400)
-    assert not runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    assert not runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
     assert calls == [] and engine.starts == 0
 
 
@@ -494,7 +534,7 @@ def test_ordinary_output_enospc_still_stops_worker_and_persists_receipt(launch, 
             raise OSError(errno.ENOSPC, "ordinary allocation exhausted")
         return original_open(path, *args, **kwargs)
     monkeypatch.setattr(Path, "open", open_file)
-    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
     runner.on_orchestrator_shutdown()
     record = json.loads(runner.receipt_path().read_bytes())
     assert record["state"] == "stopped" and not engine.running
@@ -505,12 +545,12 @@ def test_ordinary_output_enospc_still_stops_worker_and_persists_receipt(launch, 
 
 def test_restarted_runner_reads_same_ordinary_output_without_replay(launch):
     runner, engine, packet, calls = launch
-    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
     runner.on_orchestrator_shutdown()
     restored = DockerPlugin(launch_path=runner.launch_path, engine=engine)
     assert restored.get_session_output(42, 10, "issue-42") == "known-output"
     restored.on_orchestrator_startup()
-    assert not restored.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    assert not restored.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
     assert engine.starts == 1 and len(calls) == 1
 
 
@@ -523,7 +563,7 @@ def test_run_output_directory_substitution_still_stops_worker(launch, monkeypatc
         ordinary.symlink_to(ordinary.with_name("original"), target_is_directory=True)
         return json.dumps({"containerId": "2" * 64}).encode()
     monkeypatch.setattr("issue_orchestrator.execution.terminal_docker.run_cli", replace_output)
-    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
     runner.on_orchestrator_shutdown()
     record = json.loads(runner.receipt_path().read_bytes())
     assert record["state"] == "stopped" and not engine.running
@@ -540,7 +580,7 @@ def test_cli_writes_only_ordinary_home_and_tmp(launch, monkeypatch):
         kwargs["diagnostic_path"].write_text("cli diagnostic")
         return json.dumps({"containerId": "2" * 64}).encode()
     monkeypatch.setattr("issue_orchestrator.execution.terminal_docker.run_cli", write_scratch)
-    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42")
+    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
     runner.on_orchestrator_shutdown()
     ordinary = Path(packet["output_root"]) / packet["run_id"]
     assert (ordinary / "home/cli-home-canary").read_text() == "home"

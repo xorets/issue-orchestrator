@@ -52,6 +52,7 @@ def test_subprocess_session_writes_log(tmp_path, monkeypatch):
         working_dir=str(worktree),
         title="Test session",
         session_name="issue-123",
+        secret_env=None,
     )
     assert created is True
 
@@ -213,6 +214,7 @@ def test_subprocess_session_auto_accepts_claude_trust_prompt(tmp_path, monkeypat
         working_dir=str(worktree),
         title="Trust prompt test",
         session_name="issue-123",
+        secret_env=None,
     )
     assert created is True
 

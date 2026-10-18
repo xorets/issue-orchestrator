@@ -41,8 +41,12 @@ and interactive input are unsupported in this first noninteractive backend.
 
 The provider command is never evaluated in the service shell. Docker exec-create
 returns an immutable ID, recorded durably before exec-start. Credentials travel
-only in the Unix Docker API request, separately from command argv. Provider
-retries are capped at one attempt on the prepared Docker path. Raw hook/provider
+only in the Unix Docker API request, separately from command argv. The terminal
+hook spec and both built-in implementations require the nullable `secret_env`
+argument because Pluggy forwards only required implementation arguments. Public
+session facades supply `None` when absent; plugins that omit this argument remain
+compatible. Provider retries are capped at one attempt on the prepared Docker
+path. Raw hook/provider
 output shares a byte bound and global deadline; Docker's task log driver is
 disabled. Provider exit and complete-container stop are separate observations.
 No automatic container removal discards evidence.
