@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import time
 
 
 def sealed_bytes(path: Path, *, expected: str | None = None, limit: int = 1024 * 1024) -> bytes:
@@ -29,6 +30,27 @@ def sealed_bytes(path: Path, *, expected: str | None = None, limit: int = 1024 *
 
 def canonical(value: dict) -> bytes:
     return (json.dumps(value, sort_keys=True, indent=2) + "\n").encode()
+
+
+def control_manifest_bytes(value: dict) -> bytes:
+    """Validate a trusted fetched policy without replacing or renewing its content."""
+    if (not isinstance(value, dict) or set(value) != {"fetched_unix_ns", "manifest"} or
+            type(value["fetched_unix_ns"]) is not int or
+            not 0 <= time.time_ns() - value["fetched_unix_ns"] < 300_000_000_000):
+        raise ValueError("Docker control manifest is malformed, future or stale")
+    manifest = value["manifest"]
+    if not isinstance(manifest, dict):
+        raise ValueError("Docker control manifest policy is missing")
+    for name, required in (("disallowedFeatures", ("featureIdPrefix",)),
+            ("featureAdvisories", ("featureId", "introducedInVersion", "fixedInVersion", "description"))):
+        rows = manifest.get(name)
+        if (not isinstance(rows, list) or any(not isinstance(row, dict) or
+                any(not isinstance(row.get(key), str) for key in required) for row in rows)):
+            raise ValueError("Docker control manifest policy rows are invalid")
+    raw = (json.dumps(manifest, sort_keys=True, indent=2, allow_nan=False) + "\n").encode()
+    if len(raw) > 65536:
+        raise ValueError("Docker control manifest exceeds bound")
+    return raw
 
 
 def network_arguments(packet: dict) -> list[str]:

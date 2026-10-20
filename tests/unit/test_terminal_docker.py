@@ -43,6 +43,8 @@ class Engine:
             exec_id = format(3 + len(self.exec_payloads), "x") * 64
             self.exec_payloads[exec_id] = payload
             return {"Id": exec_id}
+        if route == "/containers/" + self.packet["container_name"] + "/json":
+            raise ValueError("reserved container has not been created")
         if route.startswith("/exec/"):
             exec_id = route.split("/")[2]
             assert exec_id in self.exec_payloads
@@ -372,12 +374,14 @@ def test_hooks_are_executed_only_in_the_verified_worker_and_before_provider(laun
     assert "hook-canary" not in repr(calls)
 
 
-def test_typed_preparation_binds_engine_run_and_exact_command_through_pluggy(launch, monkeypatch):
+@pytest.mark.parametrize("tamper_manifest", [False, True])
+def test_typed_preparation_binds_engine_run_and_exact_command_through_pluggy(launch, monkeypatch, manifest_clock, tamper_manifest):
     import pluggy
     from issue_orchestrator.execution.session_output_adapter import FileSystemSessionOutput
     from issue_orchestrator.execution.session_runner_adapter import PluggySessionRunner
     from issue_orchestrator.infra.hooks.hookspec import TerminalSpec
     runner, engine, packet, calls = launch
+    packet["control_manifest"] = control_manifest()
     root = runner.launch_path.parent
     template_path = root / "template.json"
     template = {**packet, "run_id": "", "engine_run_dir": "", "command_sha256": "0" * 64}
@@ -398,9 +402,19 @@ def test_typed_preparation_binds_engine_run_and_exact_command_through_pluggy(lau
     pm.add_hookspecs(TerminalSpec)
     pm.register(runner)
     assets = FileSystemSessionOutput().start_run(Path(packet["working_dir"]), "coding-1", issue_number=42)
+    if tamper_manifest:
+        template["control_manifest"]["manifest"]["disallowedFeatures"] = []
+        template_path.chmod(0o600)
+        template_path.write_bytes(canonical(template))
+        template_path.chmod(0o400)
+        with pytest.raises(ValueError, match="immutable contract intent"):
+            PluggySessionRunner(pm).prepare_session(assets, "issue-42", "echo safe")
+        assert not (root / assets.run_id).exists() and not calls
+        return
     PluggySessionRunner(pm).prepare_session(assets, "issue-42", "echo safe")
     prepared = json.loads(runner.launch_path.read_bytes())
     assert prepared["run_id"] == assets.run_id
+    assert prepared["control_manifest"] == template["control_manifest"]
     assert prepared["builder_run_id"] == template["builder_run_id"]
     assert prepared["engine_run_dir"] == str(assets.run_dir)
     assert prepared["command_sha256"] == sha256(b"echo safe").hexdigest()
@@ -587,3 +601,95 @@ def test_cli_writes_only_ordinary_home_and_tmp(launch, monkeypatch):
     assert (ordinary / "tmp/cli-tmp-canary").read_text() == "temporary"
     assert (ordinary / "docker-cli.log").read_text() == "cli diagnostic"
     assert {p.name for p in runner.receipt_path().parent.iterdir()} == {"launch.json", "docker-session.json"}
+
+
+@pytest.fixture
+def manifest_clock(monkeypatch):
+    now = time.time_ns()
+    monkeypatch.setattr(time, "time_ns", lambda: now)
+    return now
+
+
+def control_manifest():
+    return {"fetched_unix_ns": time.time_ns() - 1_000_000_000,
+        "manifest": json.loads((Path(__file__).parents[1] / "fixtures/devcontainer-control-manifest.json").read_bytes())}
+
+
+@pytest.mark.parametrize("empty_policy", [False, True])
+def test_sealed_control_manifest_seeds_actual_cli_cache_without_renewing_fetch_time(launch, manifest_clock, empty_policy):
+    import pwd
+    runner, engine, packet, calls = launch
+    packet["control_manifest"] = control_manifest()
+    if empty_policy:
+        packet["control_manifest"]["manifest"] = {"disallowedFeatures": [], "featureAdvisories": []}
+    runner.launch_path.chmod(0o600)
+    runner.launch_path.write_bytes(canonical(packet))
+    runner.launch_path.chmod(0o400)
+    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
+    runner.on_orchestrator_shutdown()
+    cache = Path(calls[0][1]["environment"]["TMPDIR"]) / ("devcontainercli-" + pwd.getpwuid(os.geteuid()).pw_name) / "control-manifest.json"
+    assert cache.read_bytes() == canonical(packet["control_manifest"]["manifest"])
+    assert cache.stat().st_mtime_ns == packet["control_manifest"]["fetched_unix_ns"]
+    assert cache.stat().st_mode & 0o777 == 0o600
+    assert cache.parent.stat().st_mode & 0o777 == 0o700
+    assert engine.starts == 1
+
+
+@pytest.mark.parametrize("change", ["stale", "future", "missing-array", "wrong-array", "bad-row", "unbounded", "extra-envelope"])
+def test_invalid_control_manifest_refuses_before_cli_or_external_effects(launch, monkeypatch, manifest_clock, change):
+    runner, engine, packet, calls = launch
+    value = control_manifest()
+    if change == "stale":
+        value["fetched_unix_ns"] -= 300_000_000_000
+    elif change == "future":
+        value["fetched_unix_ns"] += 10_000_000_000
+    elif change == "missing-array":
+        del value["manifest"]["disallowedFeatures"]
+    elif change == "wrong-array":
+        value["manifest"]["featureAdvisories"] = {}
+    elif change == "bad-row":
+        value["manifest"]["disallowedFeatures"][0]["featureIdPrefix"] = ["unsafe"]
+    elif change == "unbounded":
+        value["manifest"]["featureAdvisories"][0]["description"] = "x" * 65536
+    else:
+        value["cache_path"] = "/arbitrary/cache"
+    packet["control_manifest"] = value
+    runner.launch_path.chmod(0o600)
+    runner.launch_path.write_bytes(canonical(packet))
+    runner.launch_path.chmod(0o400)
+    monkeypatch.setattr(engine, "request", lambda *args: pytest.fail("invalid input reached Docker"))
+    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None) is False
+    assert not calls and engine.created_exec is None
+    assert not runner.receipt_path().exists()
+
+
+def test_expired_cli_timeout_refuses_before_spawning(monkeypatch):
+    from issue_orchestrator.execution.terminal_docker import run_cli
+    monkeypatch.setattr("subprocess.Popen", lambda *args, **kwargs: pytest.fail("expired CLI spawned"))
+    with pytest.raises(ValueError, match="deadline"):
+        run_cli(["unused"], environment={}, timeout=0)
+
+
+def test_cli_success_after_packet_deadline_stops_worker_without_provider_exec(launch, monkeypatch):
+    runner, engine, packet, calls = launch
+    clock = [packet["deadline_unix_ns"] - 1_000_000_000]
+    monkeypatch.setattr(time, "time_ns", lambda: clock[0])
+    def late_success(*args, **kwargs):
+        clock[0] = packet["deadline_unix_ns"] + 1
+        return json.dumps({"containerId": "2" * 64}).encode()
+    monkeypatch.setattr("issue_orchestrator.execution.terminal_docker.run_cli", late_success)
+    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None) is False
+    assert engine.created_exec is None and engine.starts == 0
+    assert not engine.running
+
+
+def test_unsafe_cli_account_name_cannot_choose_a_cache_path(launch, monkeypatch, manifest_clock):
+    from types import SimpleNamespace
+    runner, engine, packet, calls = launch
+    packet["control_manifest"] = control_manifest()
+    runner.launch_path.chmod(0o600)
+    runner.launch_path.write_bytes(canonical(packet))
+    runner.launch_path.chmod(0o400)
+    monkeypatch.setattr("pwd.getpwuid", lambda uid: SimpleNamespace(pw_name="../../elsewhere"))
+    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None) is False
+    assert not calls and engine.created_exec is None

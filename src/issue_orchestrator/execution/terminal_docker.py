@@ -5,12 +5,14 @@ packet, retains Docker identities before start, and never replays a launch.
 """
 from __future__ import annotations
 
+from contextlib import suppress
 from hashlib import sha256
 import json
 import ipaddress
 import logging
 import os
 from pathlib import Path
+import pwd
 import re
 import selectors
 import signal
@@ -24,7 +26,7 @@ from ..domain.docker_execution import DockerSessionState
 from ..domain.session_run import SessionRunAssets
 from ..infra.hooks.hookspec import hookimpl
 from .docker_engine import DockerEngine
-from .docker_launch_input import canonical as canonical, sealed_bytes as sealed_bytes, network_arguments
+from .docker_launch_input import canonical as canonical, sealed_bytes as sealed_bytes, network_arguments, control_manifest_bytes
 from .docker_worker_authority import worker_environment
 
 logger = logging.getLogger(__name__)
@@ -38,6 +40,22 @@ def private_directory(path: Path, *, create: bool = False) -> Path:
             info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700):
         raise ValueError("Docker ordinary output directory is not private and canonical")
     return path
+
+
+def seed_control_manifest(packet: dict, temporary: Path) -> None:
+    """Use the pinned CLI cache path and the actual fetch time, never copy time."""
+    if "control_manifest" not in packet:
+        return
+    raw = control_manifest_bytes(packet["control_manifest"])
+    username = pwd.getpwuid(os.geteuid()).pw_name
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", username):
+        raise ValueError("Docker CLI account name is unsafe")
+    cache = private_directory(temporary / ("devcontainercli-" + username), create=True) / "control-manifest.json"
+    descriptor = os.open(cache, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "wb") as destination:
+        destination.write(raw)
+    fetched = packet["control_manifest"]["fetched_unix_ns"]
+    os.utime(cache, ns=(fetched, fetched), follow_symlinks=False)
 
 
 def require_worker_identity(actual: dict, container_id: str, launch_digest: str) -> None:
@@ -130,6 +148,8 @@ def require_worker_network(actual: dict, packet: dict) -> None:
 
 def run_cli(argv: list[str], *, environment: dict[str, str], timeout: float, diagnostic_path: Path | None = None) -> bytes:
     """Bound both CLI pipes before allocation and kill descendants on timeout."""
+    if timeout <= 0:
+        raise ValueError("Dev Container CLI deadline exhausted")
     child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, env=environment, start_new_session=True)
     assert child.stdout is not None and child.stderr is not None
@@ -160,10 +180,8 @@ def run_cli(argv: list[str], *, environment: dict[str, str], timeout: float, dia
     finally:
         selector.close()
         if not completed:
-            try:
+            with suppress(ProcessLookupError):
                 os.killpg(child.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
         child.wait(timeout=5)
         child.stdout.close()
         child.stderr.close()
@@ -313,6 +331,8 @@ class DockerPlugin:
         packet = json.loads(sealed_bytes(self.launch_path))
         self._validate_identity(packet)
         self._validate_limits(packet)
+        if "control_manifest" in packet:
+            control_manifest_bytes(packet["control_manifest"])
         self._verify_tools(packet)
         self._output_root(packet)
         config = json.loads(sealed_bytes(Path(packet["devcontainer_config"]), expected=packet["devcontainer_config_sha256"]))
@@ -466,9 +486,11 @@ class DockerPlugin:
             ordinary = private_directory(self._output_root(packet) / packet["run_id"], create=True)
             home = private_directory(ordinary / "home", create=True)
             temporary = private_directory(ordinary / "tmp", create=True)
+            seed_control_manifest(packet, temporary)
             environment = {"PATH": str(Path(packet["node"]).parent) + ":/usr/bin:/bin", "HOME": str(home),
                 "TMPDIR": str(temporary),
                 "DOCKER_HOST": "unix:///var/run/docker.sock", "DOCKER_CONFIG": "/nonexistent"}
+            self._validate_limits(packet)
             result = run_cli([packet["node"], packet["devcontainer_cli"], "up", "--workspace-folder", working_dir,
                 "--config", packet["devcontainer_config"], "--docker-path", packet["docker_cli"],
                 "--skip-post-create", "--skip-non-blocking-commands",
@@ -477,7 +499,7 @@ class DockerPlugin:
                 "--container-data-folder", "/tmp/devcontainer-user", "--container-system-data-folder", "/var/devcontainer",
                 "--container-session-data-folder", "/tmp/devcontainer-session",
                 "--id-label", "io.builder.launch=" + launch_digest],
-                environment=environment, timeout=max(0.001, (packet["deadline_unix_ns"] - time.time_ns()) / 1e9),
+                environment=environment, timeout=(packet["deadline_unix_ns"] - time.time_ns()) / 1e9,
                 diagnostic_path=ordinary / "docker-cli.log")
             created = json.loads(result)
             container_id = created.get("containerId", "")
@@ -487,7 +509,9 @@ class DockerPlugin:
             self._record["state"] = DockerSessionState.CREATED
             self._save()
             self._validate_created(packet, container_id, launch_digest)
+            self._validate_limits(packet)
             self._run_hooks(packet)
+            self._validate_limits(packet)
             # API payload is over the trusted Unix socket, never provider argv.
             payload = {"AttachStdout": True, "AttachStderr": True, "AttachStdin": False, "Tty": False,
                 "User": packet["user"], "WorkingDir": working_dir, "Cmd": ["/bin/sh", "-c", command],
