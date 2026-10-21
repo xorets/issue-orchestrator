@@ -117,8 +117,11 @@ the recorded old controller and all recorded workers to be demonstrably stopped.
 The trusted persistent singleton remains Builder's responsibility.
 
 An exclusive reservation survives uncertain create/start acknowledgement.
-Restart stops the exact tracked worker and retains an unknown provider result;
-it never starts an exec again. Lost CLI create acknowledgement is resolved by
+Ordinary discovery preserves a provider still owned by the same live in-process
+watcher and its exact record object, after the existing daemon/container identity
+checks. A persisted receipt alone cannot establish that ownership. A fresh plugin
+instance or a finished watcher retains the restart behavior: stop the exact tracked
+worker and retain an unknown provider result; never start an exec again. Lost CLI create acknowledgement is resolved by
 the reserved container name plus exact launch label before an immutable ID can
 authorize stop. A wrong daemon/foreign label cannot authorize termination.
 `public_receipt()` projects exact technical Docker identities for Builder;

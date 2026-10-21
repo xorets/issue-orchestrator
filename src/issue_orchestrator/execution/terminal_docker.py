@@ -211,6 +211,7 @@ class DockerPlugin:
         self._packet: dict | None = None
         self._lock = threading.RLock()
         self._watcher: threading.Thread | None = None
+        self._watched_record: dict | None = None
 
     def select_run(self, run_id: str) -> None:
         if self.template_path is None or not re.fullmatch(r"[0-9]{8}-[0-9]{6}Z-[0-9a-f]{32}", run_id):
@@ -522,6 +523,7 @@ class DockerPlugin:
             self._record["provider_exec_id"] = exec_id
             self._record["state"] = DockerSessionState.EXEC_CREATED
             self._save()  # Durable before the only allowed exec start.
+            self._watched_record = self._record
             self._watcher = threading.Thread(target=self._run_provider, daemon=True)
             self._watcher.start()
             return True
@@ -689,6 +691,9 @@ class DockerPlugin:
         if record and not record.get("container_id"):
             self._recover_created_identity(packet)
         if record and record.get("container_id") and self.session_exists(0, packet["session_name"]):
+            if (record is self._watched_record and self._watcher is not None and
+                    self._watcher.is_alive()):
+                return []  # This exact in-process watcher still owns provider settlement.
             # Restart never starts/reattaches the provider. Stop the old worker;
             # the original owner must explicitly settle its retained claim.
             self.kill_session(record["issue_number"], record["session_name"])

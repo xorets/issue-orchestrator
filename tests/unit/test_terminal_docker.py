@@ -181,6 +181,90 @@ def test_real_pluggy_dispatch_preserves_allocated_completion_and_provider_secret
         assert secret not in plugin.receipt_path().read_text()
 
 
+def test_live_provider_survives_real_orchestrator_discovery(launch, monkeypatch, sample_orchestrator):
+    import threading
+    import pluggy
+    from issue_orchestrator.execution.session_runner_adapter import PluggySessionRunner
+    from issue_orchestrator.infra.hooks.hookspec import TerminalSpec
+    from tests.unit.threading_helpers import wait_for_event
+    from issue_orchestrator.domain.pause_state import PauseActor, PauseReason
+
+    plugin, engine, packet, calls = launch
+    entered, release = threading.Event(), threading.Event()
+    def provider(exec_id, consume, timeout):
+        engine.starts += 1
+        entered.set()
+        wait_for_event(release, 5, label="provider release")
+        consume(b"known-output\n")
+    monkeypatch.setattr(engine, "start_exec", provider)
+    manager = pluggy.PluginManager("issue_orchestrator")
+    manager.add_hookspecs(TerminalSpec)
+    manager.register(plugin)
+    runner = PluggySessionRunner(manager)
+    monkeypatch.setattr(sample_orchestrator.deps.runner, "discover_running_sessions", runner.discover_running_sessions)
+    try:
+        assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
+        wait_for_event(entered, 5, label="provider entered")
+        sample_orchestrator.pause(reason=PauseReason.OPERATOR, actor=PauseActor.MCP)
+        sample_orchestrator.tick()
+        assert engine.running
+        record = json.loads(plugin.receipt_path().read_bytes())
+        assert record["error"] == "" and record["provider_exit_code"] is None
+        assert engine.starts == 1 and len(calls) == 1
+    finally:
+        release.set()
+        plugin.on_orchestrator_shutdown()
+
+
+@pytest.mark.parametrize("recovery", ["new-instance", "reselected-record"])
+def test_discovery_without_matching_watcher_stops_worker_without_second_provider(launch, monkeypatch, recovery):
+    import threading
+    from tests.unit.threading_helpers import wait_for_event
+
+    plugin, engine, packet, calls = launch
+    entered, release = threading.Event(), threading.Event()
+    def provider(exec_id, consume, timeout):
+        engine.starts += 1
+        entered.set()
+        wait_for_event(release, 5, label="provider release")
+    monkeypatch.setattr(engine, "start_exec", provider)
+    try:
+        assert plugin.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
+        wait_for_event(entered, 5, label="provider entered")
+        if recovery == "new-instance":
+            restored = DockerPlugin(launch_path=plugin.launch_path, engine=engine)
+        else:
+            selected = plugin.launch_path.parent / packet["run_id"]
+            selected.mkdir(mode=0o700)
+            (selected / "launch.json").write_bytes(plugin.launch_path.read_bytes())
+            (selected / "launch.json").chmod(0o400)
+            (selected / "docker-session.json").write_bytes(plugin.receipt_path().read_bytes())
+            plugin.template_path = plugin.launch_path
+            plugin.select_run(packet["run_id"])
+            restored = plugin
+        assert restored.discover_running_sessions() == []
+        assert not engine.running
+        assert json.loads(restored.receipt_path().read_bytes())["error"] == "controller-restart-provider-result-unknown"
+        assert engine.starts == 1 and len(calls) == 1
+    finally:
+        release.set()
+        plugin.on_orchestrator_shutdown()
+
+
+def test_finished_watcher_cannot_protect_a_running_worker(launch):
+    plugin, engine, packet, calls = launch
+    assert plugin.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
+    plugin.on_orchestrator_shutdown()
+    completed = json.loads(plugin.receipt_path().read_bytes())
+    assert plugin.discover_running_sessions() == []
+    assert json.loads(plugin.receipt_path().read_bytes()) == completed
+    engine.running = True  # Actual daemon boundary now reports an unsupervised worker.
+    assert plugin.discover_running_sessions() == []
+    assert not engine.running
+    assert json.loads(plugin.receipt_path().read_bytes())["error"] == "controller-restart-provider-result-unknown"
+    assert engine.starts == 1 and len(calls) == 1
+
+
 def test_wrong_command_never_creates_worker(launch):
     runner, engine, packet, calls = launch
     assert not runner.create_session(42, "unadmitted", packet["working_dir"], None, "issue-42", secret_env=None)
