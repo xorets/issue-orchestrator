@@ -260,7 +260,14 @@ immutable claim anchor. REVIEW authenticates that commit directly and accepts
 only a nondecreasing expiry renewal of the same complete claim and original
 owner; its receipt reports the independently observed current fence. Missing
 anchor history, changed lease, cancellation, or any other original mutation
-refuses without registration or a new claim.
+refuses without registration or a new claim. Stopped-parent inspection first
+requires the exact terminal container with PID0 and successful settled provider.
+It retains exact image/configuration/resources/mounts/bridge/static IPAM checks,
+while accepting lifecycle-cleared operational endpoint addresses as described by
+[Moby's cleanup owner](https://github.com/moby/moby/blob/v28.5.2/daemon/container_operations.go#L565).
+The live worker's endpoint checks remain unchanged. This source behavior still
+requires exact-image host verification; an upstream lifecycle contract does not
+establish this host's runtime acceptance.
 
 Before worker creation, Docker readiness checks only the explicitly named
 `XORETS_DOCKER_MODEL_AUTH_JSON` secret after authenticating the selected v2

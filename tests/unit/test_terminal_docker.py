@@ -868,3 +868,37 @@ def test_review_parent_requires_actual_successful_stopped_custody(launch,changed
         with pytest.raises(ValueError,match='successfully stopped'):
             runner.verify_stopped_parent(packet,custody)
     assert not calls and engine.starts == 0
+
+
+@pytest.mark.parametrize('changed',[None,'live','foreign-network','foreign-ipam','ipv6','dns','network-mode','missing-gateway','partial-clear','false-prefix','changed-bridge'])
+def test_stopped_review_parent_accepts_only_lifecycle_cleared_selected_bridge(bridge_launch,changed):
+    from issue_orchestrator.domain.original_delivery import DockerCustody
+    from issue_orchestrator.execution.terminal_docker import require_worker_network
+    runner,engine,packet,calls=bridge_launch
+    custody=DockerCustody(1,packet['run_id'],packet['daemon_id'],packet['controller_container_id'],'2'*64,'3'*64,sha256(canonical(packet)).hexdigest())
+    endpoint=engine.worker_endpoint
+    endpoint.update(IPAddress='',Gateway='',IPPrefixLen=0,MacAddress='',EndpointID='',GlobalIPv6Address='',GlobalIPv6PrefixLen=0,IPv6Gateway='')
+    actual=engine.worker()
+    actual['State'].update(Running=False,Pid=0,Paused=False,Restarting=False,OOMKilled=False,Error='')
+    actual['RestartCount']=0
+    if changed=='live':actual['State'].update(Running=True,Pid=123)
+    elif changed=='foreign-network':endpoint['NetworkID']='f'*64
+    elif changed=='foreign-ipam':endpoint['IPAMConfig']['IPv4Address']='172.28.64.4'
+    elif changed=='ipv6':endpoint['GlobalIPv6Address']='2001:db8::1'
+    elif changed=='dns':actual['HostConfig']['Dns']=['9.9.9.9']
+    elif changed=='network-mode':actual['HostConfig']['NetworkMode']='host'
+    elif changed=='missing-gateway':endpoint.pop('Gateway')
+    elif changed=='partial-clear':endpoint['Gateway']=packet['network']['gateway']
+    elif changed=='false-prefix':endpoint['IPPrefixLen']=False
+    elif changed=='changed-bridge':engine.bridge['Id']='f'*64
+    engine.worker=lambda:actual
+    original_request=engine.request
+    engine.request=lambda method,path,payload=None:({'ID':custody.provider_exec_id,'ContainerID':custody.container_id,'Running':False,'ExitCode':0}
+        if path=='/exec/'+custody.provider_exec_id+'/json' else original_request(method,path,payload))
+    if changed is None:
+        runner.verify_stopped_parent(packet,custody)
+        with pytest.raises(ValueError,match='IPv4 membership'):
+            require_worker_network(actual,packet)
+    else:
+        with pytest.raises(ValueError):runner.verify_stopped_parent(packet,custody)
+    assert not calls and engine.starts==0

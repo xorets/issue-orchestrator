@@ -183,9 +183,7 @@ def require_selected_bridge(engine: DockerEngine, packet: dict, controller: dict
     require_bridge_endpoint(selected[0], packet, network["controller_ipv4"])
 
 
-def require_worker_network(actual: dict, packet: dict) -> None:
-    if "network" not in packet:
-        return
+def worker_network_endpoint(actual: dict, packet: dict) -> dict:
     network = packet["network"]
     host = actual.get("HostConfig", {})
     settings = actual.get("NetworkSettings", {})
@@ -194,7 +192,38 @@ def require_worker_network(actual: dict, packet: dict) -> None:
             host.get("Sysctls") != {"net.ipv6.conf.all.disable_ipv6": "1"} or len(endpoints) != 1 or
             settings.get("LinkLocalIPv6Address") or settings.get("LinkLocalIPv6PrefixLen")):
         raise ValueError("Docker worker DNS, IPv6 or network membership differs from sealed intent")
-    require_bridge_endpoint(next(iter(endpoints.values())), packet, network["worker_ipv4"])
+    return next(iter(endpoints.values()))
+
+
+def require_worker_network(actual: dict, packet: dict) -> None:
+    if 'network' in packet:
+        require_bridge_endpoint(worker_network_endpoint(actual, packet), packet, packet['network']['worker_ipv4'])
+
+
+def require_stopped_parent_state(actual: dict) -> None:
+    state = actual.get('State', {})
+    if (state.get('Running') is not False or type(state.get('Pid')) is not int or state['Pid'] != 0 or
+            state.get('Paused') is not False or state.get('Restarting') is not False or state.get('OOMKilled') is not False or
+            state.get('Error') != '' or type(actual.get('RestartCount')) is not int or actual['RestartCount'] != 0):
+        raise ValueError('Docker review parent implementation is not successfully stopped')
+
+
+def require_stopped_worker_network(actual: dict, packet: dict) -> None:
+    """Static bridge intent survives normal removal of dead endpoint addresses."""
+    require_stopped_parent_state(actual)
+    if 'network' not in packet:
+        return
+    endpoint = worker_network_endpoint(actual, packet)
+    ipam = endpoint.get('IPAMConfig') or {}
+    if (endpoint.get('NetworkID') != packet['network_id'] or ipam.get('IPv4Address') != packet['network']['worker_ipv4'] or
+            ipam.get('IPv6Address') or ipam.get('LinkLocalIPs')):
+        raise ValueError('Docker stopped parent static endpoint differs from sealed intent')
+    if endpoint.get('IPAddress') == packet['network']['worker_ipv4']:
+        require_bridge_endpoint(endpoint, packet, packet['network']['worker_ipv4'])
+        return
+    if (any(endpoint.get(key) != '' for key in ('IPAddress','Gateway','MacAddress','EndpointID','GlobalIPv6Address','IPv6Gateway')) or
+            any(type(endpoint.get(key)) is not int or endpoint.get(key) != 0 for key in ('IPPrefixLen','GlobalIPv6PrefixLen'))):
+        raise ValueError('Docker stopped parent operational endpoint is not lifecycle-cleared')
 
 
 def run_cli_capture(argv: list[str], *, environment: dict[str, str], timeout: float,
@@ -482,12 +511,14 @@ class DockerPlugin:
         self._record["container_id"] = container_id
         self._save()
 
-    def _validate_created(self, packet: dict, container_id: str, launch_digest: str) -> dict:
+    def _validate_created(self, packet: dict, container_id: str, launch_digest: str, *, stopped_parent: bool = False) -> dict:
         actual = self.engine.request("GET", f"/containers/{container_id}/json")
         host = actual.get("HostConfig", {})
         config = actual.get("Config", {})
         limits = packet["limits"]
         require_worker_identity(actual, container_id, launch_digest)
+        if stopped_parent:
+            require_stopped_parent_state(actual)
         if (actual.get("Image") != packet["image_id"] or
                 actual.get("Name") != "/" + packet["container_name"] or
                 config.get("User") != packet["user"] or
@@ -508,7 +539,10 @@ class DockerPlugin:
             raise ValueError("Docker created mounts differ from admitted mounts")
         if any(item.get("Destination") not in packet["tmpfs"] for item in actual.get("Mounts", []) if item.get("Type") == "tmpfs"):
             raise ValueError("Docker created an unbounded temporary mount")
-        require_worker_network(actual, packet)
+        if stopped_parent:
+            require_stopped_worker_network(actual, packet)
+        else:
+            require_worker_network(actual, packet)
         if "network" in packet:
             controller = self.engine.request("GET", f"/containers/{packet['controller_container_id']}/json")
             if controller.get("Id") != packet["controller_container_id"] or controller.get("State", {}).get("Running") is not True:
@@ -745,13 +779,9 @@ class DockerPlugin:
         """Read-only daemon proof of the granted implementation's terminal custody."""
         if self.engine.request('GET', '/info').get('ID') != custody.daemon_id:
             raise ValueError('Docker review parent daemon changed')
-        actual = self._validate_created(packet, custody.container_id, custody.launch_sha256)
-        state = actual.get('State', {})
+        self._validate_created(packet, custody.container_id, custody.launch_sha256, stopped_parent=True)
         provider = self.engine.request('GET', '/exec/' + custody.provider_exec_id + '/json')
-        if (state.get('Running') is not False or state.get('Pid') != 0 or type(state.get('Pid')) is not int or
-                state.get('Paused') is not False or state.get('Restarting') is not False or state.get('OOMKilled') is not False or
-                state.get('Error') != '' or type(actual.get('RestartCount')) is not int or actual['RestartCount'] != 0 or
-                provider.get('ID') != custody.provider_exec_id or provider.get('ContainerID') != custody.container_id or
+        if (provider.get('ID') != custody.provider_exec_id or provider.get('ContainerID') != custody.container_id or
                 provider.get('Running') is not False or type(provider.get('ExitCode')) is not int or provider['ExitCode'] != 0):
             raise ValueError('Docker review parent implementation is not successfully stopped')
 
