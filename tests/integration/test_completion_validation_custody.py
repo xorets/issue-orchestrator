@@ -1,6 +1,8 @@
 """Real local Git/command/ledger validation without an HTTP listener or provider."""
 
 import json
+import shlex
+import sys
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -24,7 +26,7 @@ from tests.unit.test_completion_evidence_intake import command, completion
 from tests.unit.test_issue_run_evidence import run_record
 
 
-def intake(tmp_path: Path, validation_command: str):
+def intake(tmp_path: Path, validation_command: str, *, raw: bytes | None = None):
     record = run_record(tmp_path)
     worktree = record.run.worktree_path
     worktree.mkdir()
@@ -60,9 +62,40 @@ def intake(tmp_path: Path, validation_command: str):
         Mock(spec=BackgroundJobRunner),
     )
     receipt = owner.submit(
-        ledger.submission_capability(record.run), command(completion())
+        ledger.submission_capability(record.run), command(completion() if raw is None else raw)
     )
     return ledger, owner, receipt, git
+
+
+def test_validator_receives_exact_ledger_context_and_retained_raw_extension(tmp_path, monkeypatch):
+    raw = json.loads(completion())
+    raw["builder_docker_publication"] = {"schema_version": 1, "fixture": "retained"}
+    # This attacker-supplied field and ambient value cannot select controller files.
+    raw["ISSUE_ORCHESTRATOR_COMPLETION_CONTEXT"] = {"raw": {"path": "/attacker"}}
+    monkeypatch.setenv("ISSUE_ORCHESTRATOR_COMPLETION_CONTEXT", '{"raw":{"path":"/attacker"}}')
+    script = (
+        "import hashlib,json,os,pathlib;"
+        "v=json.loads(os.environ['ISSUE_ORCHESTRATOR_COMPLETION_CONTEXT']);"
+        "raw=pathlib.Path(v['raw']['path']).read_bytes();"
+        "assert hashlib.sha256(raw).hexdigest()==v['raw']['sha256'];"
+        "assert json.loads(raw)['builder_docker_publication']['fixture']=='retained';"
+        "print(json.dumps(v))"
+    )
+    ledger, owner, receipt, _ = intake(tmp_path,
+        shlex.join([sys.executable, "-I", "-B", "-c", script]), raw=json.dumps(raw).encode())
+    entry = ledger.entry_for_receipt(receipt.entry_id)
+    owner.close_and_drain(42)
+    attestation = ledger.validation_for_receipt(receipt.entry_id)
+    assert attestation is not None and attestation.passed
+    record = json.loads(attestation.result_path.read_bytes())
+    context = json.loads(Path(record["stdout_path"]).read_bytes())
+    assert context == {"schema_version": 1, "entry_id": entry.entry_id,
+        "raw": {"path": str(entry.raw_path), "sha256": entry.raw_sha256},
+        "normalized_sha256": entry.normalized_sha256,
+        "run": {"session_name": entry.run.session_name, "run_id": entry.run.run_id,
+            "started_at": entry.run.started_at, "run_dir": str(entry.run.run_dir),
+            "worktree": str(entry.run.worktree_path)}}
+    assert entry.run.session_name != raw["session_id"]
 
 
 @pytest.mark.parametrize("exit_code", [0, 1])

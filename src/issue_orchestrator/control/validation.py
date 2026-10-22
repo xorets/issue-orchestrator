@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..domain.attempt import Attempt, AttemptKey
+from ..domain.completion_intake import CompletionIntakeEntry
 from ..infra import validation_timings as timings
 from ..infra.atomic_json import atomic_write_json
 from ..infra.emit import emit_event
@@ -85,6 +86,7 @@ class ValidationRunner:
         timeout_seconds: int = 1800,
         cwd: Optional[Path] = None,
         session_output_dir: Optional[Path] = None,
+        completion_entry: CompletionIntakeEntry | None = None,
     ) -> ValidationRecord:
         """Run a validation command and return a record.
 
@@ -120,12 +122,28 @@ class ValidationRunner:
             },
         )
 
+        environment = build_runtime_tool_env(self.store.worktree)
+        environment.pop("ISSUE_ORCHESTRATOR_COMPLETION_CONTEXT", None)
+        if completion_entry is not None:
+            environment["ISSUE_ORCHESTRATOR_COMPLETION_CONTEXT"] = json.dumps({
+                "schema_version": 1,
+                "entry_id": completion_entry.entry_id,
+                "raw": {"path": str(completion_entry.raw_path), "sha256": completion_entry.raw_sha256},
+                "normalized_sha256": completion_entry.normalized_sha256,
+                "run": {
+                    "session_name": completion_entry.run.session_name,
+                    "run_id": completion_entry.run.run_id,
+                    "started_at": completion_entry.run.started_at,
+                    "run_dir": str(completion_entry.run.run_dir),
+                    "worktree": str(completion_entry.run.worktree_path),
+                },
+            }, sort_keys=True, separators=(",", ":"))
         try:
             result = self.command_runner.run(
                 command,
                 shell=True,
                 cwd=cwd,
-                env=build_runtime_tool_env(self.store.worktree),
+                env=environment,
                 timeout_seconds=timeout_seconds,
             )
         except Exception as exc:

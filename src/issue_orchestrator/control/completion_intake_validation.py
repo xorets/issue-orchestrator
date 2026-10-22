@@ -56,16 +56,10 @@ class ConfiguredCompletionEvidenceValidator:
         result = run_owned_validation(
             self._command_runner,
             worktree=worktree,
-            binding=ValidationBinding(
-                entry.entry_id,
-                entry.run.identity,
-                entry.raw_sha256,
-                entry.normalized_sha256,
-            ),
             head_sha=head,
             command=self._command,
             timeout_seconds=self._timeout,
-            custody_directory=entry.raw_path.parent.parent,
+            entry=entry,
         )
         if self._working_copy.get_head_sha(
             worktree
@@ -78,14 +72,16 @@ def run_owned_validation(
     command_runner: CommandRunner,
     *,
     worktree: Path,
-    binding: "ValidationBinding",
     head_sha: str,
     command: str,
     timeout_seconds: int,
-    custody_directory: Path,
+    entry: CompletionIntakeEntry,
 ) -> "OwnedValidationResult":
     """Attest only freshly executed results; never a JSON/cache deserializer."""
-
+    if entry.normalized_sha256 is None:
+        raise CompletionIntakeError("normalized intent is required for owned validation")
+    binding = ValidationBinding(entry.entry_id, entry.run.identity, entry.raw_sha256, entry.normalized_sha256)
+    custody_directory = entry.raw_path.parent.parent
     with TemporaryDirectory(prefix=".validation-", dir=custody_directory) as output:
         # The command's cwd/tool environment remains the isolated checkout.
         # All runner-produced files belong to this external staging directory;
@@ -100,6 +96,7 @@ def run_owned_validation(
             command=command,
             timeout_seconds=timeout_seconds,
             session_output_dir=Path(output),
+            completion_entry=entry,
         )
         stdout = (Path(output) / "validation-stdout.log").read_bytes()
         stderr = (Path(output) / "validation-stderr.log").read_bytes()

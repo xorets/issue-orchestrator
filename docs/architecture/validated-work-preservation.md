@@ -19,6 +19,17 @@ Allocation records the agent label and effective completion task with the attach
 
 The completion intake owner closes and drains the selected scope, repairing acknowledged receipt artifacts before returning typed prepared candidates. Eligibility uses immutable owner-normalized completion bytes and validator attestations. Agent-authored sidecars and latest-run filesystem discovery grant no authority.
 
+The fixed configured completion validator receives
+`ISSUE_ORCHESTRATOR_COMPLETION_CONTEXT` from the typed intake entry, overriding
+any ambient value. Its schema-1 JSON identifies the entry, retained raw path and
+SHA-256, normalized SHA-256, and allocated session name/run ID/start time/run
+directory/worktree. Unowned validation commands receive no such context.
+This lets a product validator inspect bounded extensions retained in the
+original raw submission, even when normalization omits them. The validator must
+verify those bytes and their exact run and source binding; an extension itself
+confers no authority or passing validation. Ordinary completion intent, command,
+validator digest, clean-checkout checks and receipt attestation remain unchanged.
+
 Manual consumers use `prepare_receipt_for_issue(receipt, run, issue_number)`. The intake owner verifies the full receipt/run and numeric issue binding before processing under the same drain lock, then returns `PreparedCompletionEvidence` with its immutable `CompletionRunRole`. The existing `prepare_receipt` shares the same preparation policy. Historical allocations retain the explicit `operator:historical` code role; it cannot represent review or Tech Lead authority.
 
 Before teardown, escrow reconciliation repairs interrupted captures and verifies retained database rows against their envelopes and pins. Each distinct validated work key receives immutable escrow, an exact validated-head pin, and a separate observed-head pin when those heads differ. Advancing or detaching the checkout preserves both facts and leaves work parked with the corresponding failure reason. Missing objects or corrupt custody abort destructive continuation.
