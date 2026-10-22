@@ -41,8 +41,12 @@ and interactive input are unsupported in this first noninteractive backend.
 
 The provider command is never evaluated in the service shell. Docker exec-create
 returns an immutable ID, recorded durably before exec-start. Credentials travel
-only in the Unix Docker API request, separately from command argv. Provider
-retries are capped at one attempt on the prepared Docker path. Raw hook/provider
+only in the Unix Docker API request, separately from command argv. The terminal
+hook spec and both built-in implementations require the nullable `secret_env`
+argument because Pluggy forwards only required implementation arguments. Public
+session facades supply `None` when absent; plugins that omit this argument remain
+compatible. Provider retries are capped at one attempt on the prepared Docker
+path. Raw hook/provider
 output shares a byte bound and global deadline; Docker's task log driver is
 disabled. Provider exit and complete-container stop are separate observations.
 No automatic container removal discards evidence.
@@ -71,6 +75,33 @@ system-marker directory instead causes it to attempt `/etc/environment` changes
 and is incompatible with this read-only root. Login-shell environment probing
 is explicitly disabled. CLI diagnostics are capped and retained privately.
 
+The optional sealed `control_manifest` contains only `fetched_unix_ns` and
+`manifest`, the genuine policy object fetched by the trusted outer operator from
+`https://containers.dev/static/devcontainer-control-manifest.json`. Retain the
+fetch URL, timestamp and response digest in the operation provenance; shape
+validation cannot establish remote authenticity. Both policy arrays
+`disallowedFeatures` and `featureAdvisories` and their required string fields
+must be present. Empty upstream arrays are valid; the engine never synthesizes
+empty policy or strips denial/advisory rows. Canonical policy is bounded to
+64KiB. The whole envelope participates in immutable intent and launch hashes.
+
+The engine refuses future timestamps and inputs at least 300 seconds old,
+rechecks freshness when seeding its freshly private per-run
+`TMPDIR/devcontainercli-<actual-account-name>/control-manifest.json`, and sets
+mtime to the original fetch time. It never renews stale policy by copying it.
+The pinned CLI uses that cache while fresh and retains its own stale-cache
+refresh behavior; `--user-data-folder` does not select this cache. No downloader
+or altered CLI is introduced. Omission preserves the existing CLI lookup path.
+The test policy fixture records public upstream content captured on 2026-10-20;
+its test timestamps are controlled inputs, not evidence of current live policy.
+
+CLI spawn refuses an exhausted global deadline. The process-group timeout still
+kills CLI descendants, and an expired packet after CLI completion refuses hooks
+and provider exec, retaining and stopping any identified worker. These source
+checks do not prove cancellation of a request already in flight to Docker's
+daemon; uncertain create acknowledgment retains the existing reservation and
+requires independent exact-ID recovery. They do not prove original-owner release.
+
 ## Custody and recovery
 
 The existing remote original claim gains the `execution_backend` discriminator
@@ -86,8 +117,11 @@ the recorded old controller and all recorded workers to be demonstrably stopped.
 The trusted persistent singleton remains Builder's responsibility.
 
 An exclusive reservation survives uncertain create/start acknowledgement.
-Restart stops the exact tracked worker and retains an unknown provider result;
-it never starts an exec again. Lost CLI create acknowledgement is resolved by
+Ordinary discovery preserves a provider still owned by the same live in-process
+watcher and its exact record object, after the existing daemon/container identity
+checks. A persisted receipt alone cannot establish that ownership. A fresh plugin
+instance or a finished watcher retains the restart behavior: stop the exact tracked
+worker and retain an unknown provider result; never start an exec again. Lost CLI create acknowledgement is resolved by
 the reserved container name plus exact launch label before an immutable ID can
 authorize stop. A wrong daemon/foreign label cannot authorize termination.
 `public_receipt()` projects exact technical Docker identities for Builder;

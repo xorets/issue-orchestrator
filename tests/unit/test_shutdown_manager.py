@@ -21,6 +21,8 @@ from src.issue_orchestrator.control.shutdown_manager import (
     ShutdownState,
     shutdown_manager,
 )
+from src.issue_orchestrator.infra.repo_lock import acquire_lock, read_lock, release_lock
+from tests.unit.threading_helpers import join_or_fail, run_in_thread
 
 
 @pytest.fixture(autouse=True)
@@ -219,6 +221,48 @@ class TestShutdownManagerExit:
 
         # Cleanup only ran once
         assert len(cleanup_count) == 1
+
+    @pytest.mark.parametrize("start", ["cleanup", "exit"])
+    @pytest.mark.parametrize("concurrent", [False, True])
+    def test_exit_during_cleanup_defers_until_callbacks_and_lock_release(
+        self, fresh_manager: ShutdownManager, tmp_path: Path, start: str, concurrent: bool,
+    ):
+        acquire_lock(tmp_path)
+        fresh_manager.initialize(tmp_path)
+        events = []
+        callers = []
+
+        def callback():
+            events.append("callback-start")
+            if concurrent:
+                thread, result = run_in_thread(fresh_manager.exit)
+                callers.append((thread, result))
+                join_or_fail(thread, 2, label="competing exit")
+            else:
+                fresh_manager.exit()
+            events.append("callback-end")
+
+        def observe_exit(code):
+            events.append(("exit", code, read_lock(tmp_path) is None))
+
+        fresh_manager.add_cleanup_callback(callback)
+        exit_patch = patch("os._exit", side_effect=observe_exit)
+        exit_patch.start()
+        try:
+            getattr(fresh_manager, start)()
+            for _, result in callers:
+                result.unwrap()
+            assert events == ["callback-start", "callback-end", ("exit", 0, True)]
+            assert fresh_manager.state is ShutdownState.EXITED
+        finally:
+            for thread, _ in callers:
+                thread.join(2)
+            alive = any(thread.is_alive() for thread, _ in callers)
+            # Keep real process exit unavailable if a broken caller survives.
+            if not alive:
+                exit_patch.stop()
+            release_lock(tmp_path)
+            assert not alive, "competing exit caller did not finish"
 
 
 class TestShutdownManagerSingleton:

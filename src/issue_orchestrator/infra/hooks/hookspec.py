@@ -50,7 +50,7 @@ class TerminalSpec:
         working_dir: str,
         title: str | None,
         session_name: str,  # Required - caller must provide explicit name
-        secret_env: dict[str, str] | None = None,
+        secret_env: dict[str, str] | None,
     ) -> bool | None:
         """Create a new terminal session for an agent.
 
@@ -60,7 +60,9 @@ class TerminalSpec:
             working_dir: Working directory path
             title: Optional human-readable title
             session_name: Full session name (e.g., "issue-123", "review-456")
-            secret_env: Provider credentials for the session process. Kept out
+            secret_env: Required hook argument; pass None when absent. Pluggy
+                forwards only required arguments to implementations. Provider
+                credentials for the session process are kept out
                 of ``command`` on purpose: argv is world-readable through
                 ``ps``, so a key in the command string would leak to every
                 local user. Implementations that cannot inject environment must

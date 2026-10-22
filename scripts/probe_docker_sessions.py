@@ -233,7 +233,7 @@ def main():  # noqa: C901, PLR0912 - One bounded disposable lifecycle with uncon
         launch.chmod(0o400)
         runner = DockerPlugin(launch_path=launch, engine=engine)
         result["created"] = runner.create_session(
-            27, command, str(workspace), None, "issue-27"
+            27, command, str(workspace), None, "issue-27", secret_env=None,
         )
         if result["created"]:
             import threading
