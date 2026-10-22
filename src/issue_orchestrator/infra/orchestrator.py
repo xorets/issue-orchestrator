@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, ClassVar, Optional, cast
 
 if TYPE_CHECKING:
-    from ..control.original_delivery import OriginalDeliveryCommand
+    from ..control.original_delivery import DockerFirstModelCommand, OriginalDeliveryCommand
     from ..domain.completion_intake import (
         SubmitCompletionEvidence,
         CompletionIntakeReceipt,
@@ -555,6 +555,15 @@ class Orchestrator:
             if owner is None:
                 raise ValueError("Original remote ownership is unavailable")
             return owner.observe(issue_number) if command is None else owner.execute(issue_number, command)
+
+    def docker_first_model(self, capability: str, command: "DockerFirstModelCommand") -> dict[str, object]:
+        """One exact allocation-bound CODE parent observation, serialized with ticks."""
+        with self.state_lock:
+            run = self.deps.issue_run_ledger.run_for_capability(capability)
+            owner = self.deps.original_delivery_owner
+            if self.shutdown_requested or owner is None or not self.deps.health_gate.check(paused=False).can_proceed:
+                raise ValueError("Docker first-model owner or engine health unavailable")
+            return owner.first_model(run, command)
 
     def tick(self) -> bool:
         self.deps.completion_intake.pump()

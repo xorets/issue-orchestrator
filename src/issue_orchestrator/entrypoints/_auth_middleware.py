@@ -71,7 +71,7 @@ _AGENT_CALLBACK_ROUTES: frozenset[str] = frozenset(
     }
 )
 _SCOPED_CALLBACK_ROUTES = {"native": _AGENT_CALLBACK_ROUTES,
-    "docker": frozenset({"/api/completion/submissions"})}
+    "docker": frozenset({"/api/completion/submissions", "/api/docker/first-model"})}
 
 # ``/api/issues/{issue_number}/resume`` has a variable segment, so it is
 # matched against the declared route template exactly. A prefix+suffix

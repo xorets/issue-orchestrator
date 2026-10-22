@@ -13,6 +13,16 @@ class DockerOriginalCustody:
     def __init__(self, runner: DockerPlugin):
         self.runner = runner
 
+    def first_model_snapshot(self, session: Session, contract_sha256: str, launch_sha256: str) -> dict:
+        self.verify_session(session)
+        identity = json.loads((session.run_assets.run_dir / "session-identity.json").read_bytes())
+        if session.agent_config.provider != "codex" or identity.get("provider") != "codex":
+            raise ValueError("Docker first-model provider differs from allocated session")
+        return self.runner.first_model_snapshot(session.run_assets, session.terminal_id, contract_sha256, launch_sha256)
+
+    def seal_first_model(self, session: Session, receipt: dict) -> dict:
+        return self.runner.seal_first_model(session.run_assets, receipt)
+
     def capture(self, owner: OriginalDelivery) -> DockerCustody:
         name = owner.correction_runs[-1][3] if owner.pending and owner.correction_runs else owner.session_name
         run_id = owner.correction_runs[-1][1] if owner.pending and owner.correction_runs else owner.run_id

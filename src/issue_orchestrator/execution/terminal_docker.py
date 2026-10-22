@@ -20,6 +20,7 @@ import stat
 import subprocess
 import threading
 import time
+from uuid import uuid4
 
 from ..domain.original_delivery import DockerCustody
 from ..domain.docker_execution import DockerSessionState
@@ -27,7 +28,7 @@ from ..domain.session_run import SessionRunAssets
 from ..infra.hooks.hookspec import hookimpl
 from .docker_engine import DockerEngine
 from .docker_launch_input import canonical as canonical, sealed_bytes as sealed_bytes, network_arguments, control_manifest_bytes
-from .docker_worker_authority import worker_environment
+from .docker_worker_authority import worker_environment, model_projection_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,19 @@ def hook_argv(command: object) -> list[str]:
     if type(argv) is not list or not argv or any(type(word) is not str or "\x00" in word for word in argv):
         raise ValueError("Invalid Docker lifecycle command")
     return argv
+
+
+def require_first_model_liveness(actual: dict, provider: dict, custody: DockerCustody) -> None:
+    """Strict daemon facts for the selected provider, before any model receipt."""
+    state = actual.get("State", {})
+    if (state.get("Running") is not True or state.get("Paused") is not False or state.get("Restarting") is not False or
+            state.get("OOMKilled") is not False or state.get("Error") != "" or
+            type(actual.get("RestartCount")) is not int or actual["RestartCount"] != 0 or
+            provider.get("ID") != custody.provider_exec_id or provider.get("ContainerID") != custody.container_id or
+            provider.get("Running") is not True or provider.get("ExitCode") is not None or
+            type(state.get("Pid")) is not int or state["Pid"] <= 0 or
+            type(provider.get("Pid")) is not int or provider["Pid"] <= 0):
+        raise ValueError("Docker first-model exact worker/provider is not live")
 
 
 def require_create_intent(config: dict, packet: dict) -> None:
@@ -216,10 +230,12 @@ class DockerPlugin:
     def select_run(self, run_id: str) -> None:
         if self.template_path is None or not re.fullmatch(r"[0-9]{8}-[0-9]{6}Z-[0-9a-f]{32}", run_id):
             raise ValueError("Docker engine run identity is invalid")
-        self.launch_path = self.template_path.parent / run_id / "launch.json"
-        if self.launch_path.resolve(strict=True) != self.launch_path:
+        path = self.template_path.parent / run_id / "launch.json"
+        if path.resolve(strict=True) != path:
             raise ValueError("Docker prepared launch path is not canonical")
-        self._record = None
+        if self.launch_path != path:
+            self.launch_path = path
+            self._record = None
 
     @hookimpl
     def prepare_session(self, run: SessionRunAssets, session_name: str, command: str) -> bool:
@@ -651,6 +667,67 @@ class DockerPlugin:
         if provider.get("ID") != record["provider_exec_id"] or provider.get("ContainerID") != record["container_id"]:
             raise ValueError("Docker provider custody changed")
         return DockerCustody(**{key: record[key] for key in DockerCustody.__dataclass_fields__})
+
+    def first_model_snapshot(self, run: SessionRunAssets, session_name: str, contract_sha256: str, launch_sha256: str) -> dict:
+        """Fresh filtered live custody through the existing admitted worker checks."""
+        if self.template_path is not None:
+            self.select_run(run.run_id)
+        packet = self._load_packet()
+        if ((packet["run_id"], packet["engine_run_dir"], packet["working_dir"], packet["session_name"], packet["contract_sha256"]) !=
+                (run.run_id, str(run.run_dir), str(run.worktree_path), session_name, contract_sha256) or
+                sha256(canonical(packet)).hexdigest() != launch_sha256):
+            raise ValueError("Docker first-model assigned launch changed")
+        outer, inner, projection = model_projection_snapshot(packet)
+        if inner["role"] != "standard-implementation":
+            raise ValueError("Docker first-model requires separate CODE authority")
+        custody = self.custody(session_name)
+        if custody.run_id != run.run_id or custody.launch_sha256 != launch_sha256:
+            raise ValueError("Docker first-model original custody changed")
+        actual = self._validate_created(packet, custody.container_id, launch_sha256)
+        provider = self.engine.request("GET", "/exec/" + custody.provider_exec_id + "/json")
+        require_first_model_liveness(actual, provider, custody)
+        worker = {"daemon_id": custody.daemon_id, "controller_container_id": custody.controller_container_id,
+            "container_id": custody.container_id, "provider_exec_id": custody.provider_exec_id, "image_id": packet["image_id"],
+            "running": True, "paused": False, "restarting": False, "oom_killed": False, "restart_count": 0,
+            "provider_running": True, "provider_exit_code": None}
+        return {"builder_run_id": packet["builder_run_id"], "outer_sha256": sha256(canonical(outer)).hexdigest(),
+            "projection_sha256": sha256(canonical(projection)).hexdigest(),
+            "custody": {key: getattr(custody, key) for key in DockerCustody.__dataclass_fields__}, "worker": worker}
+
+    def seal_first_model(self, run: SessionRunAssets, receipt: dict) -> dict:
+        """Exclusive controller-only evidence in the existing bounded output root."""
+        packet = self._load_packet()
+        if (packet["run_id"] != run.run_id or receipt["run_id"] != run.run_id or
+                receipt["launch_sha256"] != sha256(canonical(packet)).hexdigest()):
+            raise ValueError("Docker first-model evidence run changed")
+        raw = canonical(receipt)
+        if not 0 < len(raw) <= min(65536, packet["limits"]["max_output_bytes"]):
+            raise ValueError("Docker first-model evidence exceeds metadata bound")
+        root = self._output_directory(packet)
+        available = os.statvfs(root)
+        if available.f_bavail * available.f_frsize < len(raw) + 8192:
+            raise ValueError("Docker first-model output allocation exhausted")
+        directory = private_directory(root / "builder-first-model", create=True)
+        name = "receipt-" + uuid4().hex + ".json"
+        directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, 0o400, dir_fd=directory_fd)
+            with os.fdopen(fd, "w+b") as stream:
+                stream.write(raw); stream.flush(); os.fsync(stream.fileno()); stream.seek(0)
+                before = os.fstat(stream.fileno())
+                if (before.st_uid != os.getuid() or before.st_nlink != 1 or
+                        not stat.S_ISREG(before.st_mode) or stat.S_IMODE(before.st_mode) != 0o400 or stream.read(65537) != raw):
+                    raise ValueError("Docker first-model evidence custody changed")
+                after = os.fstat(stream.fileno())
+                fields = ("st_dev", "st_ino", "st_uid", "st_gid", "st_mode", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+                if any(getattr(before, field) != getattr(after, field) for field in fields):
+                    raise ValueError("Docker first-model evidence changed during readback")
+            os.fsync(directory_fd)
+            if private_directory(directory) != directory:
+                raise ValueError("Docker first-model evidence directory changed")
+        finally:
+            os.close(directory_fd)
+        return {"path": str(directory / name), "sha256": sha256(raw).hexdigest()}
 
     def public_receipt(self, session_name: str) -> dict:
         self.custody(session_name)

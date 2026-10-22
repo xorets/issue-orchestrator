@@ -224,6 +224,13 @@ _agent_callback_token: str | None = None
 _agent_callback_scope = "native"
 
 
+def verify_docker_callback_authorization(authorization: str) -> bool:
+    """This narrow dual-auth route requires the Docker token, never admin alone."""
+    from ..infra.api_token import verify_token
+    return (_agent_callback_scope == "docker" and _agent_callback_token is not None and
+        authorization.startswith("Bearer ") and verify_token(_agent_callback_token, authorization[7:]))
+
+
 def is_configured_agent_callback_route(path: str) -> bool:
     return is_agent_callback_route(path, scope=_agent_callback_scope)
 
@@ -1279,3 +1286,6 @@ async def control_issue_detail(
         raw_events=raw_events,
     )
     return JSONResponse(payload)
+
+from .docker_first_model_routes import docker_first_model_router
+control_app.include_router(docker_first_model_router)

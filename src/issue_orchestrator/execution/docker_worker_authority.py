@@ -186,6 +186,17 @@ def _model_authority(packet: dict, environment: dict[str, str]) -> tuple[dict, d
     return outer, inner
 
 
+def model_projection_snapshot(packet: dict) -> tuple[dict, dict, dict]:
+    """Read only the selected v2 public transport, without resolving secrets."""
+    environment = _authority_environment(packet)
+    if not environment:
+        raise ValueError("Docker model authority is unavailable")
+    outer, inner = _model_authority(packet, environment)
+    if outer["schema_version"] != 2:
+        raise ValueError("Docker first-model requires v2 authority")
+    return outer, inner, _model_projection(packet, outer, inner)
+
+
 def docker_model_auth_requested() -> bool:
     """Authenticate the selected template before resolving one named secret."""
     template = os.environ.get("ISSUE_ORCHESTRATOR_DOCKER_TEMPLATE")

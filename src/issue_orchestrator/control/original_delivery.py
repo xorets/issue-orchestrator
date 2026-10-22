@@ -15,6 +15,10 @@ from ..ports.original_delivery import OriginalDeliveryClaims
 from ..ports.original_docker_custody import OriginalDockerCustody
 from ..ports.repository_host import RepositoryHost
 from ..ports.working_copy import WorkingCopy
+from ..domain.session_run import SessionRunAssets
+from uuid import uuid4
+import re
+import time
 from .issue_termination import IssueTerminationOutcome
 
 if TYPE_CHECKING:
@@ -40,6 +44,19 @@ class OriginalDeliveryCommand:
         OriginalDeliveryOperation(self.operation)
 
 
+@dataclass(frozen=True)
+class DockerFirstModelCommand:
+    run_id: str
+    contract_sha256: str
+    launch_sha256: str
+
+    def __post_init__(self) -> None:
+        if not re.fullmatch(r"[0-9]{8}-[0-9]{6}Z-[0-9a-f]{32}", self.run_id):
+            raise ValueError("Docker first-model run is invalid")
+        if any(not re.fullmatch(r"[0-9a-f]{64}", value) for value in (self.contract_sha256, self.launch_sha256)):
+            raise ValueError("Docker first-model digest is invalid")
+
+
 @dataclass
 class OriginalDeliveryOwner:
     claims: OriginalDeliveryClaims
@@ -59,6 +76,46 @@ class OriginalDeliveryOwner:
     terminate: Callable[[int], IssueTerminationOutcome] | None = None
     retained_issues: set[int] = field(default_factory=set)
     docker_custody: OriginalDockerCustody | None = None
+
+    def first_model(self, run: SessionRunAssets, command: DockerFirstModelCommand) -> dict[str, object]:
+        """Bind one CODE allocation to its existing original owner, never REVIEW."""
+        if (self.state is None or self.docker_custody is None or
+                self.config.terminal_adapter != "issue_orchestrator.execution.terminal_docker:DockerPlugin" or
+                self.state.startup_status != "complete" or
+                not self.state.paused or str(self.state.pause_state.reason) != "operator"):
+            raise ValueError("Docker first-model requires a healthy started OPERATOR barrier")
+        sessions = [session for session in self.state.active_sessions if session.run_assets == run]
+        if len(sessions) != 1 or run.run_id != command.run_id:
+            raise ValueError("Docker first-model allocation is not the active original session")
+        session = sessions[0]
+        if not session.key.kind.capabilities.open_pr_means_done or session.rework_cycle:
+            raise ValueError("Docker first-model CODE authority cannot admit review or rework")
+        # Missing/stale/foreign runtime custody fails BEFORE original registration.
+        snapshot = self.docker_custody.first_model_snapshot(session, command.contract_sha256, command.launch_sha256)
+        observed = self.observe(session.issue.number)
+        if observed["owner"] is None:
+            self.execute(session.issue.number, OriginalDeliveryCommand("register", str(observed["lease_id"]),
+                str(observed["fence"]), command.contract_sha256, command.run_id,
+                "docker-first-model-" + uuid4().hex, session_name=session.terminal_id, started_at=run.started_at))
+        original = self.observe(session.issue.number)
+        owner = original["owner"]
+        if (not isinstance(owner, dict) or owner["run_id"] != run.run_id or
+                owner["contract_sha256"] != command.contract_sha256 or owner["cancelled"] or owner["released"] or
+                not original["lease_current"] or tuple(owner["docker_custody"]) != (snapshot["custody"],)):
+            raise ValueError("Docker first-model original owner/fence changed")
+        # Recheck the live daemon after registration and before producing evidence.
+        if self.docker_custody.first_model_snapshot(session, command.contract_sha256, command.launch_sha256) != snapshot:
+            raise ValueError("Docker first-model custody changed during registration")
+        if self.observe(session.issue.number) != original:
+            raise ValueError("Docker first-model original fence changed during observation")
+        receipt = {"schema_version": 1, "kind": "builder-docker-first-model-receipt", "run_id": run.run_id,
+            "builder_run_id": snapshot["builder_run_id"], "contract_sha256": command.contract_sha256,
+            "outer_sha256": snapshot["outer_sha256"], "launch_sha256": command.launch_sha256,
+            "projection_sha256": snapshot["projection_sha256"], "observed_unix_ns": time.time_ns(),
+            "original_delivery": original, "claim_ref_sha": original["fence"], "worker": snapshot["worker"],
+            "barrier": {"paused": True, "pause_reason": "operator"}}
+        evidence = self.docker_custody.seal_first_model(session, receipt)
+        return {"schema_version": 1, "kind": "builder-docker-first-model", "receipt": receipt, "controller_evidence": evidence}
 
     def _capture_custody(self, owner: OriginalDelivery) -> OriginalDelivery:
         if owner.execution_backend == "docker":

@@ -788,3 +788,54 @@ def test_unbound_admission_proofs_refuse_before_cli_or_provider(launch):
     runner.launch_path.chmod(0o400)
     assert not runner.create_session(42, 'echo safe', packet['working_dir'], None, 'issue-42', secret_env=None)
     assert calls == [] and engine.starts == 0
+
+
+def test_first_model_evidence_uses_controller_output_custody_and_exclusive_allocation(launch):
+    from issue_orchestrator.domain.session_run import SessionRunAssets
+    runner, engine, packet, calls = launch
+    root = Path(packet['working_dir'])
+    run_dir = root / '.issue-orchestrator' / 'sessions' / (packet['run_id'] + '__coding-1')
+    run = SessionRunAssets.from_paths(session_name='coding-1', run_id=packet['run_id'], started_at='start',
+        worktree_path=root, run_dir=run_dir, manifest_path=run_dir/'manifest.json', terminal_recording_path=run_dir/'log')
+    ordinary = Path(packet['output_root']) / packet['run_id']
+    ordinary.mkdir(mode=0o700)
+    receipt = {'run_id': run.run_id, 'launch_sha256': sha256(canonical(packet)).hexdigest(), 'test_public_receipt': True}
+    result = runner.seal_first_model(run, receipt)
+    path = Path(result['path'])
+    assert path.parent == ordinary / 'builder-first-model'
+    assert path.name.startswith('receipt-') and path.suffix == '.json'
+    assert path.read_bytes() == canonical(receipt)
+    assert result['sha256'] == sha256(path.read_bytes()).hexdigest()
+    assert path.stat().st_mode & 0o777 == 0o400
+    assert path.stat().st_nlink == 1
+    assert not path.is_relative_to(run.run_dir)
+    with pytest.raises(FileExistsError):
+        runner.seal_first_model(run, receipt)
+    with pytest.raises(ValueError, match='metadata bound'):
+        runner.seal_first_model(run, {**receipt, 'oversized':'x'*1024})
+    assert not calls and engine.starts == 0
+
+
+@pytest.mark.parametrize('changed', [None, 'false-restart-count', 'oom', 'paused', 'worker-pid', 'provider-pid', 'provider-exited', 'foreign-provider'])
+def test_first_model_requires_strict_live_daemon_facts(launch, changed):
+    from issue_orchestrator.domain.original_delivery import DockerCustody
+    from issue_orchestrator.execution.terminal_docker import require_first_model_liveness
+    runner, engine, packet, calls = launch
+    actual = engine.worker()
+    actual['State'].update(Paused=False, Restarting=False, OOMKilled=False, Error='', Pid=21)
+    actual['RestartCount'] = 0
+    custody = DockerCustody(1, packet['run_id'], packet['daemon_id'], packet['controller_container_id'], '2'*64, '3'*64, sha256(canonical(packet)).hexdigest())
+    provider = {'ID':custody.provider_exec_id, 'ContainerID':custody.container_id, 'Running':True, 'ExitCode':None, 'Pid':22}
+    if changed == 'false-restart-count': actual['RestartCount'] = False
+    elif changed == 'oom': actual['State']['OOMKilled'] = True
+    elif changed == 'paused': actual['State']['Paused'] = True
+    elif changed == 'worker-pid': actual['State']['Pid'] = False
+    elif changed == 'provider-pid': provider['Pid'] = False
+    elif changed == 'provider-exited': provider.update(Running=False, ExitCode=0)
+    elif changed == 'foreign-provider': provider['ContainerID'] = 'f'*64
+    if changed is None:
+        require_first_model_liveness(actual, provider, custody)
+    else:
+        with pytest.raises(ValueError, match='not live'):
+            require_first_model_liveness(actual, provider, custody)
+    assert not calls and engine.starts == 0
