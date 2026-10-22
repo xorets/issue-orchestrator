@@ -94,6 +94,21 @@ def model_authority(authority, tmp_path, monkeypatch):
     for name, raw in [('acceptance', acceptance), ('authorization', grant)]:
         path = tmp_path / (name + '.json'); path.write_bytes(raw); path.chmod(0o444)
         files[paths[name]] = path
+    packet.update(image=packet['image_id'], run_id='20261022-211413Z-' + 'f' * 32,
+        engine_run_dir='/workspace/.issue-orchestrator/session')
+    projection = {'kind': 'docker-worker-projection', 'model_admission': False,
+        'ISSUE_ORCHESTRATOR_CALLBACK_SCOPE': 'docker',
+        'image': {'reference': packet['image'], 'kind': 'local-image-id', 'image_id': packet['image_id']},
+        'worker_manifest_sha256': outer['worker']['manifest_sha256'],
+        'CODEX_HOME': '/baked/capability/homes/standard-implementation',
+        'ISSUE_ORCHESTRATOR_CODEX_RUNTIME_ROOT': '/tmp/builder-' + packet['builder_run_id'] + '-provider-runtime'}
+    projection_path = tmp_path / 'projection.json'; projection_path.write_bytes(canonical(projection)); projection_path.chmod(0o400)
+    inner_path = Path(packet['worker_authority']['engine_contract_path'])
+    inner = json.loads(inner_path.read_bytes())
+    inner['role'] = 'standard-implementation'
+    inner['capabilities']['capability_bundle'] = '/baked/capability'
+    inner['execution']['worker_projection'] = {'path': str(projection_path), 'sha256': sha256(canonical(projection)).hexdigest()}
+    inner_path.chmod(0o600); inner_path.write_bytes(canonical(inner)); inner_path.chmod(0o400)
     packet['admission_proofs'] = paths
     packet['mounts'] += [{'source': value, 'target': value, 'read_only': True} for value in paths.values()]
     outer.update(schema_version=2, model_admission=True,
@@ -109,6 +124,13 @@ def model_authority(authority, tmp_path, monkeypatch):
         packet['contract_sha256'] = sha256(canonical(inner)).hexdigest()
         outer['subject'] = {key: value for key, value in inner.items() if key not in {'schema_version', 'controller_compatibility'}}
         outer['engine_contract']['sha256'] = packet['contract_sha256']
+        grant_path = files[paths['authorization']]
+        grant_value = json.loads(grant_path.read_bytes())
+        delivery = sha256(canonical(outer['subject'])).hexdigest()
+        if isinstance(grant_value, dict) and grant_value.get('run_id') == packet['builder_run_id'] and grant_value.get('delivery_sha256') != delivery:
+            grant_value.update(delivery_sha256=delivery, acceptance_sha256=outer['installed_acceptance']['sha256'])
+            grant_path.chmod(0o600); grant_path.write_bytes(canonical(grant_value)); grant_path.chmod(0o444)
+            outer['authorization']['sha256'] = sha256(canonical(grant_value)).hexdigest()
         outer_path.chmod(0o600); outer_path.write_bytes(canonical(outer)); outer_path.chmod(0o400)
 
     seal()
@@ -153,7 +175,7 @@ def model_authority(authority, tmp_path, monkeypatch):
 def test_v2_rendered_intent_projects_verified_public_proofs(model_authority):
     packet, path, _, _, _, _ = model_authority
     before = canonical(packet)
-    result = worker_environment(packet, {'PROVIDER_KEY': 'provider-secret', 'ISSUE_ORCHESTRATOR_COMPLETION_CAPABILITY': 'e' * 64}, 'd' * 64)
+    result = worker_environment(packet, {'PROVIDER_KEY': 'provider-secret', 'ISSUE_ORCHESTRATOR_COMPLETION_CAPABILITY': 'e' * 64, 'XORETS_DOCKER_MODEL_AUTH_JSON': '{"token":"canary-secret"}'}, 'd' * 64)
     assert result['XORETS_EXECUTION_CONTRACT'] == str(path)
     assert result['XORETS_EXECUTION_DIGEST'] == sha256(path.read_bytes()).hexdigest()
     assert 'admission_proofs' not in result
@@ -185,7 +207,8 @@ def test_v2_public_proof_or_projection_changes_refuse(model_authority, change):
         outer_path = Path(packet['worker_authority']['contract_path'])
         outer_path.chmod(0o600); outer_path.write_bytes(canonical(outer)); outer_path.chmod(0o400)
     with pytest.raises(ValueError):
-        worker_environment(packet, {'ISSUE_ORCHESTRATOR_COMPLETION_CAPABILITY': 'e' * 64}, 'd' * 64)
+        worker_environment(packet, {'ISSUE_ORCHESTRATOR_COMPLETION_CAPABILITY': 'e' * 64,
+            'XORETS_DOCKER_MODEL_AUTH_JSON': '{"token":"canary-secret"}'}, 'd' * 64)
 
 
 def test_v1_cannot_relabel_model_admission(authority):
@@ -199,3 +222,104 @@ def test_v1_cannot_relabel_model_admission(authority):
 def test_unprojected_proof_paths_cannot_confer_authority():
     with pytest.raises(ValueError):
         worker_environment({'admission_proofs': {}}, {}, None)
+
+
+def test_selected_provider_port_projects_only_named_model_secret(model_authority, tmp_path, monkeypatch, caplog):
+    import json
+    from issue_orchestrator.execution.provider_credentials_adapter import KeyringProviderCredentials
+    packet, _, _, _, _, _ = model_authority
+    template = tmp_path / 'template.json'; template.write_bytes(canonical(packet)); template.chmod(0o400)
+    monkeypatch.setenv('ISSUE_ORCHESTRATOR_DOCKER_TEMPLATE', str(template))
+    monkeypatch.setenv('XORETS_EXECUTION_CONTRACT', packet['worker_authority']['engine_contract_path'])
+    monkeypatch.setenv('XORETS_EXECUTION_DIGEST', packet['contract_sha256'])
+    reads = []
+    secret = '{"token":"private-auth-canary"}'
+    monkeypatch.setattr('issue_orchestrator.infra.ai_keys.read_ai_key', lambda name: reads.append(name) or secret)
+    resolver = KeyringProviderCredentials()
+    assert resolver.session_env('codex') == {}
+    assert reads == []
+    private = dict(resolver.session_env('codex', docker=True))
+    assert private == {'XORETS_DOCKER_MODEL_AUTH_JSON': secret}
+    assert reads == ['XORETS_DOCKER_MODEL_AUTH_JSON']
+    result = worker_environment(packet, {**private, 'ISSUE_ORCHESTRATOR_COMPLETION_CAPABILITY': 'e' * 64}, 'd' * 64)
+    assert json.loads(result['XORETS_DOCKER_LAUNCH_JSON']) == packet
+    assert json.loads(result['XORETS_DOCKER_PROJECTION_JSON'])['CODEX_HOME'] == '/baked/capability/homes/standard-implementation'
+    assert secret not in result['XORETS_DOCKER_LAUNCH_JSON'] + result['XORETS_DOCKER_PROJECTION_JSON'] + caplog.text
+    assert result['XORETS_DOCKER_MODEL_AUTH_JSON'] == secret
+
+
+@pytest.mark.parametrize('change', ['provider', 'foreign-inner', 'wrong-role', 'untrusted-project', 'changed-projection', 'missing'])
+def test_credential_port_refuses_before_secret_resolution(model_authority, tmp_path, monkeypatch, change):
+    import json
+    from issue_orchestrator.execution.provider_credentials_adapter import KeyringProviderCredentials
+    packet, _, _, _, _, seal = model_authority
+    if change in {'wrong-role', 'untrusted-project', 'changed-projection'}:
+        inner_path = Path(packet['worker_authority']['engine_contract_path'])
+        inner = json.loads(inner_path.read_bytes())
+        projection_path = Path(inner['execution']['worker_projection']['path'])
+        if change == 'wrong-role': inner['role'] = 'standard-review'
+        elif change == 'untrusted-project':
+            projection = json.loads(projection_path.read_bytes()); projection['CODEX_HOME'] = '/workspace/.codex'
+            projection_path.chmod(0o600); projection_path.write_bytes(canonical(projection)); projection_path.chmod(0o400)
+            inner['execution']['worker_projection']['sha256'] = sha256(canonical(projection)).hexdigest()
+        else:
+            projection_path.chmod(0o600); projection_path.write_bytes(b'{}\n'); projection_path.chmod(0o400)
+        inner_path.chmod(0o600); inner_path.write_bytes(canonical(inner)); inner_path.chmod(0o400)
+        seal()
+    template = tmp_path / 'template.json'; template.write_bytes(canonical(packet)); template.chmod(0o400)
+    monkeypatch.setenv('ISSUE_ORCHESTRATOR_DOCKER_TEMPLATE', str(template))
+    monkeypatch.setenv('XORETS_EXECUTION_CONTRACT', packet['worker_authority']['engine_contract_path'])
+    monkeypatch.setenv('XORETS_EXECUTION_DIGEST', '0' * 64 if change == 'foreign-inner' else packet['contract_sha256'])
+    reads = []
+    monkeypatch.setattr('issue_orchestrator.infra.ai_keys.read_ai_key', lambda name: reads.append(name) or None)
+    with pytest.raises(ValueError):
+        KeyringProviderCredentials().session_env('deepseek' if change == 'provider' else 'codex', docker=True)
+    assert reads == (['XORETS_DOCKER_MODEL_AUTH_JSON'] if change == 'missing' else [])
+
+
+@pytest.mark.parametrize('secret', [None, '', '[]', '{}', '{bad', 'x' * 65537])
+def test_model_secret_must_be_explicit_bounded_nonempty_json(model_authority, secret):
+    provider = {'ISSUE_ORCHESTRATOR_COMPLETION_CAPABILITY': 'e' * 64}
+    if secret is not None: provider['XORETS_DOCKER_MODEL_AUTH_JSON'] = secret
+    with pytest.raises(ValueError, match='model secret'):
+        worker_environment(model_authority[0], provider, 'd' * 64)
+
+
+@pytest.mark.parametrize('name', ['XORETS_DOCKER_LAUNCH_JSON', 'XORETS_DOCKER_PROJECTION_JSON'])
+def test_provider_cannot_forge_public_model_transport(model_authority, name):
+    with pytest.raises(ValueError, match='overrides'):
+        worker_environment(model_authority[0], {'ISSUE_ORCHESTRATOR_COMPLETION_CAPABILITY': 'e' * 64,
+            'XORETS_DOCKER_MODEL_AUTH_JSON': '{"token":"secret"}', name: '{}'}, 'd' * 64)
+
+
+def test_v1_provider_never_resolves_or_accepts_model_auth(authority, tmp_path, monkeypatch):
+    from issue_orchestrator.execution.provider_credentials_adapter import KeyringProviderCredentials
+    packet = authority[0]
+    template = tmp_path / 'template.json'; template.write_bytes(canonical(packet)); template.chmod(0o400)
+    monkeypatch.setenv('ISSUE_ORCHESTRATOR_DOCKER_TEMPLATE', str(template))
+    reads = []
+    monkeypatch.setattr('issue_orchestrator.infra.ai_keys.read_ai_key', lambda name: reads.append(name) or 'secret')
+    assert KeyringProviderCredentials().session_env('codex', docker=True) == {}
+    assert reads == []
+    with pytest.raises(ValueError, match='v1'):
+        worker_environment(packet, {'ISSUE_ORCHESTRATOR_COMPLETION_CAPABILITY': 'e' * 64,
+            'XORETS_DOCKER_MODEL_AUTH_JSON': '{"token":"secret"}'}, 'd' * 64)
+
+
+@pytest.mark.parametrize('key,value', [('run_id', 'foreign'), ('delivery_sha256', '0' * 64), ('acceptance_sha256', '0' * 64)])
+def test_root_grant_must_bind_current_delivery_before_secret_lookup(model_authority, tmp_path, monkeypatch, key, value):
+    import json
+    from issue_orchestrator.execution.provider_credentials_adapter import KeyringProviderCredentials
+    packet, outer_path, outer, files, _, _ = model_authority
+    grant_path = files[packet['admission_proofs']['authorization']]
+    grant = json.loads(grant_path.read_bytes()); grant[key] = value
+    grant_path.chmod(0o600); grant_path.write_bytes(canonical(grant)); grant_path.chmod(0o444)
+    outer['authorization']['sha256'] = sha256(canonical(grant)).hexdigest()
+    outer_path.chmod(0o600); outer_path.write_bytes(canonical(outer)); outer_path.chmod(0o400)
+    template = tmp_path / 'template.json'; template.write_bytes(canonical(packet)); template.chmod(0o400)
+    monkeypatch.setenv('ISSUE_ORCHESTRATOR_DOCKER_TEMPLATE', str(template))
+    reads = []
+    monkeypatch.setattr('issue_orchestrator.infra.ai_keys.read_ai_key', lambda name: reads.append(name) or 'secret')
+    with pytest.raises(ValueError, match='another delivery'):
+        KeyringProviderCredentials().session_env('codex', docker=True)
+    assert reads == []

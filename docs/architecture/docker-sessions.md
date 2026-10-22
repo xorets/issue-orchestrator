@@ -192,6 +192,23 @@ mount, protected root ancestry and bounded immutable root-owned canonical bytes
 matching the outer digest. Writable overlaps or directory projections refuse.
 Builder owns acceptance/model policy evaluation; this adapter authenticates
 those already selected public bytes and the original authority subject.
+
+Only the selected v2 Codex path asks the existing provider credential port for
+`XORETS_DOCKER_MODEL_AUTH_JSON`. Before that single named keyring/environment
+lookup, the adapter authenticates the current sealed template, active inner
+contract, root authorization's delivery/run/acceptance identity and exact
+worker projection. Native and v1 provider credential behavior stays unchanged;
+no host login file is read or mounted. Missing credentials refuse.
+
+The private Docker exec environment carries that bounded nonempty JSON object
+separately from generated `XORETS_DOCKER_LAUNCH_JSON` and
+`XORETS_DOCKER_PROJECTION_JSON` copies. The latter are canonical public transport
+copies of the actual assigned packet and authenticated projection; provider
+credentials cannot override them. The projection must bind the selected
+image/worker manifest, baked role home and bounded task runtime root. Builder's
+worker launcher revalidates its full grant before materializing temporary auth
+and removes the secret from its child environment. Callback/completion authority
+still comes from their existing owners, never from these public copies.
 A primitive without the worker-authority descriptor receives no execution
 authority. These source checks grant no model admission.
 Native keeps its previous callback allowlist. Reaching an origin alone does

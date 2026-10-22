@@ -2229,9 +2229,11 @@ class SessionLauncher:
         empty mapping distinguishes "this provider supplies its own login" from
         "the key resolved to nothing".
         """
-        secret_env = dict(self._provider_credentials.session_env(agent_config.provider))
         if self.config.terminal_adapter == "issue_orchestrator.execution.terminal_docker:DockerPlugin":
+            secret_env = dict(self._provider_credentials.session_env(agent_config.provider, docker=True))
             secret_env = docker_session_secret_env(self._issue_run_allocator, run, secret_env)
+        else:
+            secret_env = dict(self._provider_credentials.session_env(agent_config.provider))
         if self._session_preparation is not None:
             self._session_preparation.prepare_session(run, name, command)
         return self._create_session(name, command, worktree, title, secret_env or None)

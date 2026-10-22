@@ -9,6 +9,10 @@ import stat
 from .agent_runner_env import DEFAULT_FORBIDDEN_ENV_VARS
 from .docker_launch_input import canonical, sealed_bytes
 
+MODEL_AUTH_ENV = "XORETS_DOCKER_MODEL_AUTH_JSON"
+MODEL_LAUNCH_ENV = "XORETS_DOCKER_LAUNCH_JSON"
+MODEL_PROJECTION_ENV = "XORETS_DOCKER_PROJECTION_JSON"
+
 
 def _require_mounts(packet: dict, paths: tuple[Path, ...]) -> None:
     mounts = packet["mounts"]
@@ -21,7 +25,7 @@ def _require_mounts(packet: dict, paths: tuple[Path, ...]) -> None:
                 raise ValueError("Docker worker authority overlaps writable mount")
 
 
-def _public_proof(descriptor: dict, expected_path: Path, packet: dict) -> None:
+def _public_proof(descriptor: dict, expected_path: Path, packet: dict) -> dict:
     """Authenticate public root custody; Builder owns admission policy content."""
     if (type(descriptor) is not dict or set(descriptor) != {"path", "sha256"} or
             descriptor.get("path") != str(expected_path) or
@@ -38,6 +42,7 @@ def _public_proof(descriptor: dict, expected_path: Path, packet: dict) -> None:
     value = json.loads(raw)
     if type(value) is not dict or canonical(value) != raw or sha256(raw).hexdigest() != descriptor["sha256"]:
         raise ValueError("Docker public admission digest or encoding changed")
+    return value
 
 
 def _public_proof_bytes(path: Path) -> bytes:
@@ -93,7 +98,11 @@ def _require_admission(packet: dict, outer: dict) -> None:
     if proofs != {name: str(path) for name, path in paths.items()}:
         raise ValueError("Docker worker admission paths leave public custody")
     _public_proof(acceptance, paths["acceptance"], packet)
-    _public_proof(outer.get("authorization"), paths["authorization"], packet)
+    authorization = _public_proof(outer.get("authorization"), paths["authorization"], packet)
+    if (authorization.get("run_id") != packet["builder_run_id"] or
+            authorization.get("delivery_sha256") != sha256(canonical(outer["subject"])).hexdigest() or
+            authorization.get("acceptance_sha256") != acceptance["sha256"]):
+        raise ValueError("Docker root authorization belongs to another delivery subject")
 
 
 def _authority_environment(packet: dict) -> dict[str, str]:
@@ -150,17 +159,91 @@ def _require_subject(packet: dict, outer: dict, inner: dict, inner_path: Path) -
         raise ValueError("Docker worker outer authority differs from selected inner intent")
 
 
+def _model_projection(packet: dict, outer: dict, inner: dict) -> dict:
+    descriptor = inner["execution"].get("worker_projection")
+    if type(descriptor) is not dict or set(descriptor) != {"path", "sha256"}:
+        raise ValueError("Docker model projection is missing")
+    raw = sealed_bytes(Path(descriptor["path"]), expected=descriptor["sha256"], limit=65536)
+    projection = json.loads(raw)
+    capability = inner["capabilities"].get("capability_bundle")
+    role = inner.get("role")
+    if (type(projection) is not dict or canonical(projection) != raw or
+            not isinstance(capability, str) or not Path(capability).is_absolute() or
+            not isinstance(role, str) or not re.fullmatch(r"standard-(implementation|review|remediation)", role) or
+            projection.get("kind") != "docker-worker-projection" or projection.get("model_admission") is not False or
+            projection.get("ISSUE_ORCHESTRATOR_CALLBACK_SCOPE") != "docker" or
+            projection.get("image") != {"reference": packet["image"], "kind": "local-image-id" if packet["image"].startswith("sha256:") else "registry-digest", "image_id": packet["image_id"]} or
+            projection.get("worker_manifest_sha256") != outer["worker"]["manifest_sha256"] or
+            projection.get("CODEX_HOME") != str(Path(capability) / "homes" / role) or
+            projection.get("ISSUE_ORCHESTRATOR_CODEX_RUNTIME_ROOT") != "/tmp/builder-" + packet["builder_run_id"] + "-provider-runtime"):
+        raise ValueError("Docker model projection differs from selected role/image")
+    return projection
+
+
+def _model_authority(packet: dict, environment: dict[str, str]) -> tuple[dict, dict]:
+    outer = json.loads(sealed_bytes(Path(environment["XORETS_EXECUTION_CONTRACT"]), expected=environment["XORETS_EXECUTION_DIGEST"]))
+    inner = json.loads(sealed_bytes(Path(packet["worker_authority"]["engine_contract_path"]), expected=packet["contract_sha256"]))
+    return outer, inner
+
+
+def docker_model_auth_requested() -> bool:
+    """Authenticate the selected template before resolving one named secret."""
+    template = os.environ.get("ISSUE_ORCHESTRATOR_DOCKER_TEMPLATE")
+    if not template:
+        return False
+    raw = sealed_bytes(Path(template))
+    packet = json.loads(raw)
+    if canonical(packet) != raw:
+        raise ValueError("Docker model template encoding changed")
+    environment = _authority_environment(packet)
+    if not environment:
+        return False
+    outer, inner = _model_authority(packet, environment)
+    if outer["schema_version"] == 1:
+        return False
+    if (os.environ.get("XORETS_EXECUTION_CONTRACT") != packet["worker_authority"]["engine_contract_path"] or
+            os.environ.get("XORETS_EXECUTION_DIGEST") != packet["contract_sha256"]):
+        raise ValueError("Docker model credential request differs from active engine contract")
+    _model_projection(packet, outer, inner)
+    return True
+
+
+def _model_environment(packet: dict, provider: dict[str, str], environment: dict[str, str]) -> dict[str, str]:
+    if not environment:
+        if MODEL_AUTH_ENV in provider:
+            raise ValueError("Docker model secret requires selected v2 authority")
+        return {}
+    outer, inner = _model_authority(packet, environment)
+    if outer["schema_version"] == 1:
+        if MODEL_AUTH_ENV in provider:
+            raise ValueError("Docker model secret cannot enter a v1 worker")
+        return {}
+    secret = provider.get(MODEL_AUTH_ENV)
+    try:
+        value = json.loads(secret) if isinstance(secret, str) and 0 < len(secret.encode()) <= 65536 else None
+    except ValueError:
+        value = None
+    if not isinstance(value, dict) or not value:
+        raise ValueError("Docker model secret requires bounded nonempty JSON")
+    projection = _model_projection(packet, outer, inner)
+    launch = canonical(packet)
+    if len(launch) > 65536:
+        raise ValueError("Docker public launch transport exceeds bound")
+    return {MODEL_LAUNCH_ENV: launch.decode(), MODEL_PROJECTION_ENV: canonical(projection).decode()}
+
+
 def worker_environment(packet: dict, provider: dict[str, str], callback_token: str | None) -> dict[str, str]:
     """Only explicit provider secrets, scoped callback and verified seals cross."""
     reserved = {*DEFAULT_FORBIDDEN_ENV_VARS, "ISSUE_ORCH_GITHUB_TOKEN", "XORETS_EXECUTION_CONTRACT",
-        "XORETS_EXECUTION_DIGEST", "ISSUE_ORCHESTRATOR_AGENT_CALLBACK_TOKEN"}
+        "XORETS_EXECUTION_DIGEST", "ISSUE_ORCHESTRATOR_AGENT_CALLBACK_TOKEN", MODEL_LAUNCH_ENV, MODEL_PROJECTION_ENV}
     if any(name in reserved or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) or "\x00" in value
             for name, value in provider.items()):
         raise ValueError("Docker provider environment overrides controller authority")
     if packet.get("worker_authority") is not None and not re.fullmatch(
             r"[A-Za-z0-9_-]{64}", provider.get("ISSUE_ORCHESTRATOR_COMPLETION_CAPABILITY", "")):
         raise ValueError("Docker worker authority requires allocation-bound completion capability")
-    environment = {**provider, **_authority_environment(packet)}
+    authority_environment = _authority_environment(packet)
+    environment = {**provider, **authority_environment, **_model_environment(packet, provider, authority_environment)}
     if callback_token:
         if not re.fullmatch(r"[0-9a-f]{64}", callback_token):
             raise ValueError("Docker callback token is invalid")

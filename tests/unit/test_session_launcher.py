@@ -984,6 +984,7 @@ class TestLaunchIssueSession:
         capability = ledger.submission_capability(run)
         call = bundle.create_session_calls[0]
         assert call["secret_env"] == {"PROVIDER_KEY": "provider-value", "ISSUE_ORCHESTRATOR_COMPLETION_CAPABILITY": capability}
+        assert provider.session_env.call_args.kwargs == {"docker": True}
         assert capability not in call["cmd"]
         assert capability not in caplog.text
         assert "$(cat " not in call["cmd"]
