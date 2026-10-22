@@ -563,6 +563,10 @@ class Orchestrator:
             owner = self.deps.original_delivery_owner
             if self.shutdown_requested or owner is None or not self.deps.health_gate.check(paused=False).can_proceed:
                 raise ValueError("Docker first-model owner or engine health unavailable")
+            owner.first_model_preflight(run, command)
+            if not self.state.paused:
+                self.pause_controller.pause(reason=PauseReason.OPERATOR, actor=PauseActor.CONTROL_API,
+                    detail="Authenticated Docker model preflight for " + run.run_id)
             return owner.first_model(run, command)
 
     def tick(self) -> bool:

@@ -12,6 +12,7 @@ import logging
 import time
 import uuid
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import replace
 
 from ..ports.command_runner import CommandRunner
@@ -19,6 +20,7 @@ from ..domain.provider_lane import BillingMode, ProviderLane
 from ..ports.provider_readiness import ProviderReadiness, ProviderReadinessState
 from ..ports.provider_resilience import ProviderErrorType
 from .agent_runner_providers import CLIProvider, get_provider
+from .docker_provider_readiness import DockerReadinessRefused
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +45,10 @@ class CLIProviderReadinessProbe:
         ttl_seconds: float = DEFAULT_PROBE_TTL_SECONDS,
         clock: Callable[[], float] = time.monotonic,
         resolve_provider: Callable[[str], CLIProvider] = get_provider,
+        probe_context: Callable[[str], AbstractContextManager[CommandRunner]] | None = None,
     ) -> None:
         self._runner = command_runner
+        self._probe_context = probe_context
         self._ttl_seconds = ttl_seconds
         self._clock = clock
         self._resolve_provider = resolve_provider
@@ -70,6 +74,12 @@ class CLIProviderReadinessProbe:
             return ProviderReadiness.unknown("", "no provider configured")
         cached = self._cached(provider)
         if cached is not None:
+            if self._probe_context is not None:
+                try:
+                    with self._probe_context(provider):
+                        pass  # Cached CLI output never extends the selected current grant.
+                except DockerReadinessRefused:
+                    return ProviderReadiness.auth_expired(provider, "Selected Docker private auth probe refused")
             return cached
         readiness = replace(self._probe(provider), sample_id=uuid.uuid4().hex)
         self._cache[provider] = (self._clock(), readiness)
@@ -177,7 +187,10 @@ class CLIProviderReadinessProbe:
         except ValueError:
             return ProviderReadiness.unknown(provider, f"unknown provider {provider!r}")
         try:
-            readiness = adapter.check_readiness(self._runner)
+            with self._probe_context(provider) if self._probe_context else nullcontext(self._runner) as runner:
+                readiness = adapter.check_readiness(runner)
+        except DockerReadinessRefused:
+            return ProviderReadiness.auth_expired(provider, "Selected Docker private auth probe refused")
         except OSError as exc:
             # A probe that cannot run tells us nothing about credentials;
             # reporting UNKNOWN keeps the launch path unchanged rather than

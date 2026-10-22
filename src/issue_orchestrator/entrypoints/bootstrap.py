@@ -529,7 +529,8 @@ def build_orchestrator(
     )
     coder_prompt_addendum = build_coder_prompt_addendum_provider(config)
 
-    provider_readiness_probe = build_provider_readiness_probe(command_runner)
+    provider_readiness_probe = build_provider_readiness_probe(command_runner, docker=(
+        config.terminal_adapter == "issue_orchestrator.execution.terminal_docker:DockerPlugin"))
     provider_launch_sampler = build_provider_launch_sampler(
         config, provider_resilience, provider_readiness_probe, label_manager
     )

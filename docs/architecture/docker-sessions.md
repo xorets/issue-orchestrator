@@ -234,3 +234,35 @@ identities, a technical report, capped logs, artifact digests and independent
 container-removal observations. It does not exercise model/provider projection,
 Git tooling, public egress, callbacks or persistent quota acceptance. Failed
 development probes must remain separate evidence from a committed-source pass.
+
+## Model preflight and private readiness
+
+The internal Docker worker protocol uses `POST /api/docker/first-model` with
+exact `run_id`, `contract_sha256`, and `launch_sha256` fields. Both the scoped
+Docker callback bearer and the same active allocation's completion capability
+are required. The owner authenticates the current finite root grant and live
+worker/provider custody before requesting the existing OPERATOR planner pause;
+startup, incident, and other existing pause reasons cannot be overwritten. The
+response binds the committed barrier and original fence to the assigned packet.
+Each receipt is sealed mode0400 under
+`output_root/<engine_run_id>/builder-first-model/receipt-<UUID hex>.json`, outside
+worker mounts. All immutable receipts and provider output share the existing
+output-byte bound.
+
+Independent review uses its own engine, allocation, checkout, role, and root
+grant. Its receipt adds the exact root-granted `review_parent`; worker/launch
+fields describe the reviewer while `original_delivery` describes the original
+implementation. The producer checks that the original worker/provider has
+successfully stopped and never registers a second original claim. The barrier
+in this receipt describes the reviewer; the trusted parent preflight owns the
+original engine's OPERATOR pause requirement.
+
+Before worker creation, Docker readiness checks only the explicitly named
+`XORETS_DOCKER_MODEL_AUTH_JSON` secret after authenticating the selected v2
+template, grant, role, and projection. It creates an exclusive private home in
+the existing controller task output allocation, writes mode0600 `auth.json`, and
+runs only the existing local `codex login status` probe with a clean environment.
+The existing Codex parser produces readiness; the probe has finite output and
+time bounds and removes the private auth in `finally`. Failure to authenticate
+the selected context is nonlaunchable. Native and nonmodel v1 use their existing
+readiness path. No host auth file is mounted or copied.

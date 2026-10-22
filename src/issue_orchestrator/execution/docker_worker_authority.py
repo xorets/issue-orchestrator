@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import time
 
 from .agent_runner_env import DEFAULT_FORBIDDEN_ENV_VARS
 from .docker_launch_input import canonical, sealed_bytes
@@ -74,7 +75,7 @@ def _public_proof_bytes(path: Path) -> bytes:
     return bytes(raw)
 
 
-def _require_admission(packet: dict, outer: dict) -> None:
+def _require_admission(packet: dict, outer: dict, inner: dict) -> None:
     if type(outer.get("schema_version")) is not int:
         raise ValueError("Docker worker admission version is invalid")
     if outer.get("schema_version") == 1:
@@ -103,6 +104,21 @@ def _require_admission(packet: dict, outer: dict) -> None:
             authorization.get("delivery_sha256") != sha256(canonical(outer["subject"])).hexdigest() or
             authorization.get("acceptance_sha256") != acceptance["sha256"]):
         raise ValueError("Docker root authorization belongs to another delivery subject")
+    require_current_model_grant(packet, inner, authorization)
+
+
+def require_current_model_grant(packet: dict, inner: dict, grant: dict) -> None:
+    """Current finite permission is distinct from authentic retained material."""
+    now = time.time_ns()
+    bounds = inner.get('bounds', {})
+    deadline, expiry = bounds.get('deadline_unix_ns'), grant.get('expires_unix_ns')
+    if (type(grant.get('schema_version')) is not int or grant['schema_version'] != 1 or
+            grant.get('kind') != 'builder-docker-model-authorization' or grant.get('role') != inner.get('role') or
+            not isinstance(inner.get('capabilities', {}).get('model'), str) or not inner['capabilities']['model'] or
+            grant.get('model') != inner['capabilities']['model'] or grant.get('bounds') != bounds or
+            type(deadline) is not int or type(expiry) is not int or not now < deadline <= expiry <= now + 3600_000_000_000 or
+            type(packet.get('deadline_unix_ns')) is not int or not now < packet['deadline_unix_ns'] <= deadline):
+        raise ValueError('Docker current finite model authorization differs from selected execution')
 
 
 def _authority_environment(packet: dict) -> dict[str, str]:
@@ -125,7 +141,7 @@ def _authority_environment(packet: dict) -> dict[str, str]:
     if canonical(outer) != outer_raw or canonical(inner) != inner_raw:
         raise ValueError("Docker worker authority encoding changed")
     _require_subject(packet, outer, inner, inner_path)
-    _require_admission(packet, outer)
+    _require_admission(packet, outer, inner)
     return {"XORETS_EXECUTION_CONTRACT": str(outer_path), "XORETS_EXECUTION_DIGEST": sha256(outer_raw).hexdigest()}
 
 

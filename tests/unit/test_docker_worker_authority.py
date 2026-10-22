@@ -83,6 +83,7 @@ def model_authority(authority, tmp_path, monkeypatch):
     import json
     import os
     import stat
+    import time
     from types import SimpleNamespace
 
     packet, outer_path, outer = authority
@@ -95,7 +96,7 @@ def model_authority(authority, tmp_path, monkeypatch):
         path = tmp_path / (name + '.json'); path.write_bytes(raw); path.chmod(0o444)
         files[paths[name]] = path
     packet.update(image=packet['image_id'], run_id='20261022-211413Z-' + 'f' * 32,
-        engine_run_dir='/workspace/.issue-orchestrator/session')
+        engine_run_dir='/workspace/.issue-orchestrator/session', deadline_unix_ns=time.time_ns()+300_000_000_000)
     projection = {'kind': 'docker-worker-projection', 'model_admission': False,
         'ISSUE_ORCHESTRATOR_CALLBACK_SCOPE': 'docker',
         'image': {'reference': packet['image'], 'kind': 'local-image-id', 'image_id': packet['image_id']},
@@ -106,6 +107,8 @@ def model_authority(authority, tmp_path, monkeypatch):
     inner_path = Path(packet['worker_authority']['engine_contract_path'])
     inner = json.loads(inner_path.read_bytes())
     inner['role'] = 'standard-implementation'
+    inner['bounds'] = {'deadline_unix_ns':packet['deadline_unix_ns']}
+    inner['capabilities']['model'] = 'test-model'
     inner['capabilities']['capability_bundle'] = '/baked/capability'
     inner['execution']['worker_projection'] = {'path': str(projection_path), 'sha256': sha256(canonical(projection)).hexdigest()}
     inner_path.chmod(0o600); inner_path.write_bytes(canonical(inner)); inner_path.chmod(0o400)
@@ -126,6 +129,9 @@ def model_authority(authority, tmp_path, monkeypatch):
         outer['engine_contract']['sha256'] = packet['contract_sha256']
         grant_path = files[paths['authorization']]
         grant_value = json.loads(grant_path.read_bytes())
+        if isinstance(grant_value, dict) and 'role' not in grant_value:
+            grant_value.update(schema_version=1,role=inner['role'],model=inner['capabilities']['model'],
+                bounds=inner['bounds'],expires_unix_ns=packet['deadline_unix_ns']+60_000_000_000)
         delivery = sha256(canonical(outer['subject'])).hexdigest()
         if isinstance(grant_value, dict) and grant_value.get('run_id') == packet['builder_run_id'] and grant_value.get('delivery_sha256') != delivery:
             grant_value.update(delivery_sha256=delivery, acceptance_sha256=outer['installed_acceptance']['sha256'])
@@ -353,7 +359,7 @@ def review_authority(model_authority):
         'original_inner_sha256':sha256(canonical(original_inner)).hexdigest(),'builder_run_id':original_run,
         'engine_run_id':'20261022-211413Z-'+'b'*32,'fence':'4'*40}
     grant_path=files[packet['admission_proofs']['authorization']]
-    grant=json.loads(grant_path.read_bytes());grant['review_parent']=parent
+    grant=json.loads(grant_path.read_bytes());grant['review_parent']=parent;grant['role']='standard-review'
     def reseal():
         grant_path.chmod(0o600);grant_path.write_bytes(canonical(grant));grant_path.chmod(0o444)
         outer['authorization']['sha256']=sha256(canonical(grant)).hexdigest()
@@ -385,3 +391,36 @@ def test_review_parent_refuses_bad_root_binding_or_held_original(review_authorit
     outer,inner,projection=model_projection_snapshot(packet)
     if change == 'wrong-role':inner['role']='standard-implementation'
     with pytest.raises(ValueError):model_review_parent(packet,outer,inner)
+
+
+@pytest.mark.parametrize('change',['expired','missing-expiry','bool-expiry','far-future','role','model','bounds','kind'])
+def test_current_model_permission_refuses_before_named_credential_lookup(model_authority,tmp_path,monkeypatch,change):
+    import json
+    import time
+    from issue_orchestrator.execution.provider_credentials_adapter import KeyringProviderCredentials
+    from issue_orchestrator.execution.docker_worker_authority import model_projection_snapshot
+    packet,outer_path,outer,files,controls,seal=model_authority
+    grant_path=files[packet['admission_proofs']['authorization']]
+    grant=json.loads(grant_path.read_bytes())
+    if change=='expired':grant['expires_unix_ns']=1
+    elif change=='missing-expiry':grant.pop('expires_unix_ns')
+    elif change=='bool-expiry':grant['expires_unix_ns']=True
+    elif change=='far-future':grant['expires_unix_ns']=time.time_ns()+3601_000_000_000
+    elif change=='role':grant['role']='standard-review'
+    elif change=='model':grant['model']='foreign-model'
+    elif change=='bounds':grant['bounds']={}
+    else:grant['kind']='unselected-kind'
+    grant_path.chmod(0o600);grant_path.write_bytes(canonical(grant));grant_path.chmod(0o444)
+    outer['authorization']['sha256']=sha256(canonical(grant)).hexdigest()
+    seal()
+    template=tmp_path/'current-template.json';template.write_bytes(canonical(packet));template.chmod(0o400)
+    monkeypatch.setenv('ISSUE_ORCHESTRATOR_DOCKER_TEMPLATE',str(template))
+    monkeypatch.setenv('XORETS_EXECUTION_CONTRACT',packet['worker_authority']['engine_contract_path'])
+    monkeypatch.setenv('XORETS_EXECUTION_DIGEST',packet['contract_sha256'])
+    reads=[]
+    monkeypatch.setattr('issue_orchestrator.infra.ai_keys.read_ai_key',lambda name:reads.append(name))
+    with pytest.raises(ValueError,match='current finite'):
+        KeyringProviderCredentials().session_env('codex',docker=True)
+    with pytest.raises(ValueError,match='current finite'):
+        model_projection_snapshot(packet)
+    assert reads==[]

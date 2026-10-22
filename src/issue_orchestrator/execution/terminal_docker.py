@@ -197,7 +197,8 @@ def require_worker_network(actual: dict, packet: dict) -> None:
     require_bridge_endpoint(next(iter(endpoints.values())), packet, network["worker_ipv4"])
 
 
-def run_cli(argv: list[str], *, environment: dict[str, str], timeout: float, diagnostic_path: Path | None = None) -> bytes:
+def run_cli_capture(argv: list[str], *, environment: dict[str, str], timeout: float,
+                    output_limit: int = 1024 * 1024, diagnostic_path: Path | None = None) -> tuple[bytes, bytes, int]:
     """Bound both CLI pipes before allocation and kill descendants on timeout."""
     if timeout <= 0:
         raise ValueError("Dev Container CLI deadline exhausted")
@@ -219,15 +220,13 @@ def run_cli(argv: list[str], *, environment: dict[str, str], timeout: float, dia
                 chunk = os.read(key.fd, 65536)
                 if not chunk:
                     selector.unregister(key.fileobj)
-                elif len(output) + len(errors) + len(chunk) > 1024 * 1024:
+                elif len(output) + len(errors) + len(chunk) > output_limit:
                     raise ValueError("Dev Container CLI output bound exhausted")
                 else:
                     key.data.extend(chunk)
         exit_code = child.wait(timeout=max(0.001, deadline - time.monotonic()))
-        if exit_code != 0:
-            raise ValueError("Dev Container CLI refused")
-        completed = True
-        return bytes(output)
+        completed = exit_code == 0
+        return bytes(output), bytes(errors), exit_code
     finally:
         selector.close()
         if not completed:
@@ -242,6 +241,14 @@ def run_cli(argv: list[str], *, environment: dict[str, str], timeout: float, dia
                 destination.write(bytes(output) + b"\n--- stderr ---\n" + bytes(errors))
                 destination.flush()
                 os.fsync(destination.fileno())
+
+
+def run_cli(argv: list[str], *, environment: dict[str, str], timeout: float, diagnostic_path: Path | None = None) -> bytes:
+    """Run admitted CLI input, retaining the existing success-only byte interface."""
+    output, errors, exit_code = run_cli_capture(argv, environment=environment, timeout=timeout, diagnostic_path=diagnostic_path)
+    if exit_code != 0:
+        raise ValueError("Dev Container CLI refused")
+    return output
 
 
 class DockerPlugin:

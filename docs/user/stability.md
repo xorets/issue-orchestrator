@@ -547,3 +547,13 @@ fails the build until it is deleted from here, and a tier this page invents but
 never defines fails too. Mentioning a name in prose does not classify it — only
 a row in the anchored table counts. Relative links on this page are checked to
 resolve as well, so a moved file cannot leave a dangling promise behind.
+
+### Docker worker protocol exception
+
+`POST /api/docker/first-model` is an internal, first-party Builder worker
+protocol, not a browser JSON boundary or a supported public API. Its typed
+request/response models live in `entrypoints/docker_first_model_routes.py`; it
+intentionally does not enter the browser UI OpenAPI inventory. The callback and
+active-allocation capability jointly restrict it to the selected Docker worker.
+See [Docker sessions](../architecture/docker-sessions.md) for its owner, receipt
+custody, and separate reviewer semantics.

@@ -78,6 +78,10 @@ def test_exact_route_requires_docker_callback_and_active_capability(first_model_
     try:
         response=auth_enabled_control_client.post('/api/docker/first-model',json={**vars(command),**extra},headers={'Authorization':'Bearer '+auth,'X-Completion-Capability':capability})
         assert response.status_code==status,response.text
+        if status==200:
+            receipt=response.json()['receipt']
+            assert 'review_parent' not in receipt
+            assert 'provider_exit_code' in receipt['worker'] and receipt['worker']['provider_exit_code'] is None
     finally:control_api.configure_api_token(None)
 
 
@@ -109,7 +113,7 @@ def reviewer_owner(first_model_owner):
         'original_inner_sha256':command.contract_sha256,'builder_run_id':code['builder_run_id'],
         'engine_run_id':command.run_id,'fence':fence}
     snapshot = {**adapter.first_model_snapshot.return_value,'role':'standard-review','builder_run_id':'run-'+'c'*32,
-        'review_parent':parent,'original_inner':{'execution':{'workspace':str(original.worktree_path)},'branch':original.branch_name},
+        'review_parent':parent,'original_inner':{'execution':{'workspace':str(original.worktree_path)},'branch':{'name':original.branch_name}},
         'custody':{**adapter.first_model_snapshot.return_value['custody'],'run_id':run_id,'container_id':'c'*64,'provider_exec_id':'d'*64}}
     adapter.first_model_snapshot.return_value = snapshot
     adapter.reset_mock()
@@ -127,7 +131,7 @@ def test_review_parent_preserves_different_original_engine_and_config_without_se
     claim,fence = owner.claims.original_claim(42)
     assert claim == original_claim and fence == parent['fence']
     adapter.capture.assert_not_called()
-    assert adapter.verify_review_parent.call_count == 2
+    assert adapter.verify_review_parent.call_count == 3
 
 
 @pytest.mark.parametrize('change',['wrong-fence','wrong-original-run','wrong-inner','shared-container','parent-live','wrong-head','pending','expired'])
@@ -148,3 +152,35 @@ def test_review_parent_refuses_before_evidence_and_never_registers(reviewer_owne
     with pytest.raises(ValueError):owner.first_model(session.run_assets,command)
     adapter.capture.assert_not_called()
     adapter.seal_first_model.assert_not_called()
+
+
+@pytest.mark.parametrize('change',[None,'foreign-capability','bad-grant','wrong-lease','incident','startup'])
+def test_actual_facade_commits_only_authenticated_fixed_operator_barrier(sample_orchestrator,first_model_owner,change):
+    from issue_orchestrator.domain.pause_state import PauseState,PauseReason,PauseActor
+    from issue_orchestrator.control.health_gate import HealthGate
+    owner,session,adapter,command=first_model_owner
+    orchestrator=sample_orchestrator
+    orchestrator.state.active_sessions=[session]
+    orchestrator.state.startup_status='complete'
+    orchestrator.state.pause_state=PauseState.running()
+    owner.state=orchestrator.state
+    ledger=Mock(spec=orchestrator.deps.issue_run_ledger)
+    ledger.run_for_capability.return_value=session.run_assets
+    orchestrator.deps=replace(orchestrator.deps,original_delivery_owner=owner,issue_run_ledger=ledger,health_gate=HealthGate())
+    if change == 'foreign-capability':ledger.run_for_capability.side_effect=IntakeUnauthorized('closed/foreign')
+    elif change == 'bad-grant':adapter.first_model_snapshot.side_effect=ValueError('expired grant')
+    elif change == 'wrong-lease':session.lease_id='foreign-lease'
+    elif change in {'incident','startup'}:
+        orchestrator.pause(reason=PauseReason.LOOP_ERROR_THRESHOLD if change=='incident' else PauseReason.STARTUP,actor=PauseActor.SYSTEM)
+    before=orchestrator.state.pause_state
+    if change is None:
+        result=orchestrator.docker_first_model('cap',command)
+        assert result['receipt']['barrier']=={'paused':True,'pause_reason':'operator'}
+        assert orchestrator.pause_controller.state.reason==PauseReason.OPERATOR
+        assert orchestrator.pause_controller.state.actor==PauseActor.CONTROL_API
+        assert not before.paused
+    else:
+        with pytest.raises((ValueError,IntakeUnauthorized)):orchestrator.docker_first_model('cap',command)
+        assert orchestrator.state.pause_state is before
+        adapter.seal_first_model.assert_not_called()
+        assert owner.observe(42)['owner'] is None

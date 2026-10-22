@@ -79,20 +79,10 @@ class OriginalDeliveryOwner:
 
     def first_model(self, run: SessionRunAssets, command: DockerFirstModelCommand) -> dict[str, object]:
         """Bind CODE or a distinct REVIEW allocation through its selected root authority."""
-        if (self.state is None or self.docker_custody is None or
-                self.config.terminal_adapter != "issue_orchestrator.execution.terminal_docker:DockerPlugin" or
-                self.state.startup_status != "complete" or
-                not self.state.paused or str(self.state.pause_state.reason) != "operator"):
-            raise ValueError("Docker first-model requires a healthy started OPERATOR barrier")
-        sessions = [session for session in self.state.active_sessions if session.run_assets == run]
-        if len(sessions) != 1 or run.run_id != command.run_id:
-            raise ValueError("Docker first-model allocation is not the active original session")
-        session = sessions[0]
+        if self.state is None or not self.state.paused or str(self.state.pause_state.reason) != 'operator':
+            raise ValueError('Docker first-model requires the committed OPERATOR barrier')
+        session,snapshot = self.first_model_preflight(run, command)
         reviewing = session.key.kind.capabilities.reports_verdict
-        if (not reviewing and not session.key.kind.capabilities.open_pr_means_done) or session.rework_cycle:
-            raise ValueError("Docker first-model requires selected CODE or REVIEW authority")
-        # Missing/stale/foreign runtime custody fails BEFORE original registration.
-        snapshot = self.docker_custody.first_model_snapshot(session, command.contract_sha256, command.launch_sha256)
         if reviewing:
             if snapshot.get('role') != 'standard-review':
                 raise ValueError('Docker review requires separate reviewer authority')
@@ -118,6 +108,37 @@ class OriginalDeliveryOwner:
         evidence = self.docker_custody.seal_first_model(session, receipt)
         return {"schema_version": 1, "kind": "builder-docker-first-model", "receipt": receipt, "controller_evidence": evidence}
 
+    def first_model_preflight(self, run: SessionRunAssets, command: DockerFirstModelCommand) -> tuple[Session, dict]:
+        """Only the exact active admitted allocation may request its fixed planner barrier."""
+        if (self.state is None or self.docker_custody is None or
+                self.config.terminal_adapter != "issue_orchestrator.execution.terminal_docker:DockerPlugin" or
+                self.state.startup_status != "complete" or
+                (self.state.paused and str(self.state.pause_state.reason) != "operator")):
+            raise ValueError("Docker first-model requires a healthy started OPERATOR barrier")
+        sessions = [session for session in self.state.active_sessions if session.run_assets == run]
+        if len(sessions) != 1 or run.run_id != command.run_id:
+            raise ValueError("Docker first-model allocation is not the active original session")
+        session = sessions[0]
+        reviewing = session.key.kind.capabilities.reports_verdict
+        if (not reviewing and not session.key.kind.capabilities.open_pr_means_done) or session.rework_cycle:
+            raise ValueError("Docker first-model requires selected CODE or REVIEW authority")
+        # Missing/stale/foreign runtime custody fails BEFORE original registration.
+        snapshot = self.docker_custody.first_model_snapshot(session, command.contract_sha256, command.launch_sha256)
+        if reviewing:
+            if snapshot.get('role') != 'standard-review':
+                raise ValueError('Docker review requires separate reviewer authority')
+            self._review_original(session, snapshot)
+        else:
+            if snapshot.get('role') != 'standard-implementation':
+                raise ValueError('Docker CODE cannot reuse reviewer authority')
+            observed = self.observe(session.issue.number)
+            owner = observed['owner']
+            if observed['lease_id'] != session.lease_id or not observed['lease_current'] or owner is not None and (
+                    owner['run_id'] != run.run_id or owner['contract_sha256'] != command.contract_sha256 or
+                    owner['cancelled'] or owner['released']):
+                raise ValueError('Docker preflight original owner/fence unavailable')
+        return session,snapshot
+
     def _first_model_original(self, session: Session, command: DockerFirstModelCommand, snapshot: dict) -> dict:
         run = session.run_assets
         observed = self.observe(session.issue.number)
@@ -141,7 +162,7 @@ class OriginalDeliveryOwner:
         if (owner is None or owner.execution_backend != 'docker' or owner.repository != self.config.repo or
                 owner.contract_sha256 != parent['original_inner_sha256'] or owner.run_id != parent['engine_run_id'] or
                 fence != parent['fence'] or claim.is_expired() or owner.cancelled or owner.released or owner.pending or
-                owner.worktree != inner['execution']['workspace'] or owner.branch != inner['branch'] or
+                owner.worktree != inner['execution']['workspace'] or owner.branch != inner['branch']['name'] or
                 owner.worktree == str(session.worktree_path) or owner.run_id == session.run_assets.run_id or
                 any(row.container_id == snapshot['custody']['container_id'] or
                     row.provider_exec_id == snapshot['custody']['provider_exec_id'] for row in owner.docker_custody)):

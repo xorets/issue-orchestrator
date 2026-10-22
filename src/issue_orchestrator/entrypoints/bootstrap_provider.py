@@ -56,7 +56,7 @@ def build_provider_resilience(
 
 
 def build_provider_readiness_probe(
-    command_runner: "CommandRunner",
+    command_runner: "CommandRunner", *, docker: bool = False,
 ) -> CLIProviderReadinessProbe:
     """One typed provider-readiness boundary per orchestrator.
 
@@ -64,6 +64,11 @@ def build_provider_readiness_probe(
     observer, so all three read one probe (and one short-lived result cache)
     rather than each spawning their own.
     """
+    if docker:
+        from ..execution.docker_provider_readiness import docker_readiness_context
+        credentials = build_provider_credentials()
+        return CLIProviderReadinessProbe(command_runner,
+            probe_context=lambda provider: docker_readiness_context(provider, command_runner, credentials))
     return CLIProviderReadinessProbe(command_runner)
 
 
