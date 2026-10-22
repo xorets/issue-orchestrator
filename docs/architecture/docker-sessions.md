@@ -255,7 +255,12 @@ fields describe the reviewer while `original_delivery` describes the original
 implementation. The producer checks that the original worker/provider has
 successfully stopped and never registers a second original claim. The barrier
 in this receipt describes the reviewer; the trusted parent preflight owns the
-original engine's OPERATOR pause requirement.
+original engine's OPERATOR pause requirement. The grant's fence selects one
+immutable claim anchor. REVIEW authenticates that commit directly and accepts
+only a nondecreasing expiry renewal of the same complete claim and original
+owner; its receipt reports the independently observed current fence. Missing
+anchor history, changed lease, cancellation, or any other original mutation
+refuses without registration or a new claim.
 
 Before worker creation, Docker readiness checks only the explicitly named
 `XORETS_DOCKER_MODEL_AUTH_JSON` secret after authenticating the selected v2

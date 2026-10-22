@@ -24,3 +24,9 @@ class OriginalDeliveryClaims(Protocol):
 class DockerOriginalDeliveryClaims(Protocol):
     def bind_original_docker_custody(self, issue_number: int, lease_id: str, fence: str,
                                     custody: tuple[DockerCustody, ...]) -> bool: ...
+
+
+@runtime_checkable
+class OriginalDeliveryClaimHistory(Protocol):
+    """Optional exact selection-anchor observation for independent REVIEW only."""
+    def original_claim_at(self, issue_number: int, fence: str) -> Claim: ...

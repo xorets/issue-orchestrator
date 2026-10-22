@@ -417,6 +417,21 @@ class GitHubRefClaimAdapter(ClaimManager):
             raise ClaimFetchError("Original remote claim is unreadable")
         return claim, snapshot.commit_sha
 
+    def original_claim_at(self, issue_number: int, fence: str) -> Claim:
+        """Authenticate one selected immutable anchor without reading or changing the ref."""
+        try:
+            with gh_audit.context(reason=gh_audit.AuditReason.GH_READ,
+                    issue_key=str(issue_number), scope=gh_audit.AuditScope.UNKNOWN):
+                snapshot = self._store.read_at_commit(_issue_ref_key(issue_number), fence)
+            claim = _parse_owned_claim(snapshot.record, issue_number=issue_number)
+            if claim is None:
+                raise ClaimFetchError('Original selection anchor is unreadable')
+            return claim
+        except ClaimFetchError:
+            raise
+        except Exception as error:
+            raise ClaimFetchError('Original selection anchor could not be authenticated') from error
+
     def bind_original(self, issue_number: int, lease_id: str, fence: str,
                       owner: OriginalDelivery) -> bool:
         snapshot = self._read_snapshot(issue_number)

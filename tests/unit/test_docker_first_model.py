@@ -12,8 +12,23 @@ from issue_orchestrator.entrypoints.control_api_issue_support import ControlApiI
 from tests.unit.adapters.github.test_original_delivery_owner import original_owner
 
 @pytest.fixture
-def first_model_owner(original_owner):
+def claim_http():
+    from tests.unit.adapters.github.fake_git_data import FakeGitHubRefClient
+    from hashlib import sha1
+    class HexGitData(FakeGitHubRefClient):
+        def _mint(self, kind):
+            return sha1(super()._mint(kind).encode()).hexdigest()
+    return HexGitData()
+
+@pytest.fixture
+def first_model_owner(original_owner,claim_http):
     owner, session = original_owner
+    from issue_orchestrator.adapters.github.ref_claim_adapter import GitHubRefClaimAdapter
+    claims=GitHubRefClaimAdapter(claim_http,'original')
+    acquired=claims.attempt_claim(42)
+    assert acquired.success
+    owner.claims=claims
+    session.lease_id=acquired.lease_id
     run_id = '20261022-211413Z-' + 'a' * 32
     root = session.run_assets.run_dir.parent / (run_id + '__coding-1')
     run = replace(session.run_assets, identity=SessionRunIdentity('coding-1', run_id, 'start'), run_dir=root,
@@ -184,3 +199,62 @@ def test_actual_facade_commits_only_authenticated_fixed_operator_barrier(sample_
         assert orchestrator.state.pause_state is before
         adapter.seal_first_model.assert_not_called()
         assert owner.observe(42)['owner'] is None
+
+
+def test_review_accepts_only_expiry_heartbeat_and_reports_current_fence(reviewer_owner):
+    owner,session,adapter,command,parent,anchor=reviewer_owner
+    assert owner.claims.original_claim_at(42,parent['fence'])==anchor
+    assert owner.claims.renew_claim(42,anchor.lease_id)
+    current,current_fence=owner.claims.original_claim(42)
+    assert current_fence!=parent['fence']
+    result=owner.first_model(session.run_assets,command)['receipt']
+    assert result['claim_ref_sha']==current_fence==result['original_delivery']['fence']
+    assert result['review_parent']['fence']==parent['fence']
+    assert result['original_delivery']['owner']==anchor.original.to_dict()
+    assert current.original==anchor.original and current.lease_id==anchor.lease_id
+    adapter.capture.assert_not_called()
+
+
+@pytest.mark.parametrize('change',['lease','claimant','started','priority','owner','cancelled','shortened-expiry'])
+def test_review_refuses_any_anchor_change_beyond_expiry_renewal(reviewer_owner,claim_http,change):
+    from datetime import timedelta
+    from issue_orchestrator.adapters.github.claim_parser import format_claim_comment
+    from issue_orchestrator.adapters.github.ref_claim_adapter import CLAIM_REF_PREFIX
+    owner,session,adapter,command,parent,anchor=reviewer_owner
+    if change=='lease':current=replace(anchor,lease_id='replacement-lease')
+    elif change=='claimant':current=replace(anchor,claimant='other-engine')
+    elif change=='started':current=replace(anchor,started_at=anchor.started_at+timedelta(seconds=1))
+    elif change=='priority':current=replace(anchor,priority=anchor.priority+1)
+    elif change=='owner':current=replace(anchor,original=replace(anchor.original,engine_pid=anchor.original.engine_pid+1))
+    elif change=='cancelled':current=replace(anchor,original=replace(anchor.original,cancelled=True))
+    else:current=replace(anchor,expires_at=anchor.expires_at-timedelta(seconds=1))
+    claim_http.seed_record(CLAIM_REF_PREFIX+'/issue-42',format_claim_comment(current))
+    with pytest.raises(ValueError,match='only the selected lease expiry renewal'):
+        owner.first_model(session.run_assets,command)
+    adapter.capture.assert_not_called()
+    adapter.seal_first_model.assert_not_called()
+
+
+def test_review_ordinary_heartbeat_between_custody_observations_needs_no_new_grant(reviewer_owner):
+    owner,session,adapter,command,parent,anchor=reviewer_owner
+    observations=[]
+    def stopped(*args):
+        observations.append(True)
+        if len(observations)==2:
+            assert owner.claims.renew_claim(42,anchor.lease_id)
+    adapter.verify_review_parent.side_effect=stopped
+    receipt=owner.first_model(session.run_assets,command)['receipt']
+    current,fence=owner.claims.original_claim(42)
+    assert receipt['claim_ref_sha']==fence!=parent['fence']
+    assert receipt['review_parent']['fence']==parent['fence']
+    assert receipt['original_delivery']['owner']==anchor.original.to_dict()
+
+
+def test_review_refuses_missing_optional_claim_history_capability(reviewer_owner):
+    owner,session,adapter,command,parent,anchor=reviewer_owner
+    class CurrentOnlyClaims:
+        def original_claim(self,issue_number):return anchor,parent['fence']
+    owner.claims=CurrentOnlyClaims()
+    with pytest.raises(ValueError,match='selection-anchor history'):
+        owner.first_model(session.run_assets,command)
+    adapter.seal_first_model.assert_not_called()

@@ -11,7 +11,7 @@ from ..domain.claim import Claim, ClaimFetchError
 from ..domain.models import OrchestratorState, PendingRework, Session
 from ..domain.original_delivery import OriginalDelivery, OriginalDeliveryOperation
 from ..infra.runtime_artifacts import builtin_cleanup_root
-from ..ports.original_delivery import OriginalDeliveryClaims
+from ..ports.original_delivery import OriginalDeliveryClaims, OriginalDeliveryClaimHistory
 from ..ports.original_docker_custody import OriginalDockerCustody
 from ..ports.repository_host import RepositoryHost
 from ..ports.working_copy import WorkingCopy
@@ -95,7 +95,9 @@ class OriginalDeliveryOwner:
         if self.docker_custody.first_model_snapshot(session, command.contract_sha256, command.launch_sha256) != snapshot:
             raise ValueError("Docker first-model custody changed during registration")
         current = self._review_original(session, snapshot) if reviewing else self.observe(session.issue.number)
-        if current != original:
+        if reviewing:
+            original = current  # Both reads independently authenticated only expiry renewal from the anchor.
+        elif current != original:
             raise ValueError("Docker first-model original fence changed during observation")
         receipt = {"schema_version": 1, "kind": "builder-docker-first-model-receipt", "run_id": run.run_id,
             "builder_run_id": snapshot["builder_run_id"], "contract_sha256": command.contract_sha256,
@@ -157,11 +159,19 @@ class OriginalDeliveryOwner:
     def _review_original(self, session: Session, snapshot: dict) -> dict:
         """Observe a separate granted parent without current-config/engine substitution."""
         parent, inner = snapshot['review_parent'], snapshot['original_inner']
+        if not isinstance(self.claims, OriginalDeliveryClaimHistory):
+            raise ValueError('Docker REVIEW requires authenticated selection-anchor history')
+        try:
+            anchor = self.claims.original_claim_at(session.issue.number, parent['fence'])
+        except ClaimFetchError as error:
+            raise ValueError('Docker REVIEW selection anchor is unavailable') from error
         claim, fence = self.claims.original_claim(session.issue.number)
+        if replace(claim, expires_at=anchor.expires_at) != anchor or claim.expires_at < anchor.expires_at:
+            raise ValueError('Docker REVIEW permits only the selected lease expiry renewal')
         owner = claim.original
         if (owner is None or owner.execution_backend != 'docker' or owner.repository != self.config.repo or
                 owner.contract_sha256 != parent['original_inner_sha256'] or owner.run_id != parent['engine_run_id'] or
-                fence != parent['fence'] or claim.is_expired() or owner.cancelled or owner.released or owner.pending or
+                claim.is_expired() or owner.cancelled or owner.released or owner.pending or
                 owner.worktree != inner['execution']['workspace'] or owner.branch != inner['branch']['name'] or
                 owner.worktree == str(session.worktree_path) or owner.run_id == session.run_assets.run_id or
                 any(row.container_id == snapshot['custody']['container_id'] or
