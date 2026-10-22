@@ -25,7 +25,7 @@ from ..infra.emit import emit_event
 from ..ports import CommandRunner, CommandResult, WorkingCopy
 from ..ports.attempt_store import AttemptStore
 from ..ports.session_output import ValidationRecord
-from .isolation import build_runtime_tool_env
+from .isolation import build_validation_tool_env
 from .validation_record_store import ValidationRecordStore as ValidationRecordStore
 
 logger = logging.getLogger(__name__)
@@ -122,22 +122,7 @@ class ValidationRunner:
             },
         )
 
-        environment = build_runtime_tool_env(self.store.worktree)
-        environment.pop("ISSUE_ORCHESTRATOR_COMPLETION_CONTEXT", None)
-        if completion_entry is not None:
-            environment["ISSUE_ORCHESTRATOR_COMPLETION_CONTEXT"] = json.dumps({
-                "schema_version": 1,
-                "entry_id": completion_entry.entry_id,
-                "raw": {"path": str(completion_entry.raw_path), "sha256": completion_entry.raw_sha256},
-                "normalized_sha256": completion_entry.normalized_sha256,
-                "run": {
-                    "session_name": completion_entry.run.session_name,
-                    "run_id": completion_entry.run.run_id,
-                    "started_at": completion_entry.run.started_at,
-                    "run_dir": str(completion_entry.run.run_dir),
-                    "worktree": str(completion_entry.run.worktree_path),
-                },
-            }, sort_keys=True, separators=(",", ":"))
+        environment = build_validation_tool_env(self.store.worktree, completion_entry)
         try:
             result = self.command_runner.run(
                 command,
