@@ -1,27 +1,106 @@
 """Project the exact sealed worker authority without ambient credentials."""
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import re
+import stat
 
 from .agent_runner_env import DEFAULT_FORBIDDEN_ENV_VARS
 from .docker_launch_input import canonical, sealed_bytes
 
 
-def _require_mounts(packet: dict, paths: tuple[Path, Path]) -> None:
+def _require_mounts(packet: dict, paths: tuple[Path, ...]) -> None:
     mounts = packet["mounts"]
     for path in paths:
         if {"source": str(path), "target": str(path), "read_only": True} not in mounts:
             raise ValueError("Docker worker authority lacks exact read-only file mount")
         for mount in mounts:
-            if not mount["read_only"] and any(path == root or path.is_relative_to(root)
+            if not mount["read_only"] and any(path.is_relative_to(root) or root.is_relative_to(path)
                     for root in (Path(mount["source"]), Path(mount["target"]))):
                 raise ValueError("Docker worker authority overlaps writable mount")
+
+
+def _public_proof(descriptor: dict, expected_path: Path, packet: dict) -> None:
+    """Authenticate public root custody; Builder owns admission policy content."""
+    if (type(descriptor) is not dict or set(descriptor) != {"path", "sha256"} or
+            descriptor.get("path") != str(expected_path) or
+            not isinstance(descriptor.get("sha256"), str) or
+            not re.fullmatch(r"[0-9a-f]{64}", descriptor["sha256"])):
+        raise ValueError("Docker public admission descriptor differs")
+    _require_mounts(packet, (expected_path,))
+    exact = {"source": str(expected_path), "target": str(expected_path), "read_only": True}
+    for mount in packet["mounts"]:
+        if mount != exact and any(expected_path.is_relative_to(root) or root.is_relative_to(expected_path)
+                for root in (Path(mount["source"]), Path(mount["target"]))):
+            raise ValueError("Docker public admission requires isolated file mounts")
+    raw = _public_proof_bytes(expected_path)
+    value = json.loads(raw)
+    if type(value) is not dict or canonical(value) != raw or sha256(raw).hexdigest() != descriptor["sha256"]:
+        raise ValueError("Docker public admission digest or encoding changed")
+
+
+def _public_proof_bytes(path: Path) -> bytes:
+    """Hold a bounded immutable public file across identity and content checks."""
+    if path.resolve(strict=True) != path:
+        raise ValueError("Docker public admission path is not canonical")
+    for parent in path.parents:
+        info = parent.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022):
+            raise ValueError("Docker public admission ancestry is not protected")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_nlink != 1 or
+                before.st_mode & 0o222 or not 0 < before.st_size <= 65536):
+            raise ValueError("Docker public admission proof is not immutable root custody")
+        raw = bytearray()
+        while len(raw) < before.st_size:
+            chunk = os.read(fd, min(65536, before.st_size - len(raw)))
+            if not chunk:
+                raise ValueError("Docker public admission proof short read")
+            raw.extend(chunk)
+        after = os.fstat(fd)
+        fields = ("st_dev", "st_ino", "st_uid", "st_gid", "st_nlink", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if os.read(fd, 1) or any(getattr(before, key) != getattr(after, key) for key in fields):
+            raise ValueError("Docker public admission proof changed during read")
+    finally:
+        os.close(fd)
+    return bytes(raw)
+
+
+def _require_admission(packet: dict, outer: dict) -> None:
+    if type(outer.get("schema_version")) is not int:
+        raise ValueError("Docker worker admission version is invalid")
+    if outer.get("schema_version") == 1:
+        if (outer.get("model_admission") is not False or outer.get("installed_acceptance") is not None or
+                "authorization" in outer or "admission_proofs" in packet):
+            raise ValueError("Docker non-model authority cannot project admission proofs")
+        return
+    if outer.get("schema_version") != 2 or outer.get("model_admission") is not True:
+        raise ValueError("Docker worker admission version is invalid")
+    proofs = packet.get("admission_proofs")
+    if type(proofs) is not dict or set(proofs) != {"acceptance", "authorization"}:
+        raise ValueError("Docker worker admission proof projection is incomplete")
+    acceptance = outer.get("installed_acceptance")
+    if type(acceptance) is not dict or not isinstance(acceptance.get("sha256"), str):
+        raise ValueError("Docker worker acceptance descriptor is invalid")
+    if not re.fullmatch(r"[0-9a-f]{64}", acceptance["sha256"]):
+        raise ValueError("Docker worker acceptance digest is invalid")
+    root = Path("/srv/builder/admission")
+    paths = {"acceptance": root / "acceptances" / (acceptance["sha256"] + ".json"),
+        "authorization": root / "authorizations" / (packet["builder_run_id"] + ".json")}
+    if proofs != {name: str(path) for name, path in paths.items()}:
+        raise ValueError("Docker worker admission paths leave public custody")
+    _public_proof(acceptance, paths["acceptance"], packet)
+    _public_proof(outer.get("authorization"), paths["authorization"], packet)
 
 
 def _authority_environment(packet: dict) -> dict[str, str]:
     descriptor = packet.get("worker_authority")
     if descriptor is None:
+        if "admission_proofs" in packet:
+            raise ValueError("Docker admission proofs require worker authority")
         return {}
     if type(descriptor) is not dict or set(descriptor) != {"contract_path", "engine_contract_path"}:
         raise ValueError("Docker worker authority descriptor is invalid")
@@ -37,6 +116,7 @@ def _authority_environment(packet: dict) -> dict[str, str]:
     if canonical(outer) != outer_raw or canonical(inner) != inner_raw:
         raise ValueError("Docker worker authority encoding changed")
     _require_subject(packet, outer, inner, inner_path)
+    _require_admission(packet, outer)
     return {"XORETS_EXECUTION_CONTRACT": str(outer_path), "XORETS_EXECUTION_DIGEST": sha256(outer_raw).hexdigest()}
 
 
@@ -52,9 +132,10 @@ def _require_subject(packet: dict, outer: dict, inner: dict, inner_path: Path) -
     if "worker_projection" in execution:
         subject["execution"]["worker_projection"] = execution["worker_projection"]
     intent = {key: value for key, value in packet.items() if key not in {"contract_sha256", "run_id", "engine_run_dir", "command_sha256"}}
-    if (set(outer) != {"schema_version", "kind", "model_admission", "run_id", "subject", "engine_contract", "worker", "installed_acceptance"} or
-            outer.get("schema_version") != 1 or outer.get("kind") != "builder-docker-delivery" or
-            outer.get("model_admission") is not False or outer.get("installed_acceptance") is not None or
+    keys = {"schema_version", "kind", "model_admission", "run_id", "subject", "engine_contract", "worker", "installed_acceptance"}
+    if outer.get("schema_version") == 2:
+        keys.add("authorization")
+    if (set(outer) != keys or outer.get("kind") != "builder-docker-delivery" or
             outer.get("run_id") != packet["builder_run_id"] or outer.get("subject") != subject or
             outer.get("engine_contract") != {"path": str(inner_path), "sha256": packet["contract_sha256"]} or
             set(outer.get("worker", {})) != {"image_id", "manifest_sha256"} or

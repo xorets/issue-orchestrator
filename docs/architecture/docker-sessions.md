@@ -181,9 +181,19 @@ capability file. Neither secret enters command text, launch packets or public
 receipts, and ambient controller environment is not copied. Docker rework
 remains explicitly unsupported until its separate spawn seam carries that
 allocation authority; synthetic acceptance keeps its correction budget at zero.
-A primitive without this
-descriptor receives no execution authority. This projection grants no model
-admission.
+Builder v1 outer seals retain their non-model semantics and reject admission
+proof projections. A v2 outer seal adds exact installed acceptance and finite
+run authorization descriptors. Its packet projects only their public paths:
+`/srv/builder/admission/acceptances/<sha256>.json` and
+`/srv/builder/admission/authorizations/<builder_run_id>.json`. These paths join
+the outer descriptors and immutable launch intent without embedding a grant's
+own hash in the launch intent. Each requires an isolated exact read-only file
+mount, protected root ancestry and bounded immutable root-owned canonical bytes
+matching the outer digest. Writable overlaps or directory projections refuse.
+Builder owns acceptance/model policy evaluation; this adapter authenticates
+those already selected public bytes and the original authority subject.
+A primitive without the worker-authority descriptor receives no execution
+authority. These source checks grant no model admission.
 Native keeps its previous callback allowlist. Reaching an origin alone does
 not establish cross-run authorization or network qualification.
 

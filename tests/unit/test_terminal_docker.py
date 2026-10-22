@@ -777,3 +777,14 @@ def test_unsafe_cli_account_name_cannot_choose_a_cache_path(launch, monkeypatch,
     monkeypatch.setattr("pwd.getpwuid", lambda uid: SimpleNamespace(pw_name="../../elsewhere"))
     assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None) is False
     assert not calls and engine.created_exec is None
+
+
+def test_unbound_admission_proofs_refuse_before_cli_or_provider(launch):
+    runner, engine, packet, calls = launch
+    packet['admission_proofs'] = {'acceptance': '/srv/builder/admission/acceptances/' + 'a' * 64 + '.json',
+        'authorization': '/srv/builder/admission/authorizations/' + packet['builder_run_id'] + '.json'}
+    runner.launch_path.chmod(0o600)
+    runner.launch_path.write_bytes(canonical(packet))
+    runner.launch_path.chmod(0o400)
+    assert not runner.create_session(42, 'echo safe', packet['working_dir'], None, 'issue-42', secret_env=None)
+    assert calls == [] and engine.starts == 0
