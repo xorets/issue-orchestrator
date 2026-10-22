@@ -809,7 +809,11 @@ def test_first_model_evidence_uses_controller_output_custody_and_exclusive_alloc
     assert path.stat().st_mode & 0o777 == 0o400
     assert path.stat().st_nlink == 1
     assert not path.is_relative_to(run.run_dir)
-    with pytest.raises(FileExistsError):
+    second = runner.seal_first_model(run, receipt)
+    assert second['path'] != result['path'] and second['sha256'] == result['sha256']
+    for _ in range(1024 // len(canonical(receipt)) - 2):
+        runner.seal_first_model(run, receipt)
+    with pytest.raises(ValueError, match='aggregate output bound'):
         runner.seal_first_model(run, receipt)
     with pytest.raises(ValueError, match='metadata bound'):
         runner.seal_first_model(run, {**receipt, 'oversized':'x'*1024})

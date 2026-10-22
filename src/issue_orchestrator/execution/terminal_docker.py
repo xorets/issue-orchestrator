@@ -72,6 +72,43 @@ def hook_argv(command: object) -> list[str]:
     return argv
 
 
+def seal_first_model_bytes(directory: Path, raw: bytes) -> dict[str, str]:
+    """Write one exclusive immutable bounded receipt in controller-only custody."""
+    name = "receipt-" + uuid4().hex + ".json"
+    directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, 0o400, dir_fd=directory_fd)
+        with os.fdopen(fd, "w+b") as stream:
+            stream.write(raw); stream.flush(); os.fsync(stream.fileno()); stream.seek(0)
+            before = os.fstat(stream.fileno())
+            if (before.st_uid != os.getuid() or before.st_nlink != 1 or
+                    not stat.S_ISREG(before.st_mode) or stat.S_IMODE(before.st_mode) != 0o400 or stream.read(65537) != raw):
+                raise ValueError("Docker first-model evidence custody changed")
+            after = os.fstat(stream.fileno())
+            fields = ("st_dev", "st_ino", "st_uid", "st_gid", "st_mode", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+            if any(getattr(before, field) != getattr(after, field) for field in fields):
+                raise ValueError("Docker first-model evidence changed during readback")
+        os.fsync(directory_fd)
+        if private_directory(directory) != directory:
+            raise ValueError("Docker first-model evidence directory changed")
+    finally:
+        os.close(directory_fd)
+    return {"path": str(directory / name), "sha256": sha256(raw).hexdigest()}
+
+
+def first_model_evidence_size(directory: Path) -> int:
+    """Account only authenticated immutable receipts in the private output allocation."""
+    previous_bytes = 0
+    for entry in directory.iterdir():
+        info = entry.lstat()
+        if (not re.fullmatch(r"receipt-[0-9a-f]{32}\.json", entry.name) or
+                not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
+                info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o400 or not 0 < info.st_size <= 65536):
+            raise ValueError("Docker first-model previous evidence custody changed")
+        previous_bytes += info.st_size
+    return previous_bytes
+
+
 def require_first_model_liveness(actual: dict, provider: dict, custody: DockerCustody) -> None:
     """Strict daemon facts for the selected provider, before any model receipt."""
     state = actual.get("State", {})
@@ -597,12 +634,13 @@ class DockerPlugin:
                 record["hook_execs"].append(row)
                 self._save()
                 def consume(chunk: bytes) -> None:
-                    if record["output_bytes"] + len(chunk) > packet["limits"]["max_output_bytes"]:
-                        record["overflow"] = True
-                        raise ValueError("Docker lifecycle output bound exhausted")
-                    destination.write(chunk)
-                    destination.flush()
-                    record["output_bytes"] += len(chunk)
+                    with self._lock:
+                        if record["output_bytes"] + record.get("first_model_bytes", 0) + len(chunk) > packet["limits"]["max_output_bytes"]:
+                            record["overflow"] = True
+                            raise ValueError("Docker lifecycle output bound exhausted")
+                        destination.write(chunk)
+                        destination.flush()
+                        record["output_bytes"] += len(chunk)
                 remaining = (packet["deadline_unix_ns"] - time.time_ns()) / 1e9
                 if remaining <= 0:
                     raise ValueError("Docker lifecycle deadline exhausted")
@@ -630,12 +668,13 @@ class DockerPlugin:
             output = self._output_directory(packet) / "docker-output.log"
             with output.open("xb") as destination:
                 def consume(chunk: bytes) -> None:
-                    if record["output_bytes"] + len(chunk) > packet["limits"]["max_output_bytes"]:
-                        record["overflow"] = True
-                        raise ValueError("Docker raw output hard bound exhausted")
-                    destination.write(chunk)
-                    destination.flush()
-                    record["output_bytes"] += len(chunk)
+                    with self._lock:
+                        if record["output_bytes"] + record.get("first_model_bytes", 0) + len(chunk) > packet["limits"]["max_output_bytes"]:
+                            record["overflow"] = True
+                            raise ValueError("Docker raw output hard bound exhausted")
+                        destination.write(chunk)
+                        destination.flush()
+                        record["output_bytes"] += len(chunk)
                 record["state"] = DockerSessionState.STARTING
                 self._save()
                 remaining = (packet["deadline_unix_ns"] - time.time_ns()) / 1e9
@@ -696,6 +735,10 @@ class DockerPlugin:
 
     def seal_first_model(self, run: SessionRunAssets, receipt: dict) -> dict:
         """Exclusive controller-only evidence in the existing bounded output root."""
+        with self._lock:
+            return self._seal_first_model(run, receipt)
+
+    def _seal_first_model(self, run: SessionRunAssets, receipt: dict) -> dict:
         packet = self._load_packet()
         if (packet["run_id"] != run.run_id or receipt["run_id"] != run.run_id or
                 receipt["launch_sha256"] != sha256(canonical(packet)).hexdigest()):
@@ -707,27 +750,21 @@ class DockerPlugin:
         available = os.statvfs(root)
         if available.f_bavail * available.f_frsize < len(raw) + 8192:
             raise ValueError("Docker first-model output allocation exhausted")
-        directory = private_directory(root / "builder-first-model", create=True)
-        name = "receipt-" + uuid4().hex + ".json"
-        directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            fd = os.open(name, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, 0o400, dir_fd=directory_fd)
-            with os.fdopen(fd, "w+b") as stream:
-                stream.write(raw); stream.flush(); os.fsync(stream.fileno()); stream.seek(0)
-                before = os.fstat(stream.fileno())
-                if (before.st_uid != os.getuid() or before.st_nlink != 1 or
-                        not stat.S_ISREG(before.st_mode) or stat.S_IMODE(before.st_mode) != 0o400 or stream.read(65537) != raw):
-                    raise ValueError("Docker first-model evidence custody changed")
-                after = os.fstat(stream.fileno())
-                fields = ("st_dev", "st_ino", "st_uid", "st_gid", "st_mode", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
-                if any(getattr(before, field) != getattr(after, field) for field in fields):
-                    raise ValueError("Docker first-model evidence changed during readback")
-            os.fsync(directory_fd)
-            if private_directory(directory) != directory:
-                raise ValueError("Docker first-model evidence directory changed")
-        finally:
-            os.close(directory_fd)
-        return {"path": str(directory / name), "sha256": sha256(raw).hexdigest()}
+        directory = root / "builder-first-model"
+        if not directory.exists():
+            private_directory(directory, create=True)
+        private_directory(directory)
+        previous_bytes = first_model_evidence_size(directory)
+        record = self._record_for(packet["session_name"])
+        if record is not None and record.get("first_model_bytes", 0) != previous_bytes:
+            raise ValueError("Docker first-model evidence accounting changed")
+        if previous_bytes + len(raw) + (record or {}).get("output_bytes", 0) > packet["limits"]["max_output_bytes"]:
+            raise ValueError("Docker first-model aggregate output bound exhausted")
+        result = seal_first_model_bytes(directory, raw)
+        if record is not None:
+            record["first_model_bytes"] = previous_bytes + len(raw)
+            self._save()
+        return result
 
     def public_receipt(self, session_name: str) -> dict:
         self.custody(session_name)
