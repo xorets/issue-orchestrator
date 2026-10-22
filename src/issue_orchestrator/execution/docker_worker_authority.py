@@ -262,3 +262,33 @@ def worker_environment(packet: dict, provider: dict[str, str], callback_token: s
     elif packet.get("worker_authority") is not None:
         raise ValueError("Docker worker authority requires scoped callback authentication")
     return environment
+
+
+def model_review_parent(packet: dict, outer: dict, inner: dict) -> dict:
+    """Authenticate a REVIEW parent from its exact root-held grant and namespace."""
+    grant = _public_proof(outer['authorization'], Path(packet['admission_proofs']['authorization']), packet)
+    parent = grant.get('review_parent')
+    fields = {'schema_version', 'kind', 'subject_sha256', 'head_sha', 'reviewer_authority_sha256',
+        'original_outer_sha256', 'original_inner_sha256', 'builder_run_id', 'engine_run_id', 'fence'}
+    if (inner['role'] != 'standard-review' or type(parent) is not dict or set(parent) != fields or
+            type(parent['schema_version']) is not int or parent['schema_version'] != 1 or
+            parent['kind'] != 'builder-docker-review-parent' or
+            any(not isinstance(parent[key], str) or not re.fullmatch('[0-9a-f]{64}', parent[key]) for key in
+                ('subject_sha256', 'reviewer_authority_sha256', 'original_outer_sha256', 'original_inner_sha256')) or
+            any(not isinstance(parent[key], str) or not re.fullmatch('[0-9a-f]{40}', parent[key]) for key in ('head_sha', 'fence')) or
+            not isinstance(parent['builder_run_id'], str) or not re.fullmatch('run-[0-9a-f]{32}', parent['builder_run_id']) or
+            parent['builder_run_id'] == packet['builder_run_id'] or
+            not isinstance(parent['engine_run_id'], str) or not re.fullmatch('[0-9]{8}-[0-9]{6}Z-[0-9a-f]{32}', parent['engine_run_id'])):
+        raise ValueError('Docker REVIEW requires its separate root-granted original parent')
+    namespace = Path(packet['worker_authority']['contract_path']).parent.parent
+    name = parent['builder_run_id'] + '.json'
+    outer_path, inner_path = namespace/'execution-contracts-docker-v1'/name, namespace/'engine-contracts-docker-v1'/name
+    original_outer = json.loads(sealed_bytes(outer_path, expected=parent['original_outer_sha256']))
+    original_inner = json.loads(sealed_bytes(inner_path, expected=parent['original_inner_sha256']))
+    if (original_outer.get('kind') != 'builder-docker-delivery' or original_outer.get('run_id') != parent['builder_run_id'] or
+            original_outer.get('engine_contract') != {'path':str(inner_path),'sha256':parent['original_inner_sha256']} or
+            original_inner.get('run_id') != parent['builder_run_id'] or original_inner.get('role') != 'standard-implementation' or
+            original_inner.get('repository') != inner.get('repository') or original_inner.get('issue') != inner.get('issue') or
+            original_inner['execution']['workspace'] == inner['execution']['workspace']):
+        raise ValueError('Docker REVIEW original material differs from granted parent')
+    return {'review_parent':parent, 'original_inner':original_inner}

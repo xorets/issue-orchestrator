@@ -7,6 +7,7 @@ from .terminal_docker import DockerPlugin, canonical, sealed_bytes
 from .original_delivery_session import require_native_session_assets
 from hashlib import sha256
 import json
+from pathlib import Path
 
 
 class DockerOriginalCustody:
@@ -19,6 +20,19 @@ class DockerOriginalCustody:
         if session.agent_config.provider != "codex" or identity.get("provider") != "codex":
             raise ValueError("Docker first-model provider differs from allocated session")
         return self.runner.first_model_snapshot(session.run_assets, session.terminal_id, contract_sha256, launch_sha256)
+
+    def verify_review_parent(self, owner: OriginalDelivery, context: dict) -> None:
+        parent, inner = context['review_parent'], context['original_inner']
+        rows = [row for row in owner.docker_custody if row.run_id == parent['engine_run_id']]
+        if len(rows) != 1:
+            raise ValueError('Docker review parent original custody unavailable')
+        template = Path(inner['execution']['docker_launch']['template_path'])
+        packet = json.loads(sealed_bytes(template.parent / parent['engine_run_id'] / 'launch.json', expected=rows[0].launch_sha256))
+        if (packet['run_id'] != owner.run_id or packet['builder_run_id'] != parent['builder_run_id'] or
+                packet['contract_sha256'] != owner.contract_sha256 or packet['working_dir'] != owner.worktree or
+                packet['daemon_id'] != rows[0].daemon_id or packet['controller_container_id'] != rows[0].controller_container_id):
+            raise ValueError('Docker review parent protected launch changed')
+        self.runner.verify_stopped_parent(packet, rows[0])
 
     def seal_first_model(self, session: Session, receipt: dict) -> dict:
         return self.runner.seal_first_model(session.run_assets, receipt)

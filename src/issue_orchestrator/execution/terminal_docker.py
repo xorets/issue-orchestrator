@@ -28,7 +28,7 @@ from ..domain.session_run import SessionRunAssets
 from ..infra.hooks.hookspec import hookimpl
 from .docker_engine import DockerEngine
 from .docker_launch_input import canonical as canonical, sealed_bytes as sealed_bytes, network_arguments, control_manifest_bytes
-from .docker_worker_authority import worker_environment, model_projection_snapshot
+from .docker_worker_authority import worker_environment, model_projection_snapshot, model_review_parent
 
 logger = logging.getLogger(__name__)
 
@@ -717,8 +717,9 @@ class DockerPlugin:
                 sha256(canonical(packet)).hexdigest() != launch_sha256):
             raise ValueError("Docker first-model assigned launch changed")
         outer, inner, projection = model_projection_snapshot(packet)
-        if inner["role"] != "standard-implementation":
-            raise ValueError("Docker first-model requires separate CODE authority")
+        if inner["role"] not in {"standard-implementation", "standard-review"}:
+            raise ValueError("Docker first-model requires selected CODE or REVIEW authority")
+        review = model_review_parent(packet, outer, inner) if inner['role'] == 'standard-review' else {}
         custody = self.custody(session_name)
         if custody.run_id != run.run_id or custody.launch_sha256 != launch_sha256:
             raise ValueError("Docker first-model original custody changed")
@@ -729,9 +730,23 @@ class DockerPlugin:
             "container_id": custody.container_id, "provider_exec_id": custody.provider_exec_id, "image_id": packet["image_id"],
             "running": True, "paused": False, "restarting": False, "oom_killed": False, "restart_count": 0,
             "provider_running": True, "provider_exit_code": None}
-        return {"builder_run_id": packet["builder_run_id"], "outer_sha256": sha256(canonical(outer)).hexdigest(),
+        return {"role":inner['role'], **review, "builder_run_id": packet["builder_run_id"], "outer_sha256": sha256(canonical(outer)).hexdigest(),
             "projection_sha256": sha256(canonical(projection)).hexdigest(),
             "custody": {key: getattr(custody, key) for key in DockerCustody.__dataclass_fields__}, "worker": worker}
+
+    def verify_stopped_parent(self, packet: dict, custody: DockerCustody) -> None:
+        """Read-only daemon proof of the granted implementation's terminal custody."""
+        if self.engine.request('GET', '/info').get('ID') != custody.daemon_id:
+            raise ValueError('Docker review parent daemon changed')
+        actual = self._validate_created(packet, custody.container_id, custody.launch_sha256)
+        state = actual.get('State', {})
+        provider = self.engine.request('GET', '/exec/' + custody.provider_exec_id + '/json')
+        if (state.get('Running') is not False or state.get('Pid') != 0 or type(state.get('Pid')) is not int or
+                state.get('Paused') is not False or state.get('Restarting') is not False or state.get('OOMKilled') is not False or
+                state.get('Error') != '' or type(actual.get('RestartCount')) is not int or actual['RestartCount'] != 0 or
+                provider.get('ID') != custody.provider_exec_id or provider.get('ContainerID') != custody.container_id or
+                provider.get('Running') is not False or type(provider.get('ExitCode')) is not int or provider['ExitCode'] != 0):
+            raise ValueError('Docker review parent implementation is not successfully stopped')
 
     def seal_first_model(self, run: SessionRunAssets, receipt: dict) -> dict:
         """Exclusive controller-only evidence in the existing bounded output root."""

@@ -78,7 +78,7 @@ class OriginalDeliveryOwner:
     docker_custody: OriginalDockerCustody | None = None
 
     def first_model(self, run: SessionRunAssets, command: DockerFirstModelCommand) -> dict[str, object]:
-        """Bind one CODE allocation to its existing original owner, never REVIEW."""
+        """Bind CODE or a distinct REVIEW allocation through its selected root authority."""
         if (self.state is None or self.docker_custody is None or
                 self.config.terminal_adapter != "issue_orchestrator.execution.terminal_docker:DockerPlugin" or
                 self.state.startup_status != "complete" or
@@ -88,10 +88,38 @@ class OriginalDeliveryOwner:
         if len(sessions) != 1 or run.run_id != command.run_id:
             raise ValueError("Docker first-model allocation is not the active original session")
         session = sessions[0]
-        if not session.key.kind.capabilities.open_pr_means_done or session.rework_cycle:
-            raise ValueError("Docker first-model CODE authority cannot admit review or rework")
+        reviewing = session.key.kind.capabilities.reports_verdict
+        if (not reviewing and not session.key.kind.capabilities.open_pr_means_done) or session.rework_cycle:
+            raise ValueError("Docker first-model requires selected CODE or REVIEW authority")
         # Missing/stale/foreign runtime custody fails BEFORE original registration.
         snapshot = self.docker_custody.first_model_snapshot(session, command.contract_sha256, command.launch_sha256)
+        if reviewing:
+            if snapshot.get('role') != 'standard-review':
+                raise ValueError('Docker review requires separate reviewer authority')
+            original = self._review_original(session, snapshot)
+        else:
+            if snapshot.get('role') != 'standard-implementation':
+                raise ValueError('Docker CODE cannot reuse reviewer authority')
+            original = self._first_model_original(session, command, snapshot)
+        # Recheck the live daemon after registration and before producing evidence.
+        if self.docker_custody.first_model_snapshot(session, command.contract_sha256, command.launch_sha256) != snapshot:
+            raise ValueError("Docker first-model custody changed during registration")
+        current = self._review_original(session, snapshot) if reviewing else self.observe(session.issue.number)
+        if current != original:
+            raise ValueError("Docker first-model original fence changed during observation")
+        receipt = {"schema_version": 1, "kind": "builder-docker-first-model-receipt", "run_id": run.run_id,
+            "builder_run_id": snapshot["builder_run_id"], "contract_sha256": command.contract_sha256,
+            "outer_sha256": snapshot["outer_sha256"], "launch_sha256": command.launch_sha256,
+            "projection_sha256": snapshot["projection_sha256"], "observed_unix_ns": time.time_ns(),
+            "original_delivery": original, "claim_ref_sha": original["fence"], "worker": snapshot["worker"],
+            "barrier": {"paused": True, "pause_reason": "operator"}}
+        if reviewing:
+            receipt['review_parent'] = snapshot['review_parent']
+        evidence = self.docker_custody.seal_first_model(session, receipt)
+        return {"schema_version": 1, "kind": "builder-docker-first-model", "receipt": receipt, "controller_evidence": evidence}
+
+    def _first_model_original(self, session: Session, command: DockerFirstModelCommand, snapshot: dict) -> dict:
+        run = session.run_assets
         observed = self.observe(session.issue.number)
         if observed["owner"] is None:
             self.execute(session.issue.number, OriginalDeliveryCommand("register", str(observed["lease_id"]),
@@ -103,19 +131,28 @@ class OriginalDeliveryOwner:
                 owner["contract_sha256"] != command.contract_sha256 or owner["cancelled"] or owner["released"] or
                 not original["lease_current"] or tuple(owner["docker_custody"]) != (snapshot["custody"],)):
             raise ValueError("Docker first-model original owner/fence changed")
-        # Recheck the live daemon after registration and before producing evidence.
-        if self.docker_custody.first_model_snapshot(session, command.contract_sha256, command.launch_sha256) != snapshot:
-            raise ValueError("Docker first-model custody changed during registration")
-        if self.observe(session.issue.number) != original:
-            raise ValueError("Docker first-model original fence changed during observation")
-        receipt = {"schema_version": 1, "kind": "builder-docker-first-model-receipt", "run_id": run.run_id,
-            "builder_run_id": snapshot["builder_run_id"], "contract_sha256": command.contract_sha256,
-            "outer_sha256": snapshot["outer_sha256"], "launch_sha256": command.launch_sha256,
-            "projection_sha256": snapshot["projection_sha256"], "observed_unix_ns": time.time_ns(),
-            "original_delivery": original, "claim_ref_sha": original["fence"], "worker": snapshot["worker"],
-            "barrier": {"paused": True, "pause_reason": "operator"}}
-        evidence = self.docker_custody.seal_first_model(session, receipt)
-        return {"schema_version": 1, "kind": "builder-docker-first-model", "receipt": receipt, "controller_evidence": evidence}
+        return original
+
+    def _review_original(self, session: Session, snapshot: dict) -> dict:
+        """Observe a separate granted parent without current-config/engine substitution."""
+        parent, inner = snapshot['review_parent'], snapshot['original_inner']
+        claim, fence = self.claims.original_claim(session.issue.number)
+        owner = claim.original
+        if (owner is None or owner.execution_backend != 'docker' or owner.repository != self.config.repo or
+                owner.contract_sha256 != parent['original_inner_sha256'] or owner.run_id != parent['engine_run_id'] or
+                fence != parent['fence'] or claim.is_expired() or owner.cancelled or owner.released or owner.pending or
+                owner.worktree != inner['execution']['workspace'] or owner.branch != inner['branch'] or
+                owner.worktree == str(session.worktree_path) or owner.run_id == session.run_assets.run_id or
+                any(row.container_id == snapshot['custody']['container_id'] or
+                    row.provider_exec_id == snapshot['custody']['provider_exec_id'] for row in owner.docker_custody)):
+            raise ValueError('Docker review original parent/fence/allocation changed')
+        if self.working_copy is None or not self.working_copy.matches_exact_commit(session.worktree_path, parent['head_sha']):
+            raise ValueError('Docker reviewer checkout differs from granted candidate')
+        assert self.docker_custody is not None
+        self.docker_custody.verify_review_parent(owner, snapshot)
+        return {'issue_number':session.issue.number, 'lease_id':claim.lease_id, 'claimant':claim.claimant,
+            'fence':fence, 'lease_current':True, 'expires_at':claim.expires_at.isoformat(),
+            'owner':owner.to_dict(), 'remote_released':False}
 
     def _capture_custody(self, owner: OriginalDelivery) -> OriginalDelivery:
         if owner.execution_backend == "docker":

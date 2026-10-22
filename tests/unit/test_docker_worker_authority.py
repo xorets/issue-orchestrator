@@ -323,3 +323,65 @@ def test_root_grant_must_bind_current_delivery_before_secret_lookup(model_author
     with pytest.raises(ValueError, match='another delivery'):
         KeyringProviderCredentials().session_env('codex', docker=True)
     assert reads == []
+
+
+@pytest.fixture
+def review_authority(model_authority):
+    import json
+    import copy
+    packet, outer_path, outer, files, controls, seal = model_authority
+    original_run='run-'+'b'*32
+    inner_path=Path(packet['worker_authority']['engine_contract_path'])
+    original_inner=json.loads(inner_path.read_bytes())
+    original_inner['run_id']=original_run
+    original_inner['execution']['workspace']='/original-workspace'
+    original_inner_path=inner_path.with_name(original_run+'.json')
+    original_inner_path.write_bytes(canonical(original_inner));original_inner_path.chmod(0o400)
+    original_outer=copy.deepcopy(outer)
+    original_outer.update(run_id=original_run,engine_contract={'path':str(original_inner_path),'sha256':sha256(canonical(original_inner)).hexdigest()})
+    original_outer_path=outer_path.with_name(original_run+'.json')
+    original_outer_path.write_bytes(canonical(original_outer));original_outer_path.chmod(0o400)
+    inner=json.loads(inner_path.read_bytes());inner['role']='standard-review'
+    inner_path.chmod(0o600);inner_path.write_bytes(canonical(inner));inner_path.chmod(0o400)
+    projection_path=Path(inner['execution']['worker_projection']['path'])
+    projection=json.loads(projection_path.read_bytes());projection['CODEX_HOME']='/baked/capability/homes/standard-review'
+    projection_path.chmod(0o600);projection_path.write_bytes(canonical(projection));projection_path.chmod(0o400)
+    inner['execution']['worker_projection']['sha256']=sha256(canonical(projection)).hexdigest()
+    inner_path.chmod(0o600);inner_path.write_bytes(canonical(inner));inner_path.chmod(0o400)
+    parent={'schema_version':1,'kind':'builder-docker-review-parent','subject_sha256':'1'*64,'head_sha':'2'*40,
+        'reviewer_authority_sha256':'3'*64,'original_outer_sha256':sha256(canonical(original_outer)).hexdigest(),
+        'original_inner_sha256':sha256(canonical(original_inner)).hexdigest(),'builder_run_id':original_run,
+        'engine_run_id':'20261022-211413Z-'+'b'*32,'fence':'4'*40}
+    grant_path=files[packet['admission_proofs']['authorization']]
+    grant=json.loads(grant_path.read_bytes());grant['review_parent']=parent
+    def reseal():
+        grant_path.chmod(0o600);grant_path.write_bytes(canonical(grant));grant_path.chmod(0o444)
+        outer['authorization']['sha256']=sha256(canonical(grant)).hexdigest()
+        seal()
+    reseal()
+    return packet, parent, grant, original_inner_path, reseal
+
+
+def test_review_parent_reads_real_sealed_original_and_root_grant(review_authority):
+    from issue_orchestrator.execution.docker_worker_authority import model_projection_snapshot, model_review_parent
+    packet,parent,grant,original_inner_path,reseal=review_authority
+    outer,inner,projection=model_projection_snapshot(packet)
+    context=model_review_parent(packet,outer,inner)
+    assert context['review_parent']==parent
+    assert context['original_inner']['execution']['workspace']=='/original-workspace'
+    assert inner['role']=='standard-review'
+
+
+@pytest.mark.parametrize('change',['wrong-role','shared-run','bad-fence','extra-field','changed-original'])
+def test_review_parent_refuses_bad_root_binding_or_held_original(review_authority,change):
+    from issue_orchestrator.execution.docker_worker_authority import model_projection_snapshot, model_review_parent
+    packet,parent,grant,original_inner_path,reseal=review_authority
+    if change == 'shared-run':parent['builder_run_id']=packet['builder_run_id']
+    elif change == 'bad-fence':parent['fence']='f'*64
+    elif change == 'extra-field':parent['path']='/unselected'
+    elif change == 'changed-original':
+        original_inner_path.chmod(0o600);original_inner_path.write_bytes(b'{}\n');original_inner_path.chmod(0o400)
+    reseal()
+    outer,inner,projection=model_projection_snapshot(packet)
+    if change == 'wrong-role':inner['role']='standard-implementation'
+    with pytest.raises(ValueError):model_review_parent(packet,outer,inner)

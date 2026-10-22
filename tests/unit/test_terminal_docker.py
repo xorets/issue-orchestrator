@@ -843,3 +843,28 @@ def test_first_model_requires_strict_live_daemon_facts(launch, changed):
         with pytest.raises(ValueError, match='not live'):
             require_first_model_liveness(actual, provider, custody)
     assert not calls and engine.starts == 0
+
+
+@pytest.mark.parametrize('changed',[None,'live-worker','live-provider','false-restart','oom','wrong-provider'])
+def test_review_parent_requires_actual_successful_stopped_custody(launch,changed):
+    from issue_orchestrator.domain.original_delivery import DockerCustody
+    runner,engine,packet,calls=launch
+    custody=DockerCustody(1,packet['run_id'],packet['daemon_id'],packet['controller_container_id'],'2'*64,'3'*64,sha256(canonical(packet)).hexdigest())
+    actual=engine.worker()
+    actual['State'].update(Running=False,Pid=0,Paused=False,Restarting=False,OOMKilled=False,Error='')
+    actual['RestartCount']=0
+    provider={'ID':custody.provider_exec_id,'ContainerID':custody.container_id,'Running':False,'ExitCode':0}
+    if changed == 'live-worker':actual['State'].update(Running=True,Pid=123)
+    elif changed == 'live-provider':provider.update(Running=True,ExitCode=None)
+    elif changed == 'false-restart':actual['RestartCount']=False
+    elif changed == 'oom':actual['State']['OOMKilled']=True
+    elif changed == 'wrong-provider':provider['ContainerID']='f'*64
+    engine.worker=lambda:actual
+    original_request=engine.request
+    engine.request=lambda method,path,payload=None:provider if path=='/exec/'+custody.provider_exec_id+'/json' else original_request(method,path,payload)
+    if changed is None:
+        runner.verify_stopped_parent(packet,custody)
+    else:
+        with pytest.raises(ValueError,match='successfully stopped'):
+            runner.verify_stopped_parent(packet,custody)
+    assert not calls and engine.starts == 0

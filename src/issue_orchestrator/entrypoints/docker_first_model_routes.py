@@ -33,6 +33,19 @@ class FirstModelBarrier(BaseModel):
     paused: Literal[True]
     pause_reason: Literal["operator"]
 
+class FirstModelReviewParent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    schema_version: Literal[1]
+    kind: Literal['builder-docker-review-parent']
+    subject_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
+    head_sha: str = Field(pattern=r'^[0-9a-f]{40}$')
+    reviewer_authority_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
+    original_outer_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
+    original_inner_sha256: str = Field(pattern=r'^[0-9a-f]{64}$')
+    builder_run_id: str = Field(pattern=r'^run-[0-9a-f]{32}$')
+    engine_run_id: str = Field(pattern=r'^[0-9]{8}-[0-9]{6}Z-[0-9a-f]{32}$')
+    fence: str = Field(pattern=r'^[0-9a-f]{40}$')
+
 class FirstModelReceipt(BaseModel):
     model_config = ConfigDict(extra="forbid")
     schema_version: Literal[1]
@@ -48,6 +61,7 @@ class FirstModelReceipt(BaseModel):
     claim_ref_sha: str
     worker: FirstModelWorker
     barrier: FirstModelBarrier
+    review_parent: FirstModelReviewParent | None = None
 
 class FirstModelEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -63,7 +77,7 @@ class FirstModelResponse(BaseModel):
 
 docker_first_model_router = APIRouter()
 
-@docker_first_model_router.post("/api/docker/first-model", response_model=FirstModelResponse)
+@docker_first_model_router.post("/api/docker/first-model", response_model=FirstModelResponse, response_model_exclude_unset=True)
 def first_model(body: FirstModelRequest, deps: ControlApiIssueDependency,
                 authorization: str = Header(...), x_completion_capability: str = Header(...)) -> FirstModelResponse:
     from .control_api import verify_docker_callback_authorization
