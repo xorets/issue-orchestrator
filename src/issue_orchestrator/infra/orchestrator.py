@@ -37,6 +37,7 @@ from ..control.orchestrator_support import (
     check_health as _check_health,
     init_orchestrator_components,
 )
+from ..control.original_delivery_facade import original_delivery as _original_delivery, docker_first_model as _docker_first_model
 from ..control.session_launch_types import LaunchStep
 from ..control.github_workflow import GitHubWorkflow, launch_issue_by_number as _gw_launch_issue_by_number, get_issue_machine as _gw_get_issue_machine
 from ..control.worktree_manager import get_worktree_path, get_session_name, extract_issue_branches
@@ -549,25 +550,10 @@ class Orchestrator:
         )
 
     def original_delivery(self, issue_number: int, command: "OriginalDeliveryCommand | None" = None) -> dict[str, object]:
-        """Supported original-owner command, serialized with the engine tick."""
-        with self.state_lock:
-            owner = self.deps.original_delivery_owner
-            if owner is None:
-                raise ValueError("Original remote ownership is unavailable")
-            return owner.observe(issue_number) if command is None else owner.execute(issue_number, command)
+        return _original_delivery(self.deps.original_delivery_owner, issue_number, command, state_lock=self.state_lock)
 
     def docker_first_model(self, capability: str, command: "DockerFirstModelCommand") -> dict[str, object]:
-        """One exact allocation-bound CODE parent observation, serialized with ticks."""
-        with self.state_lock:
-            run = self.deps.issue_run_ledger.run_for_capability(capability)
-            owner = self.deps.original_delivery_owner
-            if self.shutdown_requested or owner is None or not self.deps.health_gate.check(paused=False).can_proceed:
-                raise ValueError("Docker first-model owner or engine health unavailable")
-            owner.first_model_preflight(run, command)
-            if not self.state.paused:
-                self.pause_controller.pause(reason=PauseReason.OPERATOR, actor=PauseActor.CONTROL_API,
-                    detail="Authenticated Docker model preflight for " + run.run_id)
-            return owner.first_model(run, command)
+        return _docker_first_model(self.deps, self.pause_controller, capability, command, shutdown_requested=lambda: self.shutdown_requested, state_lock=self.state_lock)
 
     def tick(self) -> bool:
         self.deps.completion_intake.pump()

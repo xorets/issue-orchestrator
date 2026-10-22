@@ -88,3 +88,39 @@ def network_arguments(packet: dict) -> list[str]:
             raise ValueError("Docker DNS must use canonical public IPv4 addresses")
     return ["--ip", network["worker_ipv4"], *[part for value in dns for part in ("--dns", value)],
         "--sysctl", "net.ipv6.conf.all.disable_ipv6=1"]
+
+
+def hook_argv(command: object) -> list[str]:
+    argv = ["/bin/sh", "-c", command] if type(command) is str else command
+    if type(argv) is not list or not argv or any(type(word) is not str or "\x00" in word for word in argv):
+        raise ValueError("Invalid Docker lifecycle command")
+    return argv
+
+
+def require_create_intent(config: dict, packet: dict) -> None:
+    """Check trusted create flags before CLI can start a container."""
+    allowed = {"name", "image", "workspaceFolder", "containerUser", "remoteUser", "updateRemoteUserUID",
+        "overrideCommand", "workspaceMount", "runArgs"}
+    limits = packet["limits"]
+    args = ["--name", packet["container_name"], "--read-only", "--cap-drop=ALL",
+        "--security-opt=no-new-privileges:true", "--log-driver=none", "--network", packet["network_id"],
+        "--memory", str(limits["memory_bytes"]), "--memory-swap", str(limits["swap_bytes"]),
+        "--pids-limit", str(limits["pids"]), "--cpus", str(limits["cpu_nano"] / 1000000000)]
+    args.extend(network_arguments(packet))
+    for target, options in sorted(packet["tmpfs"].items()):
+        args.extend(("--tmpfs", target + ":" + options))
+    workspace_mount = None
+    for mount in packet["mounts"]:
+        value = "type=bind,source=" + mount["source"] + ",target=" + mount["target"]
+        if mount["read_only"]:
+            value += ",readonly"
+        if mount["target"] == packet["working_dir"]:
+            workspace_mount = value
+        else:
+            args.extend(("--mount", value))
+    if (type(config) is not dict or set(config) - allowed or config.get("image") != packet["image"] or
+            config.get("workspaceFolder") != packet["working_dir"] or config.get("containerUser") != packet["user"] or
+            config.get("remoteUser") != packet["user"] or config.get("updateRemoteUserUID") is not False or
+            config.get("overrideCommand") is not True or config.get("runArgs") != args or
+            config.get("workspaceMount") != workspace_mount):
+        raise ValueError("Docker generated configuration differs from sealed create intent")

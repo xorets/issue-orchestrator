@@ -26,7 +26,7 @@ def _require_mounts(packet: dict, paths: tuple[Path, ...]) -> None:
                 raise ValueError("Docker worker authority overlaps writable mount")
 
 
-def _public_proof(descriptor: dict, expected_path: Path, packet: dict) -> dict:
+def _public_proof(descriptor: object, expected_path: Path, packet: dict) -> dict:
     """Authenticate public root custody; Builder owns admission policy content."""
     if (type(descriptor) is not dict or set(descriptor) != {"path", "sha256"} or
             descriptor.get("path") != str(expected_path) or

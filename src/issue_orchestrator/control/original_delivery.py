@@ -5,7 +5,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..domain.claim import Claim, ClaimFetchError
 from ..domain.models import OrchestratorState, PendingRework, Session
@@ -20,6 +20,7 @@ from uuid import uuid4
 import re
 import time
 from .issue_termination import IssueTerminationOutcome
+from .pause_facade import require_model_preflight_barrier, require_operator_barrier
 
 if TYPE_CHECKING:
     from ..infra.config import Config
@@ -79,8 +80,7 @@ class OriginalDeliveryOwner:
 
     def first_model(self, run: SessionRunAssets, command: DockerFirstModelCommand) -> dict[str, object]:
         """Bind CODE or a distinct REVIEW allocation through its selected root authority."""
-        if self.state is None or not self.state.paused or str(self.state.pause_state.reason) != 'operator':
-            raise ValueError('Docker first-model requires the committed OPERATOR barrier')
+        require_operator_barrier(self.state)
         session,snapshot = self.first_model_preflight(run, command)
         reviewing = session.key.kind.capabilities.reports_verdict
         if reviewing:
@@ -110,13 +110,12 @@ class OriginalDeliveryOwner:
         evidence = self.docker_custody.seal_first_model(session, receipt)
         return {"schema_version": 1, "kind": "builder-docker-first-model", "receipt": receipt, "controller_evidence": evidence}
 
-    def first_model_preflight(self, run: SessionRunAssets, command: DockerFirstModelCommand) -> tuple[Session, dict]:
+    def first_model_preflight(self, run: SessionRunAssets, command: DockerFirstModelCommand) -> tuple[Session, dict[str, Any]]:
         """Only the exact active admitted allocation may request its fixed planner barrier."""
-        if (self.state is None or self.docker_custody is None or
-                self.config.terminal_adapter != "issue_orchestrator.execution.terminal_docker:DockerPlugin" or
-                self.state.startup_status != "complete" or
-                (self.state.paused and str(self.state.pause_state.reason) != "operator")):
-            raise ValueError("Docker first-model requires a healthy started OPERATOR barrier")
+        require_model_preflight_barrier(self.state)
+        if self.docker_custody is None or self.config.terminal_adapter != "issue_orchestrator.execution.terminal_docker:DockerPlugin":
+            raise ValueError("Docker first-model requires the selected custody adapter")
+        assert self.state is not None
         sessions = [session for session in self.state.active_sessions if session.run_assets == run]
         if len(sessions) != 1 or run.run_id != command.run_id:
             raise ValueError("Docker first-model allocation is not the active original session")
@@ -136,12 +135,12 @@ class OriginalDeliveryOwner:
             observed = self.observe(session.issue.number)
             owner = observed['owner']
             if observed['lease_id'] != session.lease_id or not observed['lease_current'] or owner is not None and (
-                    owner['run_id'] != run.run_id or owner['contract_sha256'] != command.contract_sha256 or
+                    not isinstance(owner, dict) or owner['run_id'] != run.run_id or owner['contract_sha256'] != command.contract_sha256 or
                     owner['cancelled'] or owner['released']):
                 raise ValueError('Docker preflight original owner/fence unavailable')
         return session,snapshot
 
-    def _first_model_original(self, session: Session, command: DockerFirstModelCommand, snapshot: dict) -> dict:
+    def _first_model_original(self, session: Session, command: DockerFirstModelCommand, snapshot: dict[str, Any]) -> dict[str, object]:
         run = session.run_assets
         observed = self.observe(session.issue.number)
         if observed["owner"] is None:
@@ -156,7 +155,7 @@ class OriginalDeliveryOwner:
             raise ValueError("Docker first-model original owner/fence changed")
         return original
 
-    def _review_original(self, session: Session, snapshot: dict) -> dict:
+    def _review_original(self, session: Session, snapshot: dict[str, Any]) -> dict[str, object]:
         """Observe a separate granted parent without current-config/engine substitution."""
         parent, inner = snapshot['review_parent'], snapshot['original_inner']
         if not isinstance(self.claims, OriginalDeliveryClaimHistory):

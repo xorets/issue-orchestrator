@@ -8,7 +8,6 @@ from __future__ import annotations
 from contextlib import suppress
 from hashlib import sha256
 import json
-import ipaddress
 import logging
 import os
 from pathlib import Path
@@ -27,7 +26,13 @@ from ..domain.docker_execution import DockerSessionState
 from ..domain.session_run import SessionRunAssets
 from ..infra.hooks.hookspec import hookimpl
 from .docker_engine import DockerEngine
-from .docker_launch_input import canonical as canonical, sealed_bytes as sealed_bytes, network_arguments, control_manifest_bytes
+from .docker_worker_state import (
+    require_worker_identity, require_first_model_liveness as require_first_model_liveness,
+    require_selected_bridge, require_worker_network as require_worker_network,
+    require_bridge_endpoint as require_bridge_endpoint, worker_network_endpoint as worker_network_endpoint,
+    require_stopped_parent_state, require_stopped_worker_network,
+)
+from .docker_launch_input import canonical as canonical, sealed_bytes as sealed_bytes, network_arguments as network_arguments, control_manifest_bytes, require_create_intent, hook_argv
 from .docker_worker_authority import worker_environment, model_projection_snapshot, model_review_parent
 
 logger = logging.getLogger(__name__)
@@ -57,19 +62,6 @@ def seed_control_manifest(packet: dict, temporary: Path) -> None:
         destination.write(raw)
     fetched = packet["control_manifest"]["fetched_unix_ns"]
     os.utime(cache, ns=(fetched, fetched), follow_symlinks=False)
-
-
-def require_worker_identity(actual: dict, container_id: str, launch_digest: str) -> None:
-    if (actual.get("Id") != container_id or
-            actual.get("Config", {}).get("Labels", {}).get("io.builder.launch") != launch_digest):
-        raise ValueError("Docker worker custody changed")
-
-
-def hook_argv(command: object) -> list[str]:
-    argv = ["/bin/sh", "-c", command] if type(command) is str else command
-    if type(argv) is not list or not argv or any(type(word) is not str or "\x00" in word for word in argv):
-        raise ValueError("Invalid Docker lifecycle command")
-    return argv
 
 
 def seal_first_model_bytes(directory: Path, raw: bytes) -> dict[str, str]:
@@ -107,123 +99,6 @@ def first_model_evidence_size(directory: Path) -> int:
             raise ValueError("Docker first-model previous evidence custody changed")
         previous_bytes += info.st_size
     return previous_bytes
-
-
-def require_first_model_liveness(actual: dict, provider: dict, custody: DockerCustody) -> None:
-    """Strict daemon facts for the selected provider, before any model receipt."""
-    state = actual.get("State", {})
-    if (state.get("Running") is not True or state.get("Paused") is not False or state.get("Restarting") is not False or
-            state.get("OOMKilled") is not False or state.get("Error") != "" or
-            type(actual.get("RestartCount")) is not int or actual["RestartCount"] != 0 or
-            provider.get("ID") != custody.provider_exec_id or provider.get("ContainerID") != custody.container_id or
-            provider.get("Running") is not True or provider.get("ExitCode") is not None or
-            type(state.get("Pid")) is not int or state["Pid"] <= 0 or
-            type(provider.get("Pid")) is not int or provider["Pid"] <= 0):
-        raise ValueError("Docker first-model exact worker/provider is not live")
-
-
-def require_create_intent(config: dict, packet: dict) -> None:
-    """Check trusted create flags before CLI can start a container."""
-    allowed = {"name", "image", "workspaceFolder", "containerUser", "remoteUser", "updateRemoteUserUID",
-        "overrideCommand", "workspaceMount", "runArgs"}
-    limits = packet["limits"]
-    args = ["--name", packet["container_name"], "--read-only", "--cap-drop=ALL",
-        "--security-opt=no-new-privileges:true", "--log-driver=none", "--network", packet["network_id"],
-        "--memory", str(limits["memory_bytes"]), "--memory-swap", str(limits["swap_bytes"]),
-        "--pids-limit", str(limits["pids"]), "--cpus", str(limits["cpu_nano"] / 1000000000)]
-    args.extend(network_arguments(packet))
-    for target, options in sorted(packet["tmpfs"].items()):
-        args.extend(("--tmpfs", target + ":" + options))
-    workspace_mount = None
-    for mount in packet["mounts"]:
-        value = "type=bind,source=" + mount["source"] + ",target=" + mount["target"]
-        if mount["read_only"]:
-            value += ",readonly"
-        if mount["target"] == packet["working_dir"]:
-            workspace_mount = value
-        else:
-            args.extend(("--mount", value))
-    if (type(config) is not dict or set(config) - allowed or config.get("image") != packet["image"] or
-            config.get("workspaceFolder") != packet["working_dir"] or config.get("containerUser") != packet["user"] or
-            config.get("remoteUser") != packet["user"] or config.get("updateRemoteUserUID") is not False or
-            config.get("overrideCommand") is not True or config.get("runArgs") != args or
-            config.get("workspaceMount") != workspace_mount):
-        raise ValueError("Docker generated configuration differs from sealed create intent")
-
-
-def require_bridge_endpoint(endpoint: dict, packet: dict, address: str) -> None:
-    network = packet["network"]
-    if (endpoint.get("NetworkID") != packet["network_id"] or endpoint.get("IPAddress") != address or
-            endpoint.get("IPPrefixLen") != ipaddress.IPv4Network(network["subnet"]).prefixlen or
-            endpoint.get("Gateway") != network["gateway"] or endpoint.get("GlobalIPv6Address") or
-            endpoint.get("GlobalIPv6PrefixLen") or endpoint.get("IPv6Gateway")):
-        raise ValueError("Docker bridge endpoint differs from selected IPv4 membership")
-    ipam = endpoint.get("IPAMConfig") or {}
-    if ipam.get("IPv6Address") or ipam.get("LinkLocalIPs"):
-        raise ValueError("Docker bridge endpoint has unadmitted additional addresses")
-
-
-def require_selected_bridge(engine: DockerEngine, packet: dict, controller: dict) -> None:
-    if "network" not in packet:
-        return
-    network = packet["network"]
-    actual = engine.request("GET", "/networks/" + packet["network_id"])
-    if (actual.get("Id") != packet["network_id"] or actual.get("Driver") != "bridge" or
-            actual.get("Scope") != "local" or actual.get("Internal") is not False or
-            actual.get("EnableIPv6") is not False or
-            actual.get("IPAM", {}).get("Driver") != "default" or
-            actual.get("IPAM", {}).get("Config") != [{"Subnet": network["subnet"], "Gateway": network["gateway"]}] or
-            actual.get("Options", {}).get("com.docker.network.bridge.name") != network["bridge_name"] or
-            actual.get("Options", {}).get("com.docker.network.bridge.enable_icc") != "true"):
-        raise ValueError("Docker bridge properties differ from sealed network")
-    endpoints = controller.get("NetworkSettings", {}).get("Networks", {})
-    selected = [value for value in endpoints.values() if value.get("NetworkID") == packet["network_id"]]
-    if len(selected) != 1:
-        raise ValueError("Docker controller is not attached to selected bridge")
-    require_bridge_endpoint(selected[0], packet, network["controller_ipv4"])
-
-
-def worker_network_endpoint(actual: dict, packet: dict) -> dict:
-    network = packet["network"]
-    host = actual.get("HostConfig", {})
-    settings = actual.get("NetworkSettings", {})
-    endpoints = settings.get("Networks", {})
-    if (host.get("Dns") != network["dns"] or host.get("DnsOptions") or host.get("DnsSearch") or
-            host.get("Sysctls") != {"net.ipv6.conf.all.disable_ipv6": "1"} or len(endpoints) != 1 or
-            settings.get("LinkLocalIPv6Address") or settings.get("LinkLocalIPv6PrefixLen")):
-        raise ValueError("Docker worker DNS, IPv6 or network membership differs from sealed intent")
-    return next(iter(endpoints.values()))
-
-
-def require_worker_network(actual: dict, packet: dict) -> None:
-    if 'network' in packet:
-        require_bridge_endpoint(worker_network_endpoint(actual, packet), packet, packet['network']['worker_ipv4'])
-
-
-def require_stopped_parent_state(actual: dict) -> None:
-    state = actual.get('State', {})
-    if (state.get('Running') is not False or type(state.get('Pid')) is not int or state['Pid'] != 0 or
-            state.get('Paused') is not False or state.get('Restarting') is not False or state.get('OOMKilled') is not False or
-            state.get('Error') != '' or type(actual.get('RestartCount')) is not int or actual['RestartCount'] != 0):
-        raise ValueError('Docker review parent implementation is not successfully stopped')
-
-
-def require_stopped_worker_network(actual: dict, packet: dict) -> None:
-    """Static bridge intent survives normal removal of dead endpoint addresses."""
-    require_stopped_parent_state(actual)
-    if 'network' not in packet:
-        return
-    endpoint = worker_network_endpoint(actual, packet)
-    ipam = endpoint.get('IPAMConfig') or {}
-    if (endpoint.get('NetworkID') != packet['network_id'] or ipam.get('IPv4Address') != packet['network']['worker_ipv4'] or
-            ipam.get('IPv6Address') or ipam.get('LinkLocalIPs')):
-        raise ValueError('Docker stopped parent static endpoint differs from sealed intent')
-    if endpoint.get('IPAddress') == packet['network']['worker_ipv4']:
-        require_bridge_endpoint(endpoint, packet, packet['network']['worker_ipv4'])
-        return
-    if (any(endpoint.get(key) != '' for key in ('IPAddress','Gateway','MacAddress','EndpointID','GlobalIPv6Address','IPv6Gateway')) or
-            any(type(endpoint.get(key)) is not int or endpoint.get(key) != 0 for key in ('IPPrefixLen','GlobalIPv6PrefixLen'))):
-        raise ValueError('Docker stopped parent operational endpoint is not lifecycle-cleared')
 
 
 def run_cli_capture(argv: list[str], *, environment: dict[str, str], timeout: float,
@@ -274,7 +149,7 @@ def run_cli_capture(argv: list[str], *, environment: dict[str, str], timeout: fl
 
 def run_cli(argv: list[str], *, environment: dict[str, str], timeout: float, diagnostic_path: Path | None = None) -> bytes:
     """Run admitted CLI input, retaining the existing success-only byte interface."""
-    output, errors, exit_code = run_cli_capture(argv, environment=environment, timeout=timeout, diagnostic_path=diagnostic_path)
+    output, _, exit_code = run_cli_capture(argv, environment=environment, timeout=timeout, diagnostic_path=diagnostic_path)
     if exit_code != 0:
         raise ValueError("Dev Container CLI refused")
     return output

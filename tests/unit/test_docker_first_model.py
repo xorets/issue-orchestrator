@@ -258,3 +258,36 @@ def test_review_refuses_missing_optional_claim_history_capability(reviewer_owner
     with pytest.raises(ValueError,match='selection-anchor history'):
         owner.first_model(session.run_assets,command)
     adapter.seal_first_model.assert_not_called()
+
+
+def test_facade_rechecks_shutdown_after_acquiring_shared_state_custody(sample_orchestrator, first_model_owner):
+    """A shutdown committed while this request waits must win before the barrier."""
+    from issue_orchestrator.control.health_gate import HealthGate
+    from issue_orchestrator.domain.pause_state import PauseState
+    owner, session, adapter, command = first_model_owner
+    orchestrator = sample_orchestrator
+    orchestrator.state.active_sessions = [session]
+    orchestrator.state.startup_status = 'complete'
+    orchestrator.state.pause_state = PauseState.running()
+    owner.state = orchestrator.state
+    ledger = Mock(spec=orchestrator.deps.issue_run_ledger)
+    ledger.run_for_capability.return_value = session.run_assets
+    orchestrator.deps = replace(orchestrator.deps, original_delivery_owner=owner,
+        issue_run_ledger=ledger, health_gate=HealthGate())
+    actual_lock = orchestrator.state_lock
+
+    class ShutdownAtLockAcquisition:
+        def __enter__(self):
+            actual_lock.acquire()
+            orchestrator.shutdown_requested = True
+
+        def __exit__(self, *_):
+            actual_lock.release()
+
+    orchestrator.state_lock = ShutdownAtLockAcquisition()
+    with pytest.raises(ValueError, match='health unavailable'):
+        orchestrator.docker_first_model('cap', command)
+    assert not orchestrator.state.paused
+    assert owner.observe(42)['owner'] is None
+    adapter.first_model_snapshot.assert_not_called()
+    adapter.seal_first_model.assert_not_called()

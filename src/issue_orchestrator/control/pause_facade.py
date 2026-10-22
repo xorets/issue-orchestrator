@@ -112,3 +112,16 @@ def auto_resume_if_due(
             actor=PauseActor.SYSTEM,
             detail="auto-resume: incident backoff elapsed, retrying",
         )
+
+
+def require_operator_barrier(state: "OrchestratorState | None") -> None:
+    """Evidence may attest a barrier only after its OPERATOR transition committed."""
+    if state is None or not state.paused or str(state.pause_state.reason) != "operator":
+        raise ValueError("Docker first-model requires the committed OPERATOR barrier")
+
+
+def require_model_preflight_barrier(state: "OrchestratorState | None") -> None:
+    """A model request cannot overwrite startup, recovery or incident holds."""
+    if (state is None or state.startup_status != "complete" or
+            (state.paused and str(state.pause_state.reason) != "operator")):
+        raise ValueError("Docker first-model requires a healthy started OPERATOR barrier")

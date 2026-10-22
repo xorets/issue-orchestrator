@@ -105,7 +105,7 @@ def readiness_task(provider: str) -> tuple[dict, Path]:
         raise ValueError('Docker model readiness requires the selected Codex provider')
     template = Path(os.environ['ISSUE_ORCHESTRATOR_DOCKER_TEMPLATE'])
     packet = json.loads(sealed_bytes(template))
-    outer,inner,projection = model_projection_snapshot(packet)
+    _,inner,_ = model_projection_snapshot(packet)
     if (inner['role'] not in {'standard-implementation','standard-review'} or
             type(packet.get('deadline_unix_ns')) is not int or packet['deadline_unix_ns'] <= time.time_ns() or
             packet.get('output_root') != '/srv/builder/tasks/'+packet['builder_run_id']+'/controller-output'):
