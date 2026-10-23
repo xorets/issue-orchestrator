@@ -105,6 +105,23 @@ def _require_admission(packet: dict, outer: dict, inner: dict) -> None:
             authorization.get("acceptance_sha256") != acceptance["sha256"]):
         raise ValueError("Docker root authorization belongs to another delivery subject")
     require_current_model_grant(packet, inner, authorization)
+    _require_model_controls(packet)
+
+
+def _require_model_controls(packet: dict) -> None:
+    """Controller-visible sibling controls gate workers with exact file mounts."""
+    inner = Path(packet["worker_authority"]["engine_contract_path"])
+    for command in ("cancel", "pause"):
+        run_id = packet["builder_run_id"] + "-" + command
+        path = inner.with_name(run_id + ".json")
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            continue
+        if (not stat.S_ISREG(info.st_mode) or
+                sealed_bytes(path, limit=4096) != canonical({"run_id": run_id, "contract_sha256": packet["contract_sha256"]})):
+            raise ValueError("Docker model control marker identity changed")
+        raise ValueError("Docker model admission held by durable " + command)
 
 
 def require_current_model_grant(packet: dict, inner: dict, grant: dict) -> None:

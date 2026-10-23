@@ -254,6 +254,58 @@ def test_selected_provider_port_projects_only_named_model_secret(model_authority
     assert result['XORETS_DOCKER_MODEL_AUTH_JSON'] == secret
 
 
+def model_control_marker(packet, command):
+    path = Path(packet['worker_authority']['engine_contract_path']).with_name(packet['builder_run_id'] + '-' + command + '.json')
+    path.write_bytes(canonical({'run_id': packet['builder_run_id'] + '-' + command,
+        'contract_sha256': packet['contract_sha256']}))
+    path.chmod(0o400)
+    return path
+
+
+@pytest.mark.parametrize('control', ['pause', 'cancel', 'foreign-digest', 'foreign-run', 'malformed',
+    'writable', 'symlink', 'dangling-symlink', 'hardlink', 'directory', 'fifo'])
+def test_controller_control_refuses_credentials_before_secret_resolution(model_authority, tmp_path, monkeypatch, control):
+    from issue_orchestrator.execution.provider_credentials_adapter import KeyringProviderCredentials
+    packet, _, _, _, _, _ = model_authority
+    marker = model_control_marker(packet, 'cancel' if control == 'cancel' else 'pause')
+    if control in {'foreign-digest', 'foreign-run', 'malformed'}:
+        value = {'run_id': packet['builder_run_id'] + '-pause', 'contract_sha256': packet['contract_sha256']}
+        value['contract_sha256' if control == 'foreign-digest' else 'run_id'] = 'foreign'
+        marker.chmod(0o600)
+        marker.write_bytes(b'not-json' if control == 'malformed' else canonical(value))
+        marker.chmod(0o400)
+    elif control == 'writable':
+        marker.chmod(0o600)
+    elif control in {'symlink', 'dangling-symlink', 'hardlink', 'directory', 'fifo'}:
+        held = marker.with_name('held.json')
+        marker.rename(held)
+        if control == 'directory': marker.mkdir(mode=0o700)
+        elif control == 'fifo':
+            import os
+            os.mkfifo(marker, mode=0o400)
+        elif control == 'hardlink': marker.hardlink_to(held)
+        else: marker.symlink_to(held if control == 'symlink' else held.with_name('missing.json'))
+    template = tmp_path / 'template.json'
+    template.write_bytes(canonical(packet)); template.chmod(0o400)
+    monkeypatch.setenv('ISSUE_ORCHESTRATOR_DOCKER_TEMPLATE', str(template))
+    monkeypatch.setenv('XORETS_EXECUTION_CONTRACT', packet['worker_authority']['engine_contract_path'])
+    monkeypatch.setenv('XORETS_EXECUTION_DIGEST', packet['contract_sha256'])
+    reads = []
+    monkeypatch.setattr('issue_orchestrator.infra.ai_keys.read_ai_key', lambda name: reads.append(name) or '{"token":"canary"}')
+    assert all(not marker.is_relative_to(Path(mount['source'])) for mount in packet['mounts'])
+    with pytest.raises((ValueError, OSError)):
+        KeyringProviderCredentials().session_env('codex', docker=True)
+    assert reads == []
+
+
+def test_nonmodel_authority_remains_observable_with_model_control_marker(authority):
+    packet, path, _ = authority
+    model_control_marker(packet, 'cancel')
+    result = worker_environment(packet, {'ISSUE_ORCHESTRATOR_COMPLETION_CAPABILITY': 'e' * 64}, 'd' * 64)
+    assert result['XORETS_EXECUTION_DIGEST'] == sha256(path.read_bytes()).hexdigest()
+    assert 'XORETS_DOCKER_MODEL_AUTH_JSON' not in result
+
+
 @pytest.mark.parametrize('change', ['provider', 'foreign-inner', 'wrong-role', 'untrusted-project', 'changed-projection', 'missing'])
 def test_credential_port_refuses_before_secret_resolution(model_authority, tmp_path, monkeypatch, change):
     import json

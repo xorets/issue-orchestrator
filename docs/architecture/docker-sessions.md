@@ -274,6 +274,13 @@ The live worker's endpoint checks remain unchanged. This source behavior still
 requires exact-image host verification; an upstream lifecycle contract does not
 establish this host's runtime acceptance.
 
+The controller checks the selected inner contract's sibling pause/cancel markers
+on every model admission check, including each first-model callback and before
+credential lookup. Exact sealed marker identity and contract digest are required;
+malformed, changed or unreadable markers refuse admission. These controls remain
+in controller custody: workers retain only their exact authority-file mounts.
+Retained nonmodel authority and observation/cleanup do not acquire model permission.
+
 Before worker creation, Docker readiness checks only the explicitly named
 `XORETS_DOCKER_MODEL_AUTH_JSON` secret after authenticating the selected v2
 template, grant, role, and projection. It creates an exclusive private home in

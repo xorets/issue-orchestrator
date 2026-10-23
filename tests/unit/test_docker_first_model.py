@@ -1,5 +1,6 @@
 """CODE-only parent proof uses exact allocations, original owner and dual auth."""
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 import pytest
@@ -10,6 +11,7 @@ from issue_orchestrator.domain.completion_intake import IntakeUnauthorized
 from issue_orchestrator.entrypoints import control_api
 from issue_orchestrator.entrypoints.control_api_issue_support import ControlApiIssueDependencies, get_control_api_issue_dependencies
 from tests.unit.adapters.github.test_original_delivery_owner import original_owner
+from tests.unit.test_docker_worker_authority import authority, model_authority, model_control_marker
 
 @pytest.fixture
 def claim_http():
@@ -98,6 +100,48 @@ def test_exact_route_requires_docker_callback_and_active_capability(first_model_
             assert 'review_parent' not in receipt
             assert 'provider_exit_code' in receipt['worker'] and receipt['worker']['provider_exit_code'] is None
     finally:control_api.configure_api_token(None)
+
+
+@pytest.mark.parametrize('control', ['pause', 'cancel'])
+def test_actual_callback_rechecks_controller_only_control_without_worker_mount(
+    sample_orchestrator, first_model_owner, model_authority, monkeypatch, auth_enabled_control_client, control,
+):
+    from issue_orchestrator.control.health_gate import HealthGate
+    from issue_orchestrator.execution.docker_worker_authority import model_projection_snapshot
+    owner, session, adapter, command = first_model_owner
+    packet, _, _, _, _, _ = model_authority
+    snapshot = adapter.first_model_snapshot.return_value
+
+    def live_custody(*args):
+        model_projection_snapshot(packet)
+        return snapshot
+
+    adapter.first_model_snapshot.side_effect = live_custody
+    orchestrator = sample_orchestrator
+    orchestrator.state.active_sessions = [session]
+    orchestrator.state.startup_status = 'complete'
+    owner.state = orchestrator.state
+    ledger = Mock(spec=orchestrator.deps.issue_run_ledger)
+    ledger.run_for_capability.return_value = session.run_assets
+    orchestrator.deps = replace(orchestrator.deps, original_delivery_owner=owner, issue_run_ledger=ledger, health_gate=HealthGate())
+    deps = ControlApiIssueDependencies(get_orchestrator=lambda: orchestrator, with_state_lock=lambda fn: fn())
+    monkeypatch.setitem(control_api.control_app.dependency_overrides, get_control_api_issue_dependencies, lambda: deps)
+    control_api.configure_api_token('admin', agent_callback='agent', agent_callback_scope='docker')
+    headers = {'Authorization': 'Bearer agent', 'X-Completion-Capability': 'cap'}
+    try:
+        before = auth_enabled_control_client.post('/api/docker/first-model', json=vars(command), headers=headers)
+        assert before.status_code == 200, before.text
+        original = owner.observe(42)
+        adapter.seal_first_model.reset_mock()
+        mounts = list(packet['mounts'])
+        marker = model_control_marker(packet, control)
+        assert all(not marker.is_relative_to(Path(mount['source'])) for mount in mounts)
+        after = auth_enabled_control_client.post('/api/docker/first-model', json=vars(command), headers=headers)
+        assert after.status_code == 409, after.text
+        adapter.seal_first_model.assert_not_called()
+        assert owner.observe(42) == original and packet['mounts'] == mounts
+    finally:
+        control_api.configure_api_token(None)
 
 
 @pytest.fixture
