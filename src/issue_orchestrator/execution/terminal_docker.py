@@ -5,7 +5,8 @@ packet, retains Docker identities before start, and never replays a launch.
 """
 from __future__ import annotations
 
-from contextlib import suppress
+from contextlib import contextmanager, suppress
+import fcntl
 from hashlib import sha256
 import json
 import logging
@@ -99,6 +100,33 @@ def first_model_evidence_size(directory: Path) -> int:
             raise ValueError("Docker first-model previous evidence custody changed")
         previous_bytes += info.st_size
     return previous_bytes
+
+
+@contextmanager
+def bounded_output(root: Path, size: int, limit: int, deadline_unix_ns: int):
+    """Serialize actual output allocation across live and observer instances."""
+    descriptor = os.open(private_directory(root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if time.time_ns() >= deadline_unix_ns:
+            raise ValueError("Docker output allocation deadline exhausted")
+        used = 0
+        for name in ("docker-output.log", "docker-hook-output.log"):
+            try:
+                info = (root / name).lstat()
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+                raise ValueError("Docker output custody changed")
+            used += info.st_size
+        evidence = root / "builder-first-model"
+        if evidence.exists():
+            used += first_model_evidence_size(private_directory(evidence))
+        if used + size > limit:
+            raise ValueError("Docker aggregate output bound exhausted")
+        yield
+    finally:
+        os.close(descriptor)
 
 
 def run_cli_capture(argv: list[str], *, environment: dict[str, str], timeout: float,
@@ -550,13 +578,7 @@ class DockerPlugin:
                 record["hook_execs"].append(row)
                 self._save()
                 def consume(chunk: bytes) -> None:
-                    with self._lock:
-                        if record["output_bytes"] + record.get("first_model_bytes", 0) + len(chunk) > packet["limits"]["max_output_bytes"]:
-                            record["overflow"] = True
-                            raise ValueError("Docker lifecycle output bound exhausted")
-                        destination.write(chunk)
-                        destination.flush()
-                        record["output_bytes"] += len(chunk)
+                    self._consume_output(packet, record, destination, chunk)
                 remaining = (packet["deadline_unix_ns"] - time.time_ns()) / 1e9
                 if remaining <= 0:
                     raise ValueError("Docker lifecycle deadline exhausted")
@@ -573,6 +595,17 @@ class DockerPlugin:
                 row["exit_code"] = 0
                 self._save()
 
+    def _consume_output(self, packet: dict, record: dict, destination, chunk: bytes) -> None:
+        with self._lock:
+            try:
+                with bounded_output(self._output_directory(packet), len(chunk), packet["limits"]["max_output_bytes"], packet["deadline_unix_ns"]):
+                    destination.write(chunk)
+                    destination.flush()
+                    record["output_bytes"] += len(chunk)
+            except ValueError:
+                record["overflow"] = True
+                raise
+
     def _run_provider(self) -> None:
         assert self._record is not None and self._packet is not None
         record, packet = self._record, self._packet
@@ -584,13 +617,7 @@ class DockerPlugin:
             output = self._output_directory(packet) / "docker-output.log"
             with output.open("xb") as destination:
                 def consume(chunk: bytes) -> None:
-                    with self._lock:
-                        if record["output_bytes"] + record.get("first_model_bytes", 0) + len(chunk) > packet["limits"]["max_output_bytes"]:
-                            record["overflow"] = True
-                            raise ValueError("Docker raw output hard bound exhausted")
-                        destination.write(chunk)
-                        destination.flush()
-                        record["output_bytes"] += len(chunk)
+                    self._consume_output(packet, record, destination, chunk)
                 record["state"] = DockerSessionState.STARTING
                 self._save()
                 remaining = (packet["deadline_unix_ns"] - time.time_ns()) / 1e9
@@ -674,24 +701,15 @@ class DockerPlugin:
         if not 0 < len(raw) <= min(65536, packet["limits"]["max_output_bytes"]):
             raise ValueError("Docker first-model evidence exceeds metadata bound")
         root = self._output_directory(packet)
-        available = os.statvfs(root)
-        if available.f_bavail * available.f_frsize < len(raw) + 8192:
-            raise ValueError("Docker first-model output allocation exhausted")
-        directory = root / "builder-first-model"
-        if not directory.exists():
-            private_directory(directory, create=True)
-        private_directory(directory)
-        previous_bytes = first_model_evidence_size(directory)
-        record = self._record_for(packet["session_name"])
-        if record is not None and record.get("first_model_bytes", 0) != previous_bytes:
-            raise ValueError("Docker first-model evidence accounting changed")
-        if previous_bytes + len(raw) + (record or {}).get("output_bytes", 0) > packet["limits"]["max_output_bytes"]:
-            raise ValueError("Docker first-model aggregate output bound exhausted")
-        result = seal_first_model_bytes(directory, raw)
-        if record is not None:
-            record["first_model_bytes"] = previous_bytes + len(raw)
-            self._save()
-        return result
+        with bounded_output(root, len(raw), packet["limits"]["max_output_bytes"], packet["deadline_unix_ns"]):
+            available = os.statvfs(root)
+            if available.f_bavail * available.f_frsize < len(raw) + 8192:
+                raise ValueError("Docker first-model output allocation exhausted")
+            directory = root / "builder-first-model"
+            if not directory.exists():
+                private_directory(directory, create=True)
+            private_directory(directory)
+            return seal_first_model_bytes(directory, raw)
 
     def public_receipt(self, session_name: str) -> dict:
         self.custody(session_name)

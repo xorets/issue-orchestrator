@@ -247,7 +247,12 @@ response binds the committed barrier and original fence to the assigned packet.
 Each receipt is sealed mode0400 under
 `output_root/<engine_run_id>/builder-first-model/receipt-<UUID hex>.json`, outside
 worker mounts. All immutable receipts and provider output share the existing
-output-byte bound.
+output-byte bound, together with lifecycle hook output. Each allocation checks
+the actual retained log and immutable receipt sizes under one per-run directory
+lock, held through the write. Contention refuses immediately, and acquisition
+rechecks the original sealed deadline. Serving and offline custody observers
+keep their own selected-run state and never save a cached session record when sealing
+evidence; provider settlement remains owned by the live terminal adapter.
 
 Independent review uses its own engine, allocation, checkout, role, and root
 grant. Its receipt adds the exact root-granted `review_parent`; worker/launch

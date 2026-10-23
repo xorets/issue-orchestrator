@@ -820,6 +820,134 @@ def test_first_model_evidence_uses_controller_output_custody_and_exclusive_alloc
     assert not calls and engine.starts == 0
 
 
+@pytest.mark.parametrize('order', ['receipt-first', 'provider-first', 'concurrent', 'settled'])
+def test_composed_custody_shares_live_output_bound_and_preserves_settlement(
+    launch, monkeypatch, sample_config, make_session, order,
+):
+    import threading
+    from unittest.mock import Mock
+    import pluggy
+    from issue_orchestrator.entrypoints.bootstrap_original_delivery import build_original_delivery_owner
+    from issue_orchestrator.execution.session_runner_adapter import PluggySessionRunner
+    from issue_orchestrator.infra.hooks.hookspec import TerminalSpec
+    from issue_orchestrator.ports.original_delivery import OriginalDeliveryClaims
+    from tests.unit.threading_helpers import wait_for_event
+
+    plugin, engine, packet, calls = launch
+    session = make_session(issue_number=42, worktree_path=Path(packet['working_dir']))
+    packet.update(run_id=session.run_assets.run_id, engine_run_dir=str(session.run_assets.run_dir))
+    plugin.launch_path.chmod(0o600)
+    plugin.launch_path.write_bytes(canonical(packet))
+    plugin.launch_path.chmod(0o400)
+    monkeypatch.setenv('ISSUE_ORCHESTRATOR_DOCKER_LAUNCH', str(plugin.launch_path))
+    monkeypatch.delenv('ISSUE_ORCHESTRATOR_DOCKER_TEMPLATE', raising=False)
+    monkeypatch.setattr('issue_orchestrator.execution.terminal_docker.DockerEngine', lambda: engine)
+    sample_config.terminal_adapter = 'issue_orchestrator.execution.terminal_docker:DockerPlugin'
+    owner = build_original_delivery_owner(sample_config, Mock(spec=OriginalDeliveryClaims), Mock(), None, None)
+    assert owner is not None and owner.docker_custody is not None
+    custody = owner.docker_custody
+    manager = pluggy.PluginManager('issue_orchestrator')
+    manager.add_hookspecs(TerminalSpec)
+    manager.register(plugin)
+    runner = PluggySessionRunner(manager)
+    entered, release = threading.Event(), threading.Event()
+    writers = threading.Barrier(2)
+    output = b'x' * (100 if order == 'settled' else 900)
+
+    def provider(exec_id, consume, timeout):
+        if order not in {'receipt-first', 'concurrent'}:
+            consume(output)
+        entered.set()
+        wait_for_event(release, 5, label='provider release')
+        if order == 'concurrent':
+            writers.wait(timeout=5)
+        if order in {'receipt-first', 'concurrent'}:
+            consume(output)
+
+    monkeypatch.setattr(engine, 'start_exec', provider)
+    receipt = {'run_id': packet['run_id'], 'launch_sha256': sha256(canonical(packet)).hexdigest()}
+    accepted = False
+    try:
+        assert runner.create_session(42, 'echo safe', packet['working_dir'], None, 'issue-42', secret_env=None)
+        wait_for_event(entered, 5, label='provider entered')
+        # The production custody observer caches live identity independently.
+        assert custody.runner is not plugin
+        custody.runner.public_receipt('issue-42')
+        if order == 'provider-first':
+            with pytest.raises(ValueError, match='aggregate output bound'):
+                custody.seal_first_model(session, receipt)
+        else:
+            if order == 'concurrent':
+                release.set()
+                writers.wait(timeout=5)
+            try:
+                custody.seal_first_model(session, receipt)
+                accepted = True
+            except (ValueError, BlockingIOError) as error:
+                assert order == 'concurrent'
+                assert isinstance(error, BlockingIOError) or 'aggregate output bound' in str(error)
+    finally:
+        release.set()
+        plugin.on_orchestrator_shutdown()
+
+    record = json.loads(plugin.receipt_path().read_bytes())
+    assert record['state'] == 'stopped'
+    refused_output = order in {'receipt-first', 'concurrent'} and accepted
+    if order != 'concurrent':
+        assert record['overflow'] is refused_output
+    assert record['provider_exit_code'] == (None if refused_output else 0)
+    if order == 'settled':
+        # A later seal must not restore the observer's cached STARTING state.
+        custody.seal_first_model(session, receipt)
+        assert json.loads(plugin.receipt_path().read_bytes()) == record
+    ordinary = Path(packet['output_root']) / packet['run_id']
+    retained = sum(path.stat().st_size for path in ordinary.rglob('*') if path.is_file())
+    assert retained <= 1024
+    assert record['output_bytes'] == (0 if refused_output else len(output))
+
+
+@pytest.mark.parametrize('refusal', ['contended', 'expired-after-acquire'])
+def test_first_model_allocation_refuses_contention_and_original_deadline(launch, monkeypatch, refusal):
+    import fcntl
+    from issue_orchestrator.domain.session_run import SessionRunAssets
+    from tests.unit.threading_helpers import join_or_fail, run_in_thread
+
+    runner, engine, packet, calls = launch
+    root = Path(packet['working_dir'])
+    run_dir = root / '.issue-orchestrator' / 'sessions' / (packet['run_id'] + '__coding-1')
+    run = SessionRunAssets.from_paths(session_name='coding-1', run_id=packet['run_id'], started_at='start',
+        worktree_path=root, run_dir=run_dir, manifest_path=run_dir/'manifest.json', terminal_recording_path=run_dir/'log')
+    ordinary = Path(packet['output_root']) / packet['run_id']
+    ordinary.mkdir(mode=0o700)
+    receipt = {'run_id': run.run_id, 'launch_sha256': sha256(canonical(packet)).hexdigest()}
+    if refusal == 'contended':
+        descriptor = os.open(ordinary, os.O_RDONLY | os.O_DIRECTORY)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        thread, result = run_in_thread(runner.seal_first_model, run, receipt)
+        try:
+            join_or_fail(thread, 1, label='contended receipt refusal')
+        finally:
+            os.close(descriptor)
+            join_or_fail(thread, 5, label='released receipt attempt')
+        with pytest.raises(BlockingIOError):
+            result.unwrap()
+    else:
+        now = [packet['deadline_unix_ns'] - 1]
+        acquire = fcntl.flock
+
+        def expire_after_acquire(descriptor, operation):
+            acquire(descriptor, operation)
+            now[0] = packet['deadline_unix_ns']
+
+        monkeypatch.setattr('time.time_ns', lambda: now[0])
+        monkeypatch.setattr(fcntl, 'flock', expire_after_acquire)
+        with pytest.raises(ValueError, match='deadline exhausted'):
+            runner.seal_first_model(run, receipt)
+    assert list(ordinary.iterdir()) == []
+    assert not runner.receipt_path().exists()
+    assert not calls and engine.starts == 0
+
+
 @pytest.mark.parametrize('changed', [None, 'false-restart-count', 'oom', 'paused', 'worker-pid', 'provider-pid', 'provider-exited', 'foreign-provider'])
 def test_first_model_requires_strict_live_daemon_facts(launch, changed):
     from issue_orchestrator.domain.original_delivery import DockerCustody
