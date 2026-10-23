@@ -1,9 +1,10 @@
 """Selected Docker local auth probes, isolated from ambient controller auth."""
 from contextlib import contextmanager
+from hashlib import sha256
+import re
 import json
 import os
 from pathlib import Path
-import shutil
 import stat
 import time
 from uuid import uuid4
@@ -21,8 +22,9 @@ class DockerReadinessRefused(ValueError):
 
 class DockerAuthProbeRunner:
     """Only local `codex login status`, under a hard output/deadline bound."""
-    def __init__(self, environment: dict[str, str], deadline: int, output_limit: int):
+    def __init__(self, environment: dict[str, str], deadline: int, output_limit: int, executable: Path):
         self.environment, self.deadline, self.output_limit = environment, deadline, output_limit
+        self.executable = executable
 
     def run(self, command: str | list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None,
             timeout_seconds: int | None = None, shell: bool = False,
@@ -30,11 +32,12 @@ class DockerAuthProbeRunner:
         if command != ['codex','login','status'] or cwd is not None or env is not None or shell:
             raise ValueError('Docker readiness permits only the existing local Codex status probe')
         timeout = min(timeout_seconds or 15, 15, (self.deadline-time.time_ns())/1e9)
-        executable = shutil.which('codex', path=self.environment['PATH'])
-        if not executable or timeout <= 0:
+        if timeout <= 0:
             raise ValueError('Docker local auth probe executable/deadline unavailable')
-        stdout,stderr,exit_code = run_cli_capture([executable,'login','status'], environment=self.environment,
+        stdout,stderr,exit_code = run_cli_capture([str(self.executable),'login','status'], environment=self.environment,
             timeout=timeout, output_limit=self.output_limit)
+        if exit_code != 0:
+            raise DockerReadinessRefused('Selected Docker local auth status failed')
         return CommandResult(exit_code,newlines.decode(stdout,errors='replace'),newlines.decode(stderr,errors='replace'))
 
 
@@ -58,7 +61,7 @@ def docker_readiness_context(provider: str, ordinary_runner: CommandRunner, cred
 
 @contextmanager
 def admitted_readiness_context(provider: str, credentials: ProviderCredentials, runner_factory):
-    packet,root = readiness_task(provider)
+    packet,root,executable = readiness_task(provider)
     secret = dict(credentials.session_env(provider,docker=True)).get(MODEL_AUTH_ENV)
     if not isinstance(secret,str) or not 0 < len(secret.encode()) <= min(65536,packet['limits']['max_output_bytes']):
         raise ValueError('Docker readiness requires one bounded explicit model auth secret')
@@ -86,7 +89,7 @@ def admitted_readiness_context(provider: str, credentials: ProviderCredentials, 
             stream.write(raw);stream.flush();os.fsync(stream.fileno())
         os.fsync(descriptor)
         environment = {'PATH':os.environ.get('PATH','/usr/bin:/bin'),'HOME':str(home),'CODEX_HOME':str(home)}
-        yield runner_factory(environment,packet['deadline_unix_ns'],output_limit)
+        yield runner_factory(environment,packet['deadline_unix_ns'],output_limit,executable)
     finally:
         try:
             if created:
@@ -99,7 +102,7 @@ def admitted_readiness_context(provider: str, credentials: ProviderCredentials, 
             os.close(descriptor)
 
 
-def readiness_task(provider: str) -> tuple[dict, Path]:
+def readiness_task(provider: str) -> tuple[dict, Path, Path]:
     """The selected private task allocation, verified before any credential lookup."""
     if provider != 'codex':
         raise ValueError('Docker model readiness requires the selected Codex provider')
@@ -115,4 +118,44 @@ def readiness_task(provider: str) -> tuple[dict, Path]:
             for row in packet['mounts'] for key in ('source','target')):
         raise ValueError('Docker readiness output overlaps worker mounts')
     private_directory(root)
-    return packet,root
+    executable = selected_codex(inner)
+    if packet['deadline_unix_ns'] <= time.time_ns():
+        raise ValueError('Docker readiness deadline exhausted while authenticating executable')
+    return packet,root,executable
+
+
+def selected_codex(inner: dict) -> Path:
+    """Select raw CLI bytes from sealed authority, never the PATH's ACP wrapper."""
+    capability = inner['capabilities']
+    expected = capability.get('codex_sha256')
+    if not isinstance(expected, str) or not re.fullmatch('[0-9a-f]{64}', expected):
+        raise ValueError('Docker readiness selected Codex digest is unavailable')
+    executable = Path(capability['capability_bundle']) / 'toolchain/codex'
+    if not executable.is_absolute() or executable.resolve(strict=True) != executable:
+        raise ValueError('Docker readiness selected Codex path is not canonical')
+    for parent in executable.parents:
+        info = parent.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+            raise ValueError('Docker readiness selected Codex ancestry is not protected')
+    fd = os.open(executable, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_nlink != 1 or
+                before.st_mode & 0o222 or not before.st_mode & 0o111 or not 0 < before.st_size <= 512 * 1024**2):
+            raise ValueError('Docker readiness selected Codex is not an immutable executable')
+        digest = sha256()
+        remaining = before.st_size
+        while remaining:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                raise ValueError('Docker readiness selected Codex short read')
+            digest.update(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(fd)
+        fields = ('st_dev', 'st_ino', 'st_uid', 'st_gid', 'st_mode', 'st_nlink', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+        if (os.read(fd, 1) or any(getattr(before, name) != getattr(after, name) for name in fields) or
+                digest.hexdigest() != expected):
+            raise ValueError('Docker readiness selected Codex identity or digest changed')
+    finally:
+        os.close(fd)
+    return executable
