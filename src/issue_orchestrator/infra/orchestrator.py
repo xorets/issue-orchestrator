@@ -7,9 +7,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, Optional, cast
+from typing import TYPE_CHECKING, Callable, ClassVar, Optional, cast
 
 if TYPE_CHECKING:
+    from ..control.original_delivery import DockerFirstModelCommand, OriginalDeliveryCommand
     from ..domain.completion_intake import (
         SubmitCompletionEvidence,
         CompletionIntakeReceipt,
@@ -36,6 +37,7 @@ from ..control.orchestrator_support import (
     check_health as _check_health,
     init_orchestrator_components,
 )
+from ..control.original_delivery_facade import original_delivery as _original_delivery, docker_first_model as _docker_first_model
 from ..control.session_launch_types import LaunchStep
 from ..control.github_workflow import GitHubWorkflow, launch_issue_by_number as _gw_launch_issue_by_number, get_issue_machine as _gw_get_issue_machine
 from ..control.worktree_manager import get_worktree_path, get_session_name, extract_issue_branches
@@ -286,9 +288,9 @@ class Orchestrator:
         """Terminate all issue-scoped runtime owners at a lifecycle boundary."""
         return self.deps.runtime_lifecycle.terminate(issue_number, reason)
 
-    def terminate_every_session_for_issue(self, issue_number: int, *, reason: str) -> IssueTerminationOutcome:
+    def terminate_every_session_for_issue(self, issue_number: int, *, reason: str, prepare_stop: Callable[[], None] | None = None) -> IssueTerminationOutcome:
         """Every terminal this issue owns; raises with nothing torn down if custody fails (#7255)."""
-        return self.deps.runtime_lifecycle.terminate_every_session(issue_number, reason)
+        return self.deps.runtime_lifecycle.terminate_every_session(issue_number, reason, prepare_stop=prepare_stop)
 
     def issue_session_generation_stale_reason(self, target: "TechLeadSessionGeneration") -> str | None:
         """Read current applicability without stopping or re-approving any work."""
@@ -541,10 +543,17 @@ class Orchestrator:
             self.config,
             self.deps.session_output,
             publish_recovery=self.deps.publish_recovery,
+            claim_manager=self.deps.claim_manager,
             pending_work_claims=self.deps.pending_work_claims,
             provider_error_type=provider_error_type,
             processing_policy=unprocessed_session_policy(session),
         )
+
+    def original_delivery(self, issue_number: int, command: "OriginalDeliveryCommand | None" = None) -> dict[str, object]:
+        return _original_delivery(self.deps.original_delivery_owner, issue_number, command, state_lock=self.state_lock)
+
+    def docker_first_model(self, capability: str, command: "DockerFirstModelCommand") -> dict[str, object]:
+        return _docker_first_model(self.deps, self.pause_controller, capability, command, shutdown_requested=lambda: self.shutdown_requested, state_lock=self.state_lock)
 
     def tick(self) -> bool:
         self.deps.completion_intake.pump()
@@ -705,10 +714,13 @@ class Orchestrator:
                 completion_dispatcher=self.deps.completion_dispatcher,
                 provider_resilience=self.deps.provider_resilience,
                 publish_recovery=self.deps.publish_recovery,
+                claim_manager=self.deps.claim_manager,
                 pending_work_claims=self.deps.pending_work_claims,
             )
             # Check lease renewals for active sessions
             self._check_lease_renewals()
+            if self.deps.original_delivery_owner is not None:
+                self.deps.original_delivery_owner.renew_retained()
             _reconcile_tech_lead_ownership(self)  # renew/withdraw run claims
         finally:
             self._last_orphan_reconcile_active_count = len(self.state.active_sessions)

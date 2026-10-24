@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
+from collections.abc import Callable
 
 from ..domain.issue_run_evidence import ReworkTarget
 from ..domain.issue_key import IssueKey
@@ -29,7 +30,7 @@ from ..events import EventName
 from ..infra.config import Config
 from ..infra.repo_scope import require_repo
 from ..infra.logging_config import issue_log, log_context
-from ..ports import EventSink, RepositoryHost
+from ..ports import EventSink, RepositoryHost, NO_SESSION_PREPARATION, SessionPreparation
 from ..ports.event_sink import make_run_scoped_event, make_trace_event
 from ..ports.session_output import SessionOutput
 from ..ports.coder_prompt import CoderPromptAddendumProvider
@@ -57,6 +58,10 @@ from .needs_human_block import NeedsHumanCause
 
 if TYPE_CHECKING:
     from .label_manager import LabelManager
+from ..ports.claim_manager import ClaimManager
+from ..domain.claim import ClaimFetchError
+from ..ports.original_delivery import OriginalDeliveryClaims
+
 
 logger = logging.getLogger(__name__)
 
@@ -89,10 +94,8 @@ class SessionSecretEnvFn(Protocol):
 
 class WorktreeReuseOptionsFactory(Protocol):
     def __call__(
-        self,
-        *,
-        allow_remote_branch_delete: bool = True,
-        force_fresh: bool = False,
+        self, *, allow_remote_branch_delete: bool = True,
+        force_fresh: bool = False, preserve_branch: bool = False,
     ) -> WorktreeReuseOptions: ...
 
 
@@ -150,7 +153,6 @@ class StackDecisionResolverFn(Protocol):
 @dataclass(frozen=True)
 class ReworkLaunchDependencies:
     """Dependencies needed by the rework launch coordinator."""
-
     config: Config
     events: EventSink
     repository_host: RepositoryHost
@@ -173,6 +175,9 @@ class ReworkLaunchDependencies:
     resolve_stack_decision: StackDecisionResolverFn
     coder_prompt_addendum: CoderPromptAddendumProvider
     scoped_rework: ScopedReworkLaunch
+    claim_manager: ClaimManager | None = None
+    original_runtime_identity: Callable[[], tuple[str, int, str]] | None = None
+    session_preparation: SessionPreparation = NO_SESSION_PREPARATION
 
 
 @dataclass(frozen=True)
@@ -191,6 +196,7 @@ def _admit_rework_launch(
     issue_number: int,
     pr_number: int,
     coder_prompt: PreparedCoderPromptAddendum,
+    rework: PendingRework,
 ) -> _ReworkLaunchAdmission | LaunchResult:
     """Resolve non-mutating gates before worktree or queue mutations."""
     preflight_failure, stack_base_branch = _rework_preflight(
@@ -202,6 +208,8 @@ def _admit_rework_launch(
     )
     if preflight_failure is not None:
         return preflight_failure
+    if refusal := original_rework_guard(rework, deps, reserve=True):
+        return refusal
     return _ReworkLaunchAdmission(
         stack_base_branch=stack_base_branch,
         coder_prompt=coder_prompt,
@@ -266,6 +274,8 @@ def _rework_launch_identity(
     All of this stays ahead of :func:`resolve_rework_pr`, avoiding a GitHub read
     for any refused launch.
     """
+    if refusal := original_rework_guard(rework, deps):
+        return refusal
     agent_config = deps.config.agents.get(rework.agent_type)
     if not agent_config:
         return LaunchResult(None, False, f"No agent config for {rework.agent_type}")
@@ -280,6 +290,56 @@ def _rework_launch_identity(
     if result := deps.check_provider_ready(agent_config, issue_number):
         return result
     return agent_config, issue_number, prepared_coder_prompt
+
+
+def original_rework_guard(rework: PendingRework, deps: ReworkLaunchDependencies, *, reserve: bool = False) -> LaunchResult | None:
+    """Every rework consumer uses the original claim's existing budget grant."""
+    issue_number = rework.resolve_issue_number()
+    if issue_number is None:
+        return LaunchResult(None, False, "Original rework Issue is unknown")
+    try:
+        claim = deps.claim_manager.get_current_claim(issue_number) if deps.claim_manager is not None else None
+    except ClaimFetchError as error:
+        return LaunchResult(None, False, f"Original claim observation refused: {error}")
+    if deps.claim_manager is None or claim is None or claim.original is None:
+        if rework.source.startswith("original-owner:"):
+            return LaunchResult(None, False, "Original rework owner is absent")
+        return None
+    owner = claim.original
+    if (deps.original_runtime_identity is None or deps.original_runtime_identity() != (owner.engine_host, owner.engine_pid, owner.engine_birth)
+            or owner.config_fingerprint != deps.config.config_fingerprint):
+        return LaunchResult(None, False, "Original current engine custody refused")
+    issue = deps.repository_host.get_issue(issue_number)
+    if issue is None or "dispatch:cancel-requested" in issue.labels:
+        return LaunchResult(None, False, "Original correction cancellation/read refusal")
+    if (owner.cancelled or owner.released or not owner.pending or claim.is_expired() or
+            rework.source != "original-owner:" + owner.correction_id or not owner.correction_id or
+            (rework.pr_number, rework.rework_cycle, rework.feedback) != (owner.pr_number, owner.cycles, owner.feedback)):
+        return LaunchResult(None, False, "Original bounded rework grant refused")
+    if reserve:
+        return reserve_original_rework(deps.claim_manager, issue_number, owner.correction_id)
+    return None
+
+
+def reserve_original_rework(claims: ClaimManager, issue_number: int, request_id: str) -> LaunchResult | None:
+    """Commit the one-shot native launch reservation through the public claim port."""
+    if not isinstance(claims, OriginalDeliveryClaims) or not claims.reserve_original_launch(issue_number, request_id):
+        return LaunchResult(None, False, "Original correction launch reservation refused")
+    return None
+
+
+def bind_original_rework_run(rework: PendingRework, deps: ReworkLaunchDependencies, run: SessionRunAssets) -> LaunchResult | None:
+    if not rework.source.startswith("original-owner:"):
+        return None
+    issue_number = rework.resolve_issue_number()
+    claims = deps.claim_manager
+    issue = None if issue_number is None else deps.repository_host.get_issue(issue_number)
+    if issue_number is None or issue is None or "dispatch:cancel-requested" in issue.labels:
+        return LaunchResult(None, False, "Original correction cancelled before spawn")
+    if not isinstance(claims, OriginalDeliveryClaims) or not claims.bind_original_run(issue_number,
+            rework.source.removeprefix("original-owner:"), run, SessionKind.REWORK.terminal_name(issue_number)):
+        return LaunchResult(None, False, "Original correction run binding refused")
+    return None
 
 
 def launch_rework_session(
@@ -314,6 +374,7 @@ def launch_rework_session(
         issue_number=issue_number,
         pr_number=pr_number,
         coder_prompt=prepared_coder_prompt,
+        rework=rework,
     )
     if isinstance(admission, LaunchResult):
         return admission
@@ -360,7 +421,10 @@ def launch_rework_session(
         branch_name=branch_name,
         enforce_hooks=deps.config.enforce_hooks,
         pre_push_hook=deps.config.pre_push_hook,
-        reuse_options=deps.worktree_reuse_options(allow_remote_branch_delete=False),
+        reuse_options=deps.worktree_reuse_options(
+            allow_remote_branch_delete=False,
+            preserve_branch=rework.source.startswith("original-owner:"),
+        ),
         phase_name=phase_name,
         stack_base_branch=stack_base_branch,
         rework_target=ReworkTarget(pr_number, rework.rework_cycle),
@@ -402,7 +466,7 @@ def launch_rework_session(
     run = ctx.run
     claude_project_dir = ctx.claude_project_dir
 
-    if failure := work_claim.hold_before_spawn(run, issue_number=issue_number):
+    if failure := hold_original_rework(rework, deps, run, work_claim, issue_number):
         return failure
 
     with abandon_claim_unless_spawned(work_claim, run) as spawn:
@@ -523,6 +587,7 @@ def launch_rework_session(
 
         if failure := deps.scoped_rework.before_spawn(scoped.keys, run.identity):
             return failure
+        deps.session_preparation.prepare_session(run, session_name, command)
         session_created = deps.create_session(
             session_name,
             command,
@@ -573,6 +638,7 @@ def launch_rework_session(
             pr_number=pr_number,
             rework_cycle=rework.rework_cycle,
             original_prompt=rendered_prompt,
+            lease_id=original_rework_lease(rework, deps, issue_number),
         )
 
         note_scoped_rework_started(deps.scoped_rework.store, run.identity)
@@ -716,3 +782,19 @@ def update_rework_cycle_label(
         "added": [added_label],
         "removed": removed,
     }))
+
+
+def original_rework_lease(rework: PendingRework, deps: ReworkLaunchDependencies, issue_number: int) -> str | None:
+    if not rework.source.startswith("original-owner:") or deps.claim_manager is None:
+        return None
+    claim = deps.claim_manager.get_current_claim(issue_number)
+    if claim is None or claim.original is None or claim.original.cancelled:
+        raise ClaimFetchError("Original correction lease disappeared during spawn")
+    return claim.lease_id
+
+
+def hold_original_rework(rework: PendingRework, deps: ReworkLaunchDependencies, run: SessionRunAssets,
+                         work_claim: LaunchWorkClaim, issue_number: int) -> LaunchResult | None:
+    if failure := bind_original_rework_run(rework, deps, run):
+        return failure
+    return work_claim.hold_before_spawn(run, issue_number=issue_number)

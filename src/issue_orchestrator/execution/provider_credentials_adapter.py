@@ -25,7 +25,16 @@ __all__ = ["KeyringProviderCredentials"]
 class KeyringProviderCredentials:
     """Resolve a provider's declared secrets from the keyring or environment."""
 
-    def session_env(self, provider: str | None) -> Mapping[str, str]:
+    def session_env(self, provider: str | None, *, docker: bool = False) -> Mapping[str, str]:
+        if docker:
+            from .docker_worker_authority import docker_model_auth_requested, MODEL_AUTH_ENV
+            if docker_model_auth_requested():
+                if provider != "codex":
+                    raise ValueError("Docker model authority requires the selected Codex provider")
+                secrets = self._read_secrets(provider, (MODEL_AUTH_ENV,))
+                if MODEL_AUTH_ENV not in secrets:
+                    raise ValueError("Docker model authentication is not explicitly configured")
+                return secrets
         if not provider:
             return {}
         try:

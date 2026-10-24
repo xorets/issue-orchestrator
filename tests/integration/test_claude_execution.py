@@ -495,6 +495,7 @@ class TestClaudeViaAdapterPath:
                 working_dir=str(worktree),
                 title="Claude subprocess integration",
                 session_name=session_name,
+                secret_env=None,
             )
             assert created is True
 

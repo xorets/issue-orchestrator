@@ -73,7 +73,9 @@ class ShutdownManager:
         self._state = ShutdownState.RUNNING
         self._state_lock = threading.Lock()
         self._repo_root: Optional[str] = None
+        self._cleanup_started = False
         self._cleanup_done = False
+        self._exit_code: int | None = None
         self._shutdown_reason: Optional[str] = None
         self._callbacks: list[Callable[[], None]] = []
         self._initialized = True
@@ -161,15 +163,15 @@ class ShutdownManager:
         """Run cleanup (lock release, callbacks). Idempotent.
 
         Returns:
-            True if cleanup was performed, False if already done
+            True if cleanup was performed, False if already started
         """
         with self._state_lock:
-            if self._cleanup_done:
-                logger.debug("[shutdown] Cleanup already done")
+            if self._cleanup_started:
+                logger.debug("[shutdown] Cleanup already started")
                 return False
 
             self._state = ShutdownState.SHUTTING_DOWN
-            self._cleanup_done = True
+            self._cleanup_started = True
 
         logger.info("[shutdown] Running cleanup...")
 
@@ -180,6 +182,13 @@ class ShutdownManager:
         self._release_lock()
 
         logger.info("[shutdown] Cleanup complete")
+        with self._state_lock:
+            self._cleanup_done = True
+            code = self._exit_code
+            if code is not None:
+                self._state = ShutdownState.EXITED
+        if code is not None:
+            os._exit(code)
         return True
 
     def exit(self, code: int = 0) -> None:
@@ -192,20 +201,20 @@ class ShutdownManager:
             code: Exit code (default 0)
         """
         with self._state_lock:
-            if self._state == ShutdownState.EXITED:
-                # Already exiting - just call os._exit to ensure we exit
-                os._exit(code)
-                return
-            self._state = ShutdownState.EXITED
+            completed = self._cleanup_done
+            self._exit_code = code
+            if completed:
+                self._state = ShutdownState.EXITED
 
         logger.info("[shutdown] Exiting with code %d (reason: %s)",
                    code, self._shutdown_reason or "unknown")
 
-        # Ensure cleanup runs
-        self.cleanup()
-
-        # Exit immediately (os._exit skips atexit, but we've already cleaned up)
-        os._exit(code)
+        if completed:
+            os._exit(code)
+        else:
+            # The cleanup owner performs any deferred exit after lock release;
+            # competing/reentrant callers must not exit or wait on that owner.
+            self.cleanup()
 
     def _atexit_cleanup(self) -> None:
         """Atexit handler as fallback cleanup.
@@ -236,7 +245,9 @@ class ShutdownManager:
         """Reset state for testing. DO NOT use in production."""
         with self._state_lock:
             self._state = ShutdownState.RUNNING
+            self._cleanup_started = False
             self._cleanup_done = False
+            self._exit_code = None
             self._shutdown_reason = None
             self._callbacks.clear()
             self._repo_root = None

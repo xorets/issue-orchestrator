@@ -4,6 +4,10 @@ For engineering conventions, dependency-injection rules, event vs log guidance, 
 
 This page is about how the Issue-Orchestrator codebase is organized internally. For the distinction between the product thesis and this repo's implementation architecture, see [Issue-Orchestrator Internal Architecture](internal-architecture.md).
 
+The opt-in [Docker session source candidate](docker-sessions.md) preserves the
+existing terminal and original claim owners; its installed acceptance gates
+remain separate from Native execution.
+
 ## System Overview
 
 ```mermaid

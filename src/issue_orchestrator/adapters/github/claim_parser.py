@@ -22,6 +22,7 @@ from typing import Any
 import yaml
 
 from ...domain.claim import Claim
+from ...domain.original_delivery import OriginalDelivery
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,7 @@ def _dict_to_claim(data: dict[str, Any], issue_number: int) -> Claim | None:
         logger.debug("Claim missing required fields: %s", missing)
         return None
 
+    original = OriginalDelivery.from_dict(data["original"]) if "original" in data else None
     try:
         # Parse datetime fields
         started_at = _parse_datetime(data["started_at"])
@@ -109,6 +111,7 @@ def _dict_to_claim(data: dict[str, Any], issue_number: int) -> Claim | None:
             started_at=started_at,
             expires_at=expires_at,
             priority=priority,
+            original=original,
         )
     except (ValueError, TypeError) as e:
         logger.debug("Failed to construct Claim: %s", e)
@@ -167,6 +170,8 @@ def format_claim_comment(claim: Claim) -> str:
         "priority": claim.priority,
     }
 
+    if claim.original is not None:
+        yaml_data["original"] = claim.original.to_dict()
     yaml_str = yaml.safe_dump(yaml_data, sort_keys=False, default_flow_style=False)
 
     return f"```io-claim\n{yaml_str.strip()}\n```"

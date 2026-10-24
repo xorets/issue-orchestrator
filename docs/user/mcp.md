@@ -228,8 +228,30 @@ server is bound to.
 | `orchestrator.session.phases` | `issue_number` | `{"phases": [{"name", "display_name", "status", "status_icon", "started_at", "ended_at", "agent_label", "run_dir", "outcome", "validation_passed"}], "current_phase", "issue_number"}` — the linear history of runs (coding, review, rework, …) for the issue. |
 | `orchestrator.session.claude_log` | `issue_number`, `limit: int = 200` | `{"log_path", "issue_number", "run_dir", "entry_count", "entries"}`. `entries` are parsed JSONL records from the agent's session log, truncated to `limit`. Unparseable lines come back as `{"_raw", "_parse_error": true}`. |
 | `orchestrator.session.orchestrator_log` | `issue_number` | `{"filtered_log_path", "full_log_path", "issue_number"}`. Writes an issue-scoped tail (up to 500 lines) of the orchestrator log next to the run and returns its path. |
+| `orchestrator.original_delivery` | `issue_number`, `operation`, `payload` | [Original owner custody](original_delivery.md): fenced correction admission and terminal reconciliation; observe returns current remote authority. |
 | `orchestrator.session.kill` | `issue_number` | `{"status": "terminated", "issue_number", "title", "killed_sessions", "hold_label", "errors"}`. Terminates the session **and applies a hold label** so the orchestrator does not immediately relaunch it. |
 | `orchestrator.session.focus` | `issue_number` | `{"status": "focused", "issue_number"}`. Brings the agent's terminal to the foreground. Only meaningful for terminal backends that support focus (not the `subprocess` backend). |
+
+The subprocess backend drains the agent's POSIX session and descendant groups
+observed before signalling, including descendants that start another session.
+The required issue hold is acknowledged after work custody is established and
+before stopping processes. Ended sessions release their owned Git-ref CAS lease
+before their records are dropped; a surviving lease or unavailable release
+verification remains an incomplete termination, with its session evidence kept.
+The same drain runs for recovered sessions without an in-memory PTY handle.
+Remaining live workers or unavailable process evidence make termination fail.
+Already detached and reparented processes cannot be attributed by this process
+snapshot; this is not OS containment against arbitrary daemonization.
+
+### Issues
+
+| Tool | Arguments | Returns |
+|------|-----------|---------|
+| `orchestrator.issue.retry` | `issue_number` | `{"success": true, "removed_labels": [...]}` when the operator retry command commits; `{"success": false, "error": ...}` when the issue remains held. The command releases the issue's retry hold and may allow a new session to launch. |
+
+Retry preserves operator refusals. It does not archive unfinished work: ordinary
+worktree reuse may reset tracked changes and remove untracked files. Preserve
+unfinished materials before releasing a hold that allows destructive reuse.
 
 ### Repositories
 

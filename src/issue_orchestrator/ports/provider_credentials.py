@@ -31,8 +31,11 @@ __all__ = [
 class ProviderCredentials(Protocol):
     """Resolve the secret environment one provider needs to launch."""
 
-    def session_env(self, provider: str | None) -> Mapping[str, str]:
+    def session_env(self, provider: str | None, *, docker: bool = False) -> Mapping[str, str]:
         """Return the environment ``provider`` needs inside its session.
+
+        ``docker`` requests only the explicitly selected sealed Docker model
+        transport; Native/default resolution remains provider-owned.
 
         Empty for a provider that carries its own login, and empty for a
         provider whose declared secret is not configured — the launch then
@@ -51,8 +54,8 @@ class StaticProviderCredentials:
     pattern as :data:`~.provider_readiness.NO_PROVIDER_READINESS_PROBE`.
     """
 
-    def session_env(self, provider: str | None) -> Mapping[str, str]:
-        del provider  # nothing is resolved without a provider registry
+    def session_env(self, provider: str | None, *, docker: bool = False) -> Mapping[str, str]:
+        del provider, docker  # nothing is resolved without a provider registry
         return {}
 
 

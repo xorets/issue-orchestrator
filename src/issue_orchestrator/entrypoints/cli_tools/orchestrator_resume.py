@@ -15,7 +15,7 @@ import urllib.error
 from dataclasses import dataclass
 
 from ...infra.env import get_env
-from .agent_callback import resolve_control_api_port
+from .agent_callback import callback_url, resolve_control_api_port
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,7 +44,7 @@ class ResumeTarget:
         return cls(port=port, issue_number=issue_number)
 
     def url(self) -> str:
-        return f"http://localhost:{self.port}/api/issues/{self.issue_number}/resume"
+        return callback_url(f"/api/issues/{self.issue_number}/resume", self.port)
 
 
 def trigger_orchestrator_resume(

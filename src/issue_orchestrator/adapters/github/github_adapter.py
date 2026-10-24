@@ -1642,6 +1642,7 @@ class GitHubAdapter:
             or None,
             merged_at=pr.get("merged_at") or None,
             head_sha=(pr.get("head") or {}).get("sha") or pr.get("headRefOid") or None,
+            base_sha=(pr.get("base") or {}).get("sha") or pr.get("baseRefOid") or None,
         )
 
     def _fetch_pr_info_from_search(self, pr: dict[str, Any]) -> PRInfo | None:

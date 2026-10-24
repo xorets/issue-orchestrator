@@ -184,7 +184,9 @@ tools. **Names, arguments, and return shapes may change in any `0.x` release.**
 | `orchestrator.session.phases` | Phase history for an issue's session |
 | `orchestrator.session.claude_log` | Agent log tail |
 | `orchestrator.session.orchestrator_log` | Orchestrator log for the session |
+| `orchestrator.original_delivery` | [Fenced original custody, bounded correction, and terminal reconciliation](original_delivery.md) |
 | `orchestrator.session.kill` | Kill an issue's session |
+| `orchestrator.issue.retry` | Release an issue's retry hold through the operator command |
 | `orchestrator.session.focus` | Focus the session terminal |
 | `orchestrator.repos` | List registered repos |
 | `orchestrator.repos.start` | Start the orchestrator for a repo path |
@@ -363,6 +365,8 @@ contracted route goes missing or stops using its generated response model.
 | `/api/info` | Repository Engine |
 | `/api/issues/{issue_number}/audit` | Repository Engine |
 | `/api/issues/{issue_number}/resume` | Repository Engine |
+| `/api/original-delivery/{issue_number}` | Repository Engine |
+| `/api/original-delivery/{issue_number}/{operation}` | Repository Engine |
 | `/api/stale-issues` | Repository Engine |
 | `/api/status` | Repository Engine |
 | `/api/validated-work/intake` | Repository Engine |
@@ -398,6 +402,17 @@ contracted route goes missing or stops using its generated response model.
 `tests/unit/test_public_api_surface_docs.py` asserts this table equals the
 OpenAPI path set exactly, so contracting a new route cannot leave it classified
 as internal by prose.
+
+The contracted original-delivery routes use the authenticated Repository Engine
+boundary for trusted controllers. `GET /api/original-delivery/{issue_number}`
+observes remote custody without granting authority.
+`POST /api/original-delivery/{issue_number}/{operation}` requires the current
+original lease, fence, contract, and native run identity for registration,
+handoff, bounded correction, restart custody, cancellation, and terminal
+reconciliation. Correction admission uses the existing engine-owned budget;
+terminal release requires positive ownership and worker-quiescence evidence.
+See [original delivery custody](original_delivery.md) for each operation's
+additional requirements and refusal behavior.
 
 **Every other `/api/*` and `/control/*` route is internal, with one carve-out.**
 The exception is the Repository Engine dashboard's `GET /api/events`, which is
@@ -532,3 +547,13 @@ fails the build until it is deleted from here, and a tier this page invents but
 never defines fails too. Mentioning a name in prose does not classify it — only
 a row in the anchored table counts. Relative links on this page are checked to
 resolve as well, so a moved file cannot leave a dangling promise behind.
+
+### Docker worker protocol exception
+
+`POST /api/docker/first-model` is an internal, first-party Builder worker
+protocol, not a browser JSON boundary or a supported public API. Its typed
+request/response models live in `entrypoints/docker_first_model_routes.py`; it
+intentionally does not enter the browser UI OpenAPI inventory. The callback and
+active-allocation capability jointly restrict it to the selected Docker worker.
+See [Docker sessions](../architecture/docker-sessions.md) for its owner, receipt
+custody, and separate reviewer semantics.

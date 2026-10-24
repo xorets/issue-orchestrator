@@ -245,3 +245,82 @@ def test_rate_limited_convergence_raises_instead_of_reporting_lost() -> None:
 
     assert host_rate_limit_of(caught.value) is not None
     assert client.limited_reads == 1, "no polling against a rate-limited host"
+
+
+def test_original_owner_correction_and_terminal_release_share_remote_cas() -> None:
+    from issue_orchestrator.domain.original_delivery import OriginalDelivery
+    client = FakeGitHubRefClient()
+    labels = FakeLabels()
+    adapter = _adapter(client, labels, "original")
+    acquired = adapter.attempt_claim(42)
+    claim, fence = adapter.original_claim(42)
+    assert claim.lease_id == acquired.lease_id
+    delivery = OriginalDelivery(repository="local/one", config_fingerprint="config", contract_sha256="a" * 64,
+        run_id="run", session_name="issue-42", native_phase_name="coding-1", logical_child="code:42", started_at="start", branch="delivery", worktree="/tmp/delivery",
+        run_dir="/tmp/delivery/run", agent="agent:pilot", engine_host="host", engine_pid=12,
+        engine_birth="34", max_cycles=1)
+    assert adapter.bind_original(42, claim.lease_id, fence, delivery)
+    bound, fence = adapter.original_claim(42)
+    assert bound.original == delivery
+    assert adapter.renew_claim(42, claim.lease_id)
+    renewed, fence = adapter.original_claim(42)
+    assert renewed.original == delivery
+    published = adapter.transition_original(42, claim.lease_id, fence, "handoff", request_id="handoff",
+        pr_number=101, head_sha="b" * 40)
+    assert published.original.pr_number == 101
+    _, fence = adapter.original_claim(42)
+    assert adapter.transition_original(42, "foreign", fence, "cancel", request_id="cancel") is None
+    cancelled = adapter.transition_original(42, claim.lease_id, fence, "cancel", request_id="cancel")
+    assert cancelled.original.cancelled
+    assert adapter.transition_original(42, claim.lease_id, fence, "reconcile", request_id="reconcile") is None
+    _, fence = adapter.original_claim(42)
+    terminal = adapter.transition_original(42, claim.lease_id, fence, "reconcile", request_id="reconcile")
+    assert terminal.original.released
+    assert client.deleted_refs == []
+    assert adapter.get_current_claim(42) is None
+    successor = _adapter(client, labels, "successor").attempt_claim(42)
+    assert successor.success
+
+
+def test_original_grant_survives_restart_and_lost_ack_without_relaunch(tmp_path) -> None:
+    from issue_orchestrator.domain.original_delivery import OriginalDelivery
+    from issue_orchestrator.domain.session_run import SessionRunAssets
+    client = FakeGitHubRefClient()
+    adapter = _adapter(client, FakeLabels(), 'original')
+    assert adapter.attempt_claim(42).success
+    claim, fence = adapter.original_claim(42)
+    owner = OriginalDelivery(repository='test/repo', config_fingerprint='config', contract_sha256='a'*64,
+        run_id='original', session_name='issue-42', native_phase_name='coding-1', logical_child='code:42', started_at='start', branch='delivery', worktree=str(tmp_path),
+        run_dir=str(tmp_path/'original'), agent='agent:web', engine_host='host', engine_pid=1,
+        engine_birth='birth', max_cycles=1)
+    assert adapter.bind_original(42, claim.lease_id, fence, owner)
+    _, fence = adapter.original_claim(42)
+    assert adapter.transition_original(42, claim.lease_id, fence, 'handoff', request_id='handoff',
+        pr_number=101, head_sha='a'*40, base_sha='b'*40)
+    _, fence = adapter.original_claim(42)
+    assert adapter.transition_original(42, claim.lease_id, fence, 'correct', request_id='A', feedback='Fix')
+    assert adapter.reserve_original_launch(42, 'A')
+    assert not adapter.reserve_original_launch(42, 'A')
+    run_dir = tmp_path/'.issue-orchestrator'/'sessions'/'correction__rework-42'
+    run = SessionRunAssets.from_paths(session_name='rework-42', run_id='correction', started_at='new-start',
+        worktree_path=tmp_path, run_dir=run_dir, manifest_path=run_dir/'manifest.json', terminal_recording_path=run_dir/'log')
+    assert adapter.bind_original_run(42, 'A', run, 'rework-42')
+    restarted = _adapter(client, FakeLabels(), 'original')
+    before, fence = restarted.original_claim(42)
+    assert restarted.resume_original(42, before.lease_id, fence, ('host', 2, 'next-birth'))
+    resumed, fence = restarted.original_claim(42)
+    assert resumed.original.cycles == 1
+    assert resumed.original.run_id == 'original'
+    assert resumed.original.engine_history == (('host', 1, 'birth'),)
+    assert resumed.original.correction_runs == (('A', 'correction', str(run_dir), 'rework-42', 'new-start', 'rework-42'),)
+    assert not restarted.reserve_original_launch(42, 'A')
+    foreign = _adapter(client, FakeLabels(), 'foreign')
+    assert not foreign.renew_claim(42, before.lease_id)
+    assert foreign.transition_original(42, before.lease_id, fence, 'cancel', request_id='foreign') is None
+    assert foreign.original_claim(42) == restarted.original_claim(42)
+    assert adapter.attempt_claim(43).success
+    other = adapter.original_claim(43)
+    assert restarted.transition_original(42, before.lease_id, fence, 'cancel', request_id='cancel')
+    assert adapter.original_claim(43) == other
+    with pytest.raises(ValueError, match='cancelled'):
+        restarted.reserve_original_launch(42, 'B')

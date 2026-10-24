@@ -29,6 +29,7 @@ Security posture (see issue #5987, F4):
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -36,9 +37,16 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, cast
 import inspect
 from mcp.server.fastmcp import FastMCP
+from mcp.types import CallToolResult, TextContent
+from ..contracts.original_delivery import OriginalDeliveryRequest
+from .mcp_original_delivery import original_delivery_result
 
 from ..domain.pause_state import PauseActor
-from ..contracts.mcp import McpUiHintPayload
+from ..contracts.mcp import (
+    McpIssueRetryOutcome,
+    McpUiHintPayload,
+    parse_issue_retry_outcome,
+)
 from ..contracts.repository_engine import RepositoryEngineStartPayload
 from ..infra import supervisor
 from ..domain.repository_launch_selection import RepositoryLaunchSelection
@@ -256,6 +264,8 @@ MCP_TOOLS: tuple[tuple[str, str], ...] = (
     # Any MCP client holding the transport could inject arbitrary text into a
     # running agent's prompt via that tool.
     ("orchestrator.session.kill", "tool_session_kill"),
+    ("orchestrator.original_delivery", "tool_original_delivery"),
+    ("orchestrator.issue.retry", "tool_issue_retry"),
     ("orchestrator.session.focus", "tool_session_focus"),
     ("orchestrator.urls", "tool_urls"),
     ("orchestrator.doctor", "tool_doctor"),
@@ -433,10 +443,28 @@ class McpApp:
             lambda: self.session_orchestrator_log(issue_number),
         )
 
+    async def tool_original_delivery(self, issue_number: int, operation: str = "observe",
+                                     payload: OriginalDeliveryRequest | None = None) -> CallToolResult:
+        """Observe/bind current original custody, admit bounded correction, or reconcile its terminal lease."""
+        return await original_delivery_result(self._api, self._settings.config_path, issue_number,
+            operation, payload, running=self._client.status().state == "running")
+
     async def tool_session_kill(self, issue_number: int) -> dict[str, Any]:
         return await self._safe(
             "orchestrator.session.kill",
             lambda: self.session_kill(issue_number),
+        )
+
+    async def tool_issue_retry(self, issue_number: int) -> CallToolResult:
+        result = await self._safe(
+            "orchestrator.issue.retry",
+            lambda: cast(Awaitable[dict[str, Any]], self.issue_retry(issue_number)),
+        )
+        # Preserve the outcome's flat shape in both MCP representations. The
+        # SDK otherwise wraps unions or adds nulls for absent TypedDict fields.
+        return CallToolResult(
+            content=[TextContent(type="text", text=json.dumps(result))],
+            structuredContent=result,
         )
 
     async def tool_session_focus(self, issue_number: int) -> dict[str, Any]:
@@ -638,6 +666,9 @@ class McpApp:
 
     async def session_kill(self, issue_number: int) -> dict[str, Any]:
         return await self._api.kill(issue_number)
+
+    async def issue_retry(self, issue_number: int) -> McpIssueRetryOutcome:
+        return parse_issue_retry_outcome(await self._api.issue_retry(issue_number))
 
     async def session_focus(self, issue_number: int) -> dict[str, Any]:
         return await self._api.focus(issue_number)

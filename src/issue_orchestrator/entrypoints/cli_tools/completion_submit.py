@@ -11,7 +11,7 @@ from ...contracts.ui_openapi_models import (
     CompletionSubmissionPayload,
 )
 from ...domain.completion_intake import CompletionIntakeReceipt
-from .agent_callback import api_request_headers, resolve_control_api_port
+from .agent_callback import api_request_headers, callback_url, resolve_control_api_port
 
 CAPABILITY_ENV = "ISSUE_ORCHESTRATOR_COMPLETION_CAPABILITY"
 
@@ -39,18 +39,18 @@ def post_completion_command(route: str, payload: bytes, *, timeout: int) -> byte
     headers = api_request_headers().to_mutable_mapping()
     headers["X-Completion-Capability"] = capability
     request = Request(
-        f"http://127.0.0.1:{int(port)}{route}",
+        callback_url(route, port, native_host="127.0.0.1"),
         data=payload,
         headers=dict(headers),
         method="POST",
     )
-    from urllib.request import HTTPRedirectHandler, build_opener
+    from urllib.request import HTTPRedirectHandler, ProxyHandler, build_opener
 
     class RefuseRedirect(HTTPRedirectHandler):
         def redirect_request(self, req, fp, code, msg, headers, newurl):
             return None
 
-    with build_opener(RefuseRedirect()).open(request, timeout=timeout) as response:
+    with build_opener(ProxyHandler({}), RefuseRedirect()).open(request, timeout=timeout) as response:
         return response.read(1024 * 1024)
 
 

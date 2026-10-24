@@ -393,6 +393,16 @@ class DialogSectionPayload(BaseModel):
     rows: list[DialogRowPayload]
     title: str
 
+class DockerCustodyPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    container_id: str
+    controller_container_id: str
+    daemon_id: str
+    launch_sha256: str
+    provider_exec_id: str
+    run_id: str
+    schema_version: Literal[1]
+
 class DoctorCheckPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
     detail: str | None = None
@@ -1104,6 +1114,73 @@ class OrchestratorStatusPayload(BaseModel):
     shutdown_requested: bool = Field(..., strict=True)
     startup_status: StartupStatus
     tick_id: int | float | None
+
+class OriginalDeliveryOwnerPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    agent: str
+    base_sha: str
+    branch: str
+    cancelled: bool = Field(..., strict=True)
+    config_fingerprint: str
+    contract_sha256: str
+    correction_id: str
+    correction_runs: list[list[str | int]]
+    corrections: list[list[str | int]]
+    cycles: int = Field(..., ge=0, strict=True)
+    docker_custody: list[DockerCustodyPayload]
+    engine_birth: str
+    engine_history: list[list[str | int]]
+    engine_host: str
+    engine_pid: int = Field(..., ge=0, strict=True)
+    execution_backend: Literal['native', 'docker']
+    feedback: str
+    head_sha: str
+    launches: list[str]
+    logical_child: str
+    max_cycles: int = Field(..., ge=0, strict=True)
+    native_phase_name: str
+    pending: bool = Field(..., strict=True)
+    pr_number: int = Field(..., ge=0, strict=True)
+    process_roots: list[list[str | int]]
+    released: bool = Field(..., strict=True)
+    repository: str
+    run_dir: str
+    run_id: str
+    session_name: str
+    started_at: str
+    worktree: str
+
+class OriginalDeliveryPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    claimant: str
+    expires_at: str
+    fence: str
+    issue_number: int = Field(..., ge=1, strict=True)
+    lease_current: bool = Field(..., strict=True)
+    lease_id: str
+    owner: OriginalDeliveryOwnerPayload | None
+    remote_released: bool = Field(..., strict=True)
+
+class OriginalDeliveryRequestPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    base_sha: str | None = Field(default=None, max_length=40)
+    contract_sha256: str
+    feedback: str | None = Field(default=None, max_length=65536)
+    fence: str = Field(..., min_length=1, max_length=256)
+    head_sha: str | None = Field(default=None, max_length=40)
+    lease_id: str = Field(..., min_length=1, max_length=256)
+    pr_number: int | None = Field(default=None, ge=0, strict=True)
+    request_id: str = Field(..., min_length=1, max_length=256)
+    run_id: str = Field(..., min_length=1, max_length=256)
+    session_name: str | None = Field(default=None, max_length=256)
+    started_at: str | None = Field(default=None, max_length=256)
+
+    @field_validator('contract_sha256')
+    @classmethod
+    def _validate_contract_sha256_pattern(cls, value: Any) -> Any:
+        if value is not None and re.search('^[0-9a-f]{64}$', value) is None:
+            raise ValueError("contract_sha256 must match '^[0-9a-f]{64}$'")
+        return value
 
 class OutcomeBadgePayload(BaseModel):
     model_config = ConfigDict(extra="forbid")

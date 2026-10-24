@@ -9,6 +9,7 @@ import threading
 import httpx
 
 from ..domain.pause_state import PauseActor
+from ..domain.original_delivery import OriginalDeliveryOperation
 from ..ports.orchestrator_api import OrchestratorApi
 
 
@@ -247,6 +248,16 @@ class OrchestratorAsyncHttpApi:
             response.raise_for_status()
             return response.json()
 
+    async def original_delivery(self, issue_number: int, operation: str = "observe",
+                                payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if operation != "observe":
+            OriginalDeliveryOperation(operation)
+        path = f"/api/original-delivery/{issue_number}"
+        try:
+            return await self._request("GET", path) if operation == "observe" else await self._request("POST", f"{path}/{operation}", payload)
+        except httpx.HTTPError as refusal:
+            raise RuntimeError(f"Original delivery HTTP boundary refused: {refusal}") from refusal
+
     async def status(self) -> dict[str, Any]:
         return await self._request("GET", "/api/status")
 
@@ -335,6 +346,18 @@ class OrchestratorAsyncHttpApi:
 
     async def kill(self, issue_number: int) -> dict[str, Any]:
         return await self._request("POST", f"/api/kill/{issue_number}")
+
+    async def issue_retry(self, issue_number: int) -> dict[str, Any]:
+        try:
+            return await self._request("POST", f"/api/issues/{issue_number}/retry")
+        except httpx.HTTPStatusError as exc:
+            # The command's refusal payload is a valid operator outcome.
+            http_code = exc.response.status_code
+            if http_code == 409:
+                payload = exc.response.json()
+                if isinstance(payload, dict):
+                    return payload
+            raise
 
     async def focus(self, issue_number: int) -> dict[str, Any]:
         return await self._request("POST", f"/api/focus/{issue_number}")

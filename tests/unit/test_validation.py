@@ -63,6 +63,7 @@ class TestValidationRecord:
 
         assert record.suite == "publish_gate"
         assert record.head_sha == "abc123"
+        assert record.head_sha == "abc123"
         assert record.passed is True
         assert record.exit_code == 0
 
@@ -222,7 +223,16 @@ class TestValidationRunner:
         assert record.exit_code == 0
         assert record.timed_out is False
         assert record.suite == "publish_gate"
-        assert record.head_sha == "abc123"
+
+    def test_unowned_validation_does_not_inherit_completion_context(self, store, session_output_dir, monkeypatch):
+        monkeypatch.setenv("ISSUE_ORCHESTRATOR_COMPLETION_CONTEXT", "forged")
+        command_runner = MagicMock()
+        command_runner.run.return_value = CommandResult(returncode=0, stdout="", stderr="", timed_out=False)
+        record = ValidationRunner(store, command_runner).run(
+            suite="publish_gate", head_sha="a" * 40, command="fixed-check",
+            session_output_dir=session_output_dir)
+        assert record.passed
+        assert "ISSUE_ORCHESTRATOR_COMPLETION_CONTEXT" not in command_runner.run.call_args.kwargs["env"]
 
     def test_run_records_offset_aware_utc_timestamps(self, runner, session_output_dir):
         record = runner.run(

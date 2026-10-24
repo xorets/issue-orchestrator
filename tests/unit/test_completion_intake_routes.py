@@ -217,8 +217,19 @@ def test_historical_endpoint_returns_real_failed_validation_then_parked_admissio
     assert parked.json()["evidence_id"].startswith("e1:")
 
 
+@pytest.fixture(params=["native", "docker"])
+def resume_callback_scope(request, fake_browser_auth):
+    from issue_orchestrator.entrypoints.control_api import configure_api_token
+    configure_api_token(fake_browser_auth.admin_token, agent_callback=fake_browser_auth.agent_callback_token,
+        agent_callback_scope=request.param)
+    try:
+        yield request.param
+    finally:
+        configure_api_token(fake_browser_auth.admin_token, agent_callback=fake_browser_auth.agent_callback_token)
+
+
 def test_resume_requires_capability_bound_exact_receipt_and_ignores_canonical_file(
-    auth_enabled_control_client, fake_browser_auth, intake_route_engine, monkeypatch
+    auth_enabled_control_client, fake_browser_auth, intake_route_engine, monkeypatch, resume_callback_scope
 ):
     import json
     from dataclasses import replace
@@ -233,6 +244,31 @@ def test_resume_requires_capability_bound_exact_receipt_and_ignores_canonical_fi
     raw = json.loads(completion())
     raw["requested_actions"] = []
     candidate.write_text(json.dumps(raw))
+    if resume_callback_scope == "docker":
+        from io import BytesIO
+        from urllib.parse import urlsplit
+        from issue_orchestrator.control.session_env import docker_session_secret_env
+        from issue_orchestrator.entrypoints.cli_tools.completion_submit import submit_completion_file
+
+        private = docker_session_secret_env(existing.deps.issue_run_ledger, run, {})
+        for name, value in private.items():
+            monkeypatch.setenv(name, value)
+        monkeypatch.setenv("ISSUE_ORCHESTRATOR_AGENT_CALLBACK_TOKEN", fake_browser_auth.agent_callback_token)
+        monkeypatch.setenv("ISSUE_ORCHESTRATOR_CALLBACK_SCOPE", "docker")
+        monkeypatch.setenv("ISSUE_ORCHESTRATOR_API_PORT", "8765")
+        monkeypatch.setenv("ISSUE_ORCHESTRATOR_API_ORIGIN", "http://controller-fixture:8765")
+        monkeypatch.setenv("ISSUE_ORCHESTRATOR_ISSUE_NUMBER", "42")
+
+        class Transport:
+            def open(self, request, timeout):
+                assert request.full_url.startswith("http://controller-fixture:8765/")
+                response = auth_enabled_control_client.post(urlsplit(request.full_url).path,
+                    content=request.data, headers=dict(request.header_items()))
+                assert response.status_code == 200, response.text
+                return BytesIO(response.content)
+
+        monkeypatch.setattr("urllib.request.build_opener", lambda *handlers: Transport())
+        delivered = submit_completion_file(candidate)
     headers = {
         "Authorization": "Bearer " + fake_browser_auth.agent_callback_token,
         "X-Completion-Capability": token,
@@ -293,6 +329,9 @@ def test_resume_requires_capability_bound_exact_receipt_and_ignores_canonical_fi
     assert result.status_code == 200, result.text
     assert result.json()["success"] is True, result.text
     assert result.json()["actions_taken"] is None
+    if resume_callback_scope == "docker":
+        from issue_orchestrator.entrypoints.cli_tools.orchestrator_resume import trigger_orchestrator_resume
+        assert trigger_orchestrator_resume(receipt=delivered) == (True, None)
     assert (
         existing.deps.issue_run_ledger.read_completion(receipt["entry_id"]).summary
         == raw["summary"]

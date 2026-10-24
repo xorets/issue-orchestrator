@@ -47,7 +47,7 @@ from typing import Any, Optional, cast
 from unittest.mock import MagicMock, patch
 
 from issue_orchestrator.domain.tech_lead_session import TechLeadCreationOrigin
-from issue_orchestrator.domain.claim import ClaimResult
+from issue_orchestrator.domain.claim import Claim, ClaimResult
 from issue_orchestrator.control.provider_resilience import ProviderResilienceManager
 from issue_orchestrator.control.launch_transaction import PendingWorkLaunchClaim
 from issue_orchestrator.domain.repository_launch_selection import (
@@ -615,8 +615,11 @@ def _build_launcher_bundle(
     provider_resilience: ProviderResilienceManager | None = None,
     provider_readiness_probe: ProviderReadinessProbe | None = None,
     issue_run_ledger: IssueRunLedger | None = None,
+    provider_credentials=None,
+    session_preparation=None,
     refresh_issue_fn: Callable[[int], Any] | None = None,
     recovery_holds: Any = None,
+    original_runtime_identity: Callable[[], tuple[str, int, str]] | None = None,
 ) -> LauncherTestBundle:
     """Create a SessionLauncher with mock dependencies and tracking.
 
@@ -677,6 +680,12 @@ def _build_launcher_bundle(
 
     mock_action_applier = MagicMock()
     launcher_kwargs = {}
+    if provider_credentials is not None:
+        launcher_kwargs["provider_credentials"] = provider_credentials
+    if session_preparation is not None:
+        launcher_kwargs["session_preparation"] = session_preparation
+    if original_runtime_identity is not None:
+        launcher_kwargs["original_runtime_identity"] = original_runtime_identity
     if coder_prompt_addendum is not None:
         launcher_kwargs["coder_prompt_addendum"] = coder_prompt_addendum
     if provider_resilience is not None:
@@ -767,6 +776,7 @@ def internal_review_launcher_bundle(
     claim_manager = MagicMock(name="claim_manager")
     claim_manager.attempt_claim.return_value = ClaimResult.claimed("lease-123")
     claim_manager.run_convergence.return_value = True
+    claim_manager.get_current_claim.return_value = None
     bundle = _build_launcher_bundle(
         sample_config,
         mock_events,
@@ -807,6 +817,7 @@ def unavailable_provider_internal_review_bundle(
     claim_manager = MagicMock(name="claim_manager")
     claim_manager.attempt_claim.return_value = ClaimResult.claimed("lease-123")
     claim_manager.run_convergence.return_value = True
+    claim_manager.get_current_claim.return_value = None
     bundle = _build_launcher_bundle(
         sample_config,
         mock_events,
@@ -826,6 +837,13 @@ def unavailable_provider_internal_review_bundle(
 def session_launcher(launcher_bundle: LauncherTestBundle) -> SessionLauncher:
     """Convenience fixture for tests that only need the launcher."""
     return launcher_bundle.launcher
+
+
+@pytest.fixture(params=[None, Claim(lease_id="lease-123", claimant="ordinary-engine", issue_number=123,
+    started_at=datetime(2026, 1, 1), expires_at=datetime(2099, 1, 1), priority=0)],
+    ids=["absent-current-claim", "ordinary-current-claim"])
+def ordinary_current_claim(request):
+    return request.param
 
 
 # =============================================================================
@@ -928,6 +946,49 @@ class TestLogTransition:
 
 class TestLaunchIssueSession:
     """Tests for launch_issue_session method."""
+
+    @pytest.mark.parametrize("refusal", [None, "provider", "closed"])
+    def test_docker_launch_projects_only_allocator_completion_authority(
+        self, sample_config, mock_events, mock_repo_host, mock_worktree_manager,
+        mock_working_copy, mock_command_runner, sample_issue, refusal, caplog,
+    ):
+        from issue_orchestrator.domain.completion_intake import IntakeClosed
+        from issue_orchestrator.ports.provider_credentials import ProviderCredentials
+        from issue_orchestrator.ports.session_preparation import SessionPreparation
+
+        class RunLedger(SqliteIssueRunLedger):
+            def submission_capability(self, run):
+                if refusal == "closed":
+                    raise IntakeClosed("completion intake is closed")
+                return super().submission_capability(run)
+
+        sample_config.terminal_adapter = "issue_orchestrator.execution.terminal_docker:DockerPlugin"
+        ledger = RunLedger(sample_config.repo_root / "state" / "docker.sqlite", repo_slug="test-owner/test-repo")
+        provider = MagicMock(spec=ProviderCredentials)
+        provider.session_env.return_value = ({"ISSUE_ORCHESTRATOR_COMPLETION_CAPABILITY": "forged"}
+            if refusal == "provider" else {"PROVIDER_KEY": "provider-value"})
+        preparation = MagicMock(spec=SessionPreparation)
+        bundle = _build_launcher_bundle(sample_config, mock_events, mock_repo_host,
+            mock_worktree_manager, mock_working_copy, mock_command_runner,
+            issue_run_ledger=ledger, provider_credentials=provider, session_preparation=preparation)
+        if refusal is not None:
+            with pytest.raises((ValueError, IntakeClosed)):
+                bundle.launcher.launch_issue_session(sample_issue, active_sessions=[])
+            assert bundle.create_session_calls == []
+            preparation.prepare_session.assert_not_called()
+            return
+        result = bundle.launcher.launch_issue_session(sample_issue, active_sessions=[])
+        assert result.success and result.session is not None
+        run = result.session.run_assets
+        assert run is not None
+        capability = ledger.submission_capability(run)
+        call = bundle.create_session_calls[0]
+        assert call["secret_env"] == {"PROVIDER_KEY": "provider-value", "ISSUE_ORCHESTRATOR_COMPLETION_CAPABILITY": capability}
+        assert provider.session_env.call_args.kwargs == {"docker": True}
+        assert capability not in call["cmd"]
+        assert capability not in caplog.text
+        assert "$(cat " not in call["cmd"]
+        preparation.prepare_session.assert_called_once_with(run, call["name"], call["cmd"])
 
     def test_successful_launch(self, session_launcher, sample_issue):
         """Verify successful issue session launch."""
@@ -2676,6 +2737,32 @@ class TestLaunchRetrospectiveReviewSession:
 class TestLaunchReworkSession:
     """Tests for launch_rework_session method (lines 585, 597-599, 604-605, 611-765)."""
 
+    def test_docker_rework_refuses_before_allocation_or_create(self, launcher_bundle, sample_config, mock_worktree_manager):
+        sample_config.terminal_adapter = "issue_orchestrator.execution.terminal_docker:DockerPlugin"
+        rework = PendingRework(issue_key=GitHubIssueKey(repo="test/repo", external_id="123"),
+            agent_type="agent:web", rework_cycle=1)
+        with pytest.raises(ValueError, match="Docker rework"):
+            launcher_bundle.launcher.launch_rework_session(rework, active_sessions=[])
+        assert launcher_bundle.create_session_calls == []
+        assert mock_worktree_manager.create_calls == []
+
+    @pytest.mark.parametrize("manager_present", [False, True], ids=["no-manager", "manager"])
+    def test_original_tag_without_owned_grant_refuses_before_git_or_worker(
+        self, manager_present, ordinary_current_claim, sample_config, mock_events,
+        mock_repo_host, mock_worktree_manager, mock_working_copy, mock_command_runner,
+    ):
+        claims = MagicMock() if manager_present else None
+        if claims is not None:
+            claims.get_current_claim.return_value = ordinary_current_claim
+        bundle = _build_launcher_bundle(sample_config, mock_events, mock_repo_host,
+            mock_worktree_manager, mock_working_copy, mock_command_runner, claim_manager=claims)
+        rework = PendingRework(issue_key=GitHubIssueKey(repo="test/repo", external_id="123"),
+            agent_type="agent:web", rework_cycle=1, source="original-owner:forged")
+        result = bundle.launcher.launch_rework_session(rework, active_sessions=[])
+        assert mock_worktree_manager.create_calls == []
+        assert not result.success and result.reason == "Original rework owner is absent"
+        assert bundle.create_session_calls == []
+
     @pytest.fixture(autouse=True)
     def _no_feedback_sleep(self, monkeypatch):
         monkeypatch.setattr(
@@ -2953,6 +3040,8 @@ class TestLaunchReworkSession:
     def test_internal_review_instructions_reach_rework_command(
         self,
         internal_review_launcher_bundle,
+        ordinary_current_claim,
+        mock_worktree_manager,
     ):
         bundle, provider = internal_review_launcher_bundle
         rework = PendingRework(
@@ -2961,9 +3050,11 @@ class TestLaunchReworkSession:
             rework_cycle=1,
         )
 
+        bundle.claim_manager.get_current_claim.return_value = ordinary_current_claim
         result = bundle.launcher.launch_rework_session(rework, active_sessions=[])
 
         assert result.success is True
+        assert not mock_worktree_manager.create_calls[0]["reuse_options"].preserve_branch
         assert "INTERNAL-REVIEW-MARKER" in bundle.create_session_calls[0]["cmd"]
         provider.prepare.assert_called_once_with(kind=SessionKind.REWORK)
 
@@ -2971,6 +3062,7 @@ class TestLaunchReworkSession:
         self,
         unavailable_provider_internal_review_bundle,
         mock_worktree_manager,
+        ordinary_current_claim,
     ):
         bundle, provider, readiness_probe = (
             unavailable_provider_internal_review_bundle
@@ -2979,6 +3071,7 @@ class TestLaunchReworkSession:
             "instructions empty"
         )
         work_claim = MagicMock()
+        bundle.claim_manager.get_current_claim.return_value = ordinary_current_claim
         rework = PendingRework(
             issue_key=GitHubIssueKey(repo="test/repo", external_id="123"),
             agent_type="agent:web",

@@ -49,6 +49,7 @@ from .bootstrap_pending_work import (
     require_repository_host,
 )
 from .bootstrap_session_launcher import build_session_launcher_factory
+from .bootstrap_original_delivery import build_original_delivery_owner
 from .bootstrap_run_services import (
     build_session_restorer,
     create_io_adapters as _create_io_adapters,
@@ -528,7 +529,8 @@ def build_orchestrator(
     )
     coder_prompt_addendum = build_coder_prompt_addendum_provider(config)
 
-    provider_readiness_probe = build_provider_readiness_probe(command_runner)
+    provider_readiness_probe = build_provider_readiness_probe(command_runner, docker=(
+        config.terminal_adapter == "issue_orchestrator.execution.terminal_docker:DockerPlugin"))
     provider_launch_sampler = build_provider_launch_sampler(
         config, provider_resilience, provider_readiness_probe, label_manager
     )
@@ -802,7 +804,7 @@ def build_orchestrator(
     runtime_lifecycle = build_issue_runtime(state=runtime_state, ledger=issue_run_ledger,
         intake=completion_intake, validated_work=validated_work, working_copy=working_copy,
         sessions=session_manager, pair_registry=pair_registry, supervisor=background_job_supervisor,
-        publish_recovery=publish_recovery, events=events, pull_requests=github, stuck_sweep=fact_gatherer, pending_work_claims=pending_work.claims,
+        publish_recovery=publish_recovery, events=events, pull_requests=github, stuck_sweep=fact_gatherer, pending_work_claims=pending_work.claims, claim_manager=claim_manager,
         base_branch=pull_request_base_branch(config, working_copy.default_branch, stack_gate))
     action_applier.runtime_lifecycle = runtime_lifecycle
     action_liveness = build_action_liveness(
@@ -866,6 +868,7 @@ def build_orchestrator(
         board_snapshot_builder=create_board_snapshot_builder(
             config, timeline_store, tech_lead_board_publisher, working_copy
         ),
+        original_delivery_owner=build_original_delivery_owner(config, claim_manager, github, working_copy, runtime_state, session_manager),
         claim_manager=claim_manager,
         claim_gate=claim_gate,
         lease_renewer=lease_renewer,
@@ -877,6 +880,9 @@ def build_orchestrator(
     )
 
     orchestrator = Orchestrator(config=config, deps=deps, state=runtime_state)
+    if deps.original_delivery_owner is not None:
+        deps.original_delivery_owner.launch = orchestrator.launch_rework_session
+        deps.original_delivery_owner.terminate = lambda issue: orchestrator.terminate_every_session_for_issue(issue, reason="original-delivery-cancel")
     # Act-level executor wiring closes over live orchestrator state (#6764/#6778).
     wire_tech_lead_act_executors(orchestrator)
     return orchestrator
@@ -1235,7 +1241,7 @@ def build_orchestrator_for_testing(
     runtime_lifecycle = build_issue_runtime(state=runtime_state, ledger=issue_run_ledger,
         intake=completion_intake, validated_work=validated_work, working_copy=working_copy,
         sessions=session_manager, pair_registry=pair_registry_for_testing, supervisor=background_job_supervisor,
-        publish_recovery=publish_recovery, events=events, pull_requests=github, stuck_sweep=fact_gatherer, pending_work_claims=pending_work.claims,
+        publish_recovery=publish_recovery, events=events, pull_requests=github, stuck_sweep=fact_gatherer, pending_work_claims=pending_work.claims, claim_manager=claim_manager,
         base_branch=pull_request_base_branch(config, working_copy.default_branch, stack_gate))
     action_applier.runtime_lifecycle = runtime_lifecycle
     action_liveness = build_action_liveness(
@@ -1289,6 +1295,7 @@ def build_orchestrator_for_testing(
         board_snapshot_builder=create_board_snapshot_builder(
             config, timeline_store, tech_lead_board_publisher_for_testing, working_copy
         ),
+        original_delivery_owner=build_original_delivery_owner(config, claim_manager, github, working_copy, runtime_state, session_manager),
         claim_manager=claim_manager,
         claim_gate=claim_gate,
         lease_renewer=lease_renewer,
@@ -1299,4 +1306,8 @@ def build_orchestrator_for_testing(
         services=infra_services,
     )
 
-    return Orchestrator(config=config, deps=deps, state=runtime_state)
+    orchestrator = Orchestrator(config=config, deps=deps, state=runtime_state)
+    if deps.original_delivery_owner is not None:
+        deps.original_delivery_owner.launch = orchestrator.launch_rework_session
+        deps.original_delivery_owner.terminate = lambda issue: orchestrator.terminate_every_session_for_issue(issue, reason="original-delivery-cancel")
+    return orchestrator

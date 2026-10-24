@@ -9,12 +9,14 @@ Security principle: Agents should not have access to credentials that could
 allow them to perform privileged operations (push, merge, API calls).
 """
 
+import json
 import logging
 import os
 import shlex
 from pathlib import Path
 from typing import Mapping
 
+from ..domain.completion_intake import CompletionIntakeEntry
 from ..infra.secret_env import (
     EXTRA_FORBIDDEN_ENV_VARS_ENV,
     GITHUB_APP_PRIVATE_KEY_ENV,
@@ -139,6 +141,29 @@ def build_runtime_tool_env(
     env[GRADLE_USER_HOME_ENV] = str(get_gradle_user_home(worktree))
     current_path = env.get(PATH_ENV, os.environ.get(PATH_ENV, ""))
     env[PATH_ENV] = build_runtime_tool_path(worktree, current_path)
+    return env
+
+
+def build_validation_tool_env(
+    worktree: Path, entry: CompletionIntakeEntry | None,
+) -> dict[str, str]:
+    """Project only the intake owner's context into its validation command."""
+    env = build_runtime_tool_env(worktree)
+    env.pop("ISSUE_ORCHESTRATOR_COMPLETION_CONTEXT", None)
+    if entry is not None:
+        env["ISSUE_ORCHESTRATOR_COMPLETION_CONTEXT"] = json.dumps({
+            "schema_version": 1,
+            "entry_id": entry.entry_id,
+            "raw": {"path": str(entry.raw_path), "sha256": entry.raw_sha256},
+            "normalized_sha256": entry.normalized_sha256,
+            "run": {
+                "session_name": entry.run.session_name,
+                "run_id": entry.run.run_id,
+                "started_at": entry.run.started_at,
+                "run_dir": str(entry.run.run_dir),
+                "worktree": str(entry.run.worktree_path),
+            },
+        }, sort_keys=True, separators=(",", ":"))
     return env
 
 

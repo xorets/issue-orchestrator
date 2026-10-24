@@ -24,6 +24,7 @@ whole one, and refusing it is the only answer a storage layer can honestly give.
 from __future__ import annotations
 
 import base64
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -108,7 +109,18 @@ class GitRefCasStore:
         if ref_payload is None:
             return None
         commit_sha = payload_commit_sha(ref_payload)
+        return self._read_commit(ref, commit_sha)
+
+    def read_at_commit(self, key: str, commit_sha: str) -> GitRefSnapshot:
+        """Read one exact authenticated anchor, never traverse ref history."""
+        if not isinstance(commit_sha, str) or not re.fullmatch('[0-9a-f]{40}', commit_sha):
+            raise ValueError('Git record anchor must be an exact commit SHA')
+        return self._read_commit(self.ref_for(key), commit_sha, verify_anchor=True)
+
+    def _read_commit(self, ref: str, commit_sha: str, *, verify_anchor: bool = False) -> GitRefSnapshot:
         commit_payload = self._client.get_git_commit(commit_sha)
+        if verify_anchor and commit_payload.get('sha') != commit_sha:
+            raise ValueError('Git record anchor response differs from requested commit')
         tree_sha = payload_tree_sha(commit_payload)
         message = str(commit_payload.get("message") or "")
         record = (
@@ -116,6 +128,8 @@ class GitRefCasStore:
             if declares_tree_format(message)
             else _legacy_record(message, commit_sha=commit_sha)
         )
+        if verify_anchor and len(record.encode('utf-8')) > MAX_RECORD_BYTES:
+            raise RecordTooLargeError('Git record anchor exceeds the existing record bound')
         return GitRefSnapshot(
             ref=ref,
             commit_sha=commit_sha,

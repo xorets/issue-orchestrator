@@ -55,6 +55,7 @@ from ..domain.coder_prompt import (
 )
 from ..domain.session_run import SessionRunAssets
 from ..ports.issue_run_allocator import IssueRunAllocator
+from ..ports.session_preparation import NO_SESSION_PREPARATION, SessionPreparation
 from .worktree import WorktreeSetupError
 from .worktree_context import WorktreeContext, worktree_reuse_options
 from .published_review_launch_gate import refuse_launch_over_published_review
@@ -135,7 +136,7 @@ from .launch_guards import (
     callback_endpoint_not_ready,
     retrospective_session_conflict,
 )
-from .session_env import completion_capability_export, build_session_env_exports
+from .session_env import completion_capability_export, build_session_env_exports, docker_session_secret_env
 from .provider_command_wrapper import ProviderCommandWrapper
 from .session_worktree_briefing import (
     describe_worktree_state,
@@ -211,9 +212,13 @@ class SessionLauncher:
         # The validated-work recovery owner's holds (#7455): a review waits only
         # for a hold that owner confirms, never for a lingering label alone.
         recovery_holds: RecoveryHolds = NO_RECOVERY_HOLDS,
+        original_runtime_identity: Callable[[], tuple[str, int, str]] | None = None,
+        session_preparation: SessionPreparation | None = None,
     ):
         self.config = config
         self._recovery_holds = recovery_holds
+        self._original_runtime_identity = original_runtime_identity
+        self._session_preparation = session_preparation
         self.events = events
         self.repository_host = repository_host
         self._action_applier = action_applier
@@ -420,7 +425,8 @@ class SessionLauncher:
             run_dir=run_assets.run_dir,
             worktree_path=worktree_path,
             callback_endpoint=self._agent_callback_endpoint,
-        ) + completion_capability_export(self._issue_run_allocator, run_assets)
+        ) + completion_capability_export(self._issue_run_allocator, run_assets,
+            docker=self.config.terminal_adapter == "issue_orchestrator.execution.terminal_docker:DockerPlugin")
 
     # ─────────────────────────────────────────────────────────────────────────
     # Phase helpers for launch_issue_session
@@ -1040,7 +1046,7 @@ class SessionLauncher:
 
             # Create terminal session
             step_start = time.time()
-            session_created = self._spawn(session_name, command, worktree_path, issue.title, agent_config)
+            session_created = self._spawn(session_name, command, worktree_path, issue.title, agent_config, run)
             logger.info(
                 "[launch] Issue session create result: issue=%s session=%s created=%s",
                 issue.number,
@@ -1389,7 +1395,7 @@ class SessionLauncher:
                 command,
             )
 
-            session_created = self._spawn(session_name, command, worktree_path, issue.title, agent_config)
+            session_created = self._spawn(session_name, command, worktree_path, issue.title, agent_config, run)
             if not session_created:
                 log_transition("issue", issue.number, "LAUNCHING", "FAILED", "session creation failed")
                 self._retry_in_progress(
@@ -1752,7 +1758,7 @@ class SessionLauncher:
             )
 
             # Create session
-            session_created = self._spawn(session_name, command, worktree_path, f"Review PR #{review.pr_number}", agent_config)
+            session_created = self._spawn(session_name, command, worktree_path, f"Review PR #{review.pr_number}", agent_config, run)
             logger.info(
                 "[launch] Review session create result: issue=%s pr=%s session=%s created=%s",
                 review.issue_number,
@@ -2050,7 +2056,7 @@ class SessionLauncher:
                 command,
             )
 
-            session_created = self._spawn(session_name, command, worktree_path, issue_title, agent_config)
+            session_created = self._spawn(session_name, command, worktree_path, issue_title, agent_config, run)
             logger.info(
                 "[launch] Retrospective review create result: issue=%s session=%s created=%s",
                 review.issue_number,
@@ -2122,6 +2128,8 @@ class SessionLauncher:
         work_claim: LaunchWorkClaim = NO_LAUNCH_WORK_CLAIM,
     ) -> LaunchResult:
         """Launch a rework session to fix issues found in review."""
+        if self.config.terminal_adapter == "issue_orchestrator.execution.terminal_docker:DockerPlugin":
+            raise ValueError("Docker rework requires allocation-bound completion authority")
         if result := callback_endpoint_not_ready(self._agent_callback_endpoint):
             return result
         from .scoped_rework_launch import ScopedReworkLaunch
@@ -2136,6 +2144,7 @@ class SessionLauncher:
             label_manager=self._lm,
             session_exists=self._session_exists,
             create_session=self._create_session,
+            session_preparation=self._session_preparation or NO_SESSION_PREPARATION,
             apply_actions=self._apply_actions,
             worktree_reuse_options=self._worktree_reuse_options,
             session_identity_launch_metadata=self._session_identity_launch_metadata,
@@ -2148,6 +2157,8 @@ class SessionLauncher:
             resolve_stack_decision=self._dependency_gate.stack_base_decision_for_issue,
             coder_prompt_addendum=self._coder_prompt_addendum,
             scoped_rework=ScopedReworkLaunch(self._tech_lead_authority, self.repository_host, self._action_applier.apply),
+            claim_manager=self._claim_manager,
+            original_runtime_identity=self._original_runtime_identity,
         )
         return launch_rework_flow(
             rework, active_sessions, deps, work_claim=work_claim
@@ -2198,6 +2209,7 @@ class SessionLauncher:
         if self._provider_command_wrapper is None:
             self._provider_command_wrapper = ProviderCommandWrapper(
                 self.config.provider_resilience.short_retry, self._provider_gate.lane_for_agent if self._provider_gate else None,
+                maximum_attempts=1 if self._session_preparation is not None else None,
             )
         return self._provider_command_wrapper
 
@@ -2206,7 +2218,7 @@ class SessionLauncher:
         return dict(self._provider_credentials.session_env(provider)) or None
 
     def _spawn(
-        self, name: str, command: str, worktree: Path, title: str, agent_config: "AgentConfig",
+        self, name: str, command: str, worktree: Path, title: str, agent_config: "AgentConfig", run: SessionRunAssets,
     ) -> bool:
         """Start one agent session, always with its provider credentials.
 
@@ -2217,7 +2229,13 @@ class SessionLauncher:
         empty mapping distinguishes "this provider supplies its own login" from
         "the key resolved to nothing".
         """
-        secret_env = dict(self._provider_credentials.session_env(agent_config.provider))
+        if self.config.terminal_adapter == "issue_orchestrator.execution.terminal_docker:DockerPlugin":
+            secret_env = dict(self._provider_credentials.session_env(agent_config.provider, docker=True))
+            secret_env = docker_session_secret_env(self._issue_run_allocator, run, secret_env)
+        else:
+            secret_env = dict(self._provider_credentials.session_env(agent_config.provider))
+        if self._session_preparation is not None:
+            self._session_preparation.prepare_session(run, name, command)
         return self._create_session(name, command, worktree, title, secret_env or None)
 
     def _check_provider_ready(

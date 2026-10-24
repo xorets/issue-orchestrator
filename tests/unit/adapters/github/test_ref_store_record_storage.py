@@ -355,3 +355,37 @@ class TestDelete:
         del client.refs[f"{REF_PREFIX}/tech-lead-patterns"]
 
         assert store.delete(snapshot) is True
+
+
+@pytest.mark.parametrize('legacy',[False,True])
+def test_exact_anchor_read_uses_one_named_commit_and_preserves_existing_formats(legacy):
+    from hashlib import sha1
+    class RecordingGitData(FakeGitHubRefClient):
+        def __init__(self):
+            super().__init__();self.reads=[]
+        def _mint(self,kind):
+            return sha1(super()._mint(kind).encode()).hexdigest()
+        def get_git_ref(self,ref):
+            self.reads.append(('ref',ref));return super().get_git_ref(ref)
+        def get_git_commit(self,sha):
+            self.reads.append(('commit',sha));return super().get_git_commit(sha)
+    client=RecordingGitData();store=GitRefCasStore(client,ref_prefix=REF_PREFIX)
+    seed=client.seed_legacy_message_record if legacy else client.seed_record
+    anchor=seed(REF_PREFIX+'/one','selected')
+    seed(REF_PREFIX+'/one','renewed')
+    client.reads.clear()
+    snapshot=store.read_at_commit('one',anchor)
+    assert snapshot.record=='selected' and snapshot.commit_sha==anchor
+    assert client.reads==[('commit',anchor)]
+
+
+def test_exact_anchor_refuses_mismatched_commit_and_missing_objects():
+    from hashlib import sha1
+    class HexGitData(FakeGitHubRefClient):
+        def _mint(self,kind):return sha1(super()._mint(kind).encode()).hexdigest()
+    client=HexGitData();store=GitRefCasStore(client,ref_prefix=REF_PREFIX)
+    anchor=client.seed_record(REF_PREFIX+'/one','selected')
+    client.commits[anchor]['sha']='f'*40
+    with pytest.raises(ValueError,match='response differs'):store.read_at_commit('one',anchor)
+    with pytest.raises(KeyError):store.read_at_commit('one','0'*40)
+    with pytest.raises(ValueError,match='exact commit SHA'):store.read_at_commit('one','main')

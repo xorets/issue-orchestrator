@@ -18,13 +18,14 @@ from pathlib import Path
 from typing import Optional
 
 from ..domain.attempt import Attempt, AttemptKey
+from ..domain.completion_intake import CompletionIntakeEntry
 from ..infra import validation_timings as timings
 from ..infra.atomic_json import atomic_write_json
 from ..infra.emit import emit_event
 from ..ports import CommandRunner, CommandResult, WorkingCopy
 from ..ports.attempt_store import AttemptStore
 from ..ports.session_output import ValidationRecord
-from .isolation import build_runtime_tool_env
+from .isolation import build_validation_tool_env
 from .validation_record_store import ValidationRecordStore as ValidationRecordStore
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,7 @@ class ValidationRunner:
         timeout_seconds: int = 1800,
         cwd: Optional[Path] = None,
         session_output_dir: Optional[Path] = None,
+        completion_entry: CompletionIntakeEntry | None = None,
     ) -> ValidationRecord:
         """Run a validation command and return a record.
 
@@ -120,12 +122,13 @@ class ValidationRunner:
             },
         )
 
+        environment = build_validation_tool_env(self.store.worktree, completion_entry)
         try:
             result = self.command_runner.run(
                 command,
                 shell=True,
                 cwd=cwd,
-                env=build_runtime_tool_env(self.store.worktree),
+                env=environment,
                 timeout_seconds=timeout_seconds,
             )
         except Exception as exc:

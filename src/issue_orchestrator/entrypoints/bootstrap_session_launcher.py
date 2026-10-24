@@ -9,6 +9,8 @@ rather than handing the whole bundle across a layer boundary
 
 from __future__ import annotations
 
+from ..execution.original_delivery_processes import engine_identity
+
 from typing import TYPE_CHECKING, Callable, Optional
 
 from ..control.needs_human_block import SharedNeedsHumanBlock
@@ -24,6 +26,7 @@ from ..ports.provider_credentials import (
 )
 from ..ports.provider_readiness import ProviderReadinessProbe
 from ..ports.issue_run_allocator import IssueRunAllocator
+from ..ports.session_preparation import SessionPreparation
 
 if TYPE_CHECKING:
     from ..control.dependency_evaluator import DependencyEvaluator
@@ -67,6 +70,11 @@ def build_session_launcher_factory(
     recovery_holds: RecoveryHolds = NO_RECOVERY_HOLDS,
 ) -> "SessionLauncherFactory":
     """Bind the application dependencies; return the facade-facing factory."""
+    preparation = None
+    if config.terminal_adapter == "issue_orchestrator.execution.terminal_docker:DockerPlugin":
+        if not isinstance(session_manager.runner, SessionPreparation):
+            raise ValueError("Docker terminal lacks trusted session preparation")
+        preparation = session_manager.runner
 
     def _factory(
         *,
@@ -106,6 +114,8 @@ def build_session_launcher_factory(
             needs_human_block=needs_human_block,
             coder_prompt_addendum=coder_prompt_addendum,
             recovery_holds=recovery_holds,
+            original_runtime_identity=engine_identity,
+            session_preparation=preparation,
         )
 
     return _factory

@@ -676,6 +676,7 @@ def test_foreign_repo_real_pty_agent_invocation(
         working_dir=str(wt),
         title="PTY agent test",
         session_name=session_name,
+        secret_env=None,
     )
     assert created is True, "create_session should return True"
 
