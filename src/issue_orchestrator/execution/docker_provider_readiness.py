@@ -97,9 +97,56 @@ def admitted_readiness_context(provider: str, credentials: ProviderCredentials, 
             current = home.lstat()
             if (current.st_dev,current.st_ino) != (identity.st_dev,identity.st_ino):
                 raise ValueError('Docker readiness runtime identity changed')
+            _clear_private_home(descriptor, identity)
+            current = home.lstat()
+            if (current.st_dev,current.st_ino) != (identity.st_dev,identity.st_ino):
+                raise ValueError('Docker readiness runtime identity changed')
             home.rmdir()
         finally:
             os.close(descriptor)
+
+
+def _clear_private_home(directory_fd: int, identity: os.stat_result) -> None:  # noqa: C901
+    """Remove bounded CLI-created cache without traversing links or other devices."""
+    remaining = 256
+
+    def clear(fd: int, depth: int) -> None:  # noqa: C901
+        nonlocal remaining
+        if depth > 8:
+            raise ValueError('Docker readiness cache nesting exceeded')
+        names = []
+        with os.scandir(fd) as entries:
+            for entry in entries:
+                remaining -= 1
+                if remaining < 0:
+                    raise ValueError('Docker readiness cache entry limit exceeded')
+                names.append(entry.name)
+        for name in names:
+            before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            if before.st_uid != identity.st_uid or before.st_dev != identity.st_dev:
+                raise ValueError('Docker readiness cache ownership changed')
+            if stat.S_ISDIR(before.st_mode):
+                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                try:
+                    actual = os.fstat(child)
+                    if (actual.st_dev, actual.st_ino) != (before.st_dev, before.st_ino):
+                        raise ValueError('Docker readiness cache directory changed')
+                    clear(child, depth + 1)
+                    after = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                    if (after.st_dev, after.st_ino) != (actual.st_dev, actual.st_ino):
+                        raise ValueError('Docker readiness cache directory changed')
+                    os.rmdir(name, dir_fd=fd)
+                finally:
+                    os.close(child)
+            elif stat.S_ISLNK(before.st_mode) or stat.S_ISREG(before.st_mode) and before.st_nlink == 1:
+                after = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
+                    raise ValueError('Docker readiness cache entry changed')
+                os.unlink(name, dir_fd=fd)
+            else:
+                raise ValueError('Docker readiness cache contains unexpected entry')
+
+    clear(directory_fd, 0)
 
 
 def readiness_task(provider: str) -> tuple[dict, Path, Path]:
