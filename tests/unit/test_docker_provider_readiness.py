@@ -239,42 +239,36 @@ def test_cache_cleanup_refuses_hardlink_after_removing_private_auth(readiness, t
     assert outside.read_text() == 'unchanged' and outside.stat().st_nlink == 2
 
 
-@pytest.mark.parametrize('kind', ['owner', 'device', 'too-many', 'fifo'])
-def test_cache_cleanup_rejects_untrusted_or_unbounded_entries(tmp_path, kind):
-    from issue_orchestrator.execution.docker_provider_readiness import _clear_private_home
-    home = tmp_path / 'home'; home.mkdir(mode=0o700)
-    if kind == 'too-many':
-        for number in range(257): (home / str(number)).touch()
-    elif kind == 'fifo':
-        os.mkfifo(home / 'untrusted')
-    else:
-        (home / 'entry').touch()
-    fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    try:
-        info = os.fstat(fd)
-        identity = SimpleNamespace(st_uid=info.st_uid + (kind == 'owner'), st_dev=info.st_dev + (kind == 'device'))
-        with pytest.raises(ValueError): _clear_private_home(fd, identity)
-    finally:
-        os.close(fd)
-    assert list(home.iterdir())
-
-
-def test_cache_cleanup_refuses_changed_entry_identity(tmp_path, monkeypatch):
-    from issue_orchestrator.execution.docker_provider_readiness import _clear_private_home
-    home = tmp_path / 'home'; home.mkdir(mode=0o700); (home / 'entry').touch()
-    fd = os.open(home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+@pytest.mark.parametrize('kind', ['owner', 'device', 'too-many', 'fifo', 'changed'])
+def test_cache_cleanup_rejects_untrusted_or_unbounded_entries(readiness, monkeypatch, kind):
+    packet, template, output, credentials = readiness
+    homes = []
     real_stat = os.stat
     seen = []
-    def changed(path, *args, **kwargs):
-        info = real_stat(path, *args, **kwargs)
-        if path == 'entry' and kwargs.get('dir_fd') == fd:
-            seen.append(1)
-            if len(seen) == 2:
-                return SimpleNamespace(st_dev=info.st_dev, st_ino=info.st_ino + 1)
-        return info
-    try:
-        monkeypatch.setattr(os, 'stat', changed)
-        with pytest.raises(ValueError, match='entry changed'): _clear_private_home(fd, os.fstat(fd))
-    finally:
-        os.close(fd)
-    assert (home / 'entry').exists()
+    class Runner:
+        def __init__(self, environment, deadline, limit, executable):
+            self.home = Path(environment['CODEX_HOME']); homes.append(self.home)
+        def run(self, command, **kwargs):
+            if kind == 'too-many':
+                for number in range(257): (self.home / str(number)).touch()
+            elif kind == 'fifo':
+                os.mkfifo(self.home / 'entry')
+            else:
+                (self.home / 'entry').touch()
+                def changed(path, *args, **kwargs):
+                    info = real_stat(path, *args, **kwargs)
+                    if path == 'entry' and kwargs.get('dir_fd') is not None:
+                        seen.append(1)
+                        return SimpleNamespace(st_uid=info.st_uid + (kind == 'owner'),
+                            st_dev=info.st_dev + (kind == 'device'),
+                            st_ino=info.st_ino + (kind == 'changed' and len(seen) == 2),
+                            st_mode=info.st_mode, st_nlink=info.st_nlink)
+                    return info
+                monkeypatch.setattr(os, 'stat', changed)
+            return CommandResult(0, '', 'Logged in using ChatGPT')
+    with pytest.raises(DockerReadinessRefused):
+        with docker_readiness_context('codex', Mock(), credentials, runner_factory=Runner) as runner:
+            runner.run(['codex', 'login', 'status'])
+    assert homes and not (homes[0] / 'auth.json').exists()
+    assert list(homes[0].iterdir())
+    if kind == 'changed': assert len(seen) == 2
