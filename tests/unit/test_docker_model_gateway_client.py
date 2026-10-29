@@ -5,6 +5,14 @@ import os
 import time
 import pytest
 
+@pytest.fixture
+def gateway_dir():
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+    with TemporaryDirectory(prefix='io-gateway-', dir='/tmp') as directory:
+        yield Path(directory)
+
+
 @pytest.fixture(autouse=True)
 def gateway_peer(monkeypatch):
     raw = open("/proc/self/stat").read()
@@ -15,7 +23,7 @@ from issue_orchestrator.execution.docker_model_gateway_client import forward_mod
 
 
 @pytest.mark.asyncio
-async def test_private_uds_stream_and_request_scope(tmp_path):
+async def test_private_uds_stream_and_request_scope(gateway_dir):
     seen=[]
     async def serve(reader, writer):
         head=await reader.readuntil(b'\r\n\r\n')
@@ -24,10 +32,10 @@ async def test_private_uds_stream_and_request_scope(tmp_path):
         seen.append((head,json.loads(body)))
         writer.write(b'HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: test\n\n')
         await writer.drain();writer.close();await writer.wait_closed()
-    socket=tmp_path/'model-gateway.sock'
+    socket=gateway_dir/'model-gateway.sock'
     server=await asyncio.start_unix_server(serve,path=str(socket));os.chmod(socket,0o600)
     try:
-        chunks=[x async for x in forward_model_request(controller_home=str(tmp_path),instance_token='a'*64,
+        chunks=[x async for x in forward_model_request(controller_home=str(gateway_dir),instance_token='a'*64,
             context={'deadline_unix_ns':time.time_ns()+10_000_000_000,'max_output_bytes':100},
             request={'model':'test'},provider_auth='PRIVATE-DUMMY')]
     finally:
@@ -39,18 +47,18 @@ async def test_private_uds_stream_and_request_scope(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_expired_deadline_refuses_before_connect(tmp_path):
-    socket=tmp_path/'model-gateway.sock'
+async def test_expired_deadline_refuses_before_connect(gateway_dir):
+    socket=gateway_dir/'model-gateway.sock'
     server=await asyncio.start_unix_server(lambda *_:None,path=str(socket));os.chmod(socket,0o600)
     try:
         with pytest.raises(ValueError,match='deadline expired'):
-            _=[x async for x in forward_model_request(controller_home=str(tmp_path),instance_token='a'*64,
+            _=[x async for x in forward_model_request(controller_home=str(gateway_dir),instance_token='a'*64,
                 context={'deadline_unix_ns':time.time_ns()-1,'max_output_bytes':100},request={},provider_auth='dummy')]
     finally:
         server.close();await server.wait_closed()
 
 
-def test_actual_callback_router_to_private_uds(tmp_path, monkeypatch, auth_enabled_control_client):
+def test_actual_callback_router_to_private_uds(gateway_dir, monkeypatch, auth_enabled_control_client):
     import threading
     from http.server import BaseHTTPRequestHandler
     from socketserver import UnixStreamServer
@@ -66,9 +74,9 @@ def test_actual_callback_router_to_private_uds(tmp_path, monkeypatch, auth_enabl
             self.send_response(200);self.send_header('Content-Type','text/event-stream');self.end_headers()
             self.wfile.write(b'data: dummy\n\n')
         def log_message(self,*args): pass
-    path=tmp_path/'model-gateway.sock'; server=UnixStreamServer(str(path),Handler);os.chmod(path,0o600)
+    path=gateway_dir/'model-gateway.sock'; server=UnixStreamServer(str(path),Handler);os.chmod(path,0o600)
     thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
-    context={'grant_kind':'builder-docker-container-model-authorization','controller_home':str(tmp_path),'deadline_unix_ns':time.time_ns()+10_000_000_000,'max_output_bytes':1000}
+    context={'grant_kind':'builder-docker-container-model-authorization','controller_home':str(gateway_dir),'deadline_unix_ns':time.time_ns()+10_000_000_000,'max_output_bytes':1000}
     engine=SimpleNamespace(docker_model_gateway_context=lambda capability:context if capability=='cap' else (_ for _ in ()).throw(ValueError('denied')), docker_model_gateway_credentials=lambda:{'XORETS_DOCKER_MODEL_AUTH_JSON':'DUMMY-PRIVATE'})
     deps=ControlApiIssueDependencies(get_orchestrator=lambda:engine,with_state_lock=lambda fn:fn())
     monkeypatch.setitem(control_api.control_app.dependency_overrides,get_control_api_issue_dependencies,lambda:deps)
@@ -169,19 +177,19 @@ async def test_oversized_body_refuses_before_credential_lookup(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_wrong_peer_receives_no_auth_or_request(tmp_path, monkeypatch):
+async def test_wrong_peer_receives_no_auth_or_request(gateway_dir, monkeypatch):
     seen = []
     async def serve(reader, writer):
         seen.append(await reader.read())
         writer.close()
         await writer.wait_closed()
-    path = tmp_path / 'model-gateway.sock'
+    path = gateway_dir / 'model-gateway.sock'
     server = await asyncio.start_unix_server(serve, path=str(path))
     os.chmod(path, 0o600)
     monkeypatch.setenv('ISSUE_ORCHESTRATOR_MODEL_GATEWAY_BIRTH', '0')
     try:
         with pytest.raises(ValueError, match='peer identity differs'):
-            _ = [chunk async for chunk in forward_model_request(controller_home=str(tmp_path),
+            _ = [chunk async for chunk in forward_model_request(controller_home=str(gateway_dir),
                 instance_token='a' * 64, context={'deadline_unix_ns':time.time_ns()+1_000_000_000,
                 'max_output_bytes':100}, request={}, provider_auth='PRIVATE')]
         await asyncio.sleep(0.01)
@@ -225,7 +233,7 @@ async def test_synthetic_route_uses_fixed_dummy_without_keyring(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_actual_builder_listener_with_engine_client(tmp_path, monkeypatch):
+async def test_actual_builder_listener_with_engine_client(gateway_dir, monkeypatch):
     """Actual listener and client; admission and upstream are explicitly substituted."""
     import sys
     from pathlib import Path
@@ -237,7 +245,7 @@ async def test_actual_builder_listener_with_engine_client(tmp_path, monkeypatch)
     monkeypatch.syspath_prepend(str(builder))
     import docker_model_gateway as gateway
     seen = []
-    server = gateway.ModelGatewayServer(tmp_path / 'model-gateway.sock', tmp_path, tmp_path, 'a' * 64,
+    server = gateway.ModelGatewayServer(gateway_dir / 'model-gateway.sock', gateway_dir, gateway_dir, 'a' * 64,
                                         lambda pid, context: pid == os.getpid())
     def prepare(_state, _artifact, context, request, auth):
         seen.append((context, request, auth))
@@ -247,7 +255,7 @@ async def test_actual_builder_listener_with_engine_client(tmp_path, monkeypatch)
              patch.object(gateway, 'stream_request', side_effect=lambda *args: args[-1](b'event: response.completed\n\n')):
             context = {'builder_run_id': 'run-fixture', 'grant_kind':'builder-docker-container-synthetic-authorization',
                        'deadline_unix_ns':time.time_ns()+5_000_000_000, 'max_output_bytes':1000}
-            chunks = [part async for part in forward_model_request(controller_home=str(tmp_path), instance_token='a'*64,
+            chunks = [part async for part in forward_model_request(controller_home=str(gateway_dir), instance_token='a'*64,
                       context=context, request={'input':[]}, provider_auth='dummy')]
         assert b''.join(chunks) == b'event: response.completed\n\n'
         assert seen == [(context, {'input': []}, 'dummy')]
