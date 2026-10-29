@@ -75,7 +75,31 @@ def _public_proof_bytes(path: Path) -> bytes:
     return bytes(raw)
 
 
-def require_container_only_mounts(packet: dict) -> None:  # noqa: C901 - verify each coupled mount boundary
+def _check_container_mount(item: object, protected: set[Path], empty: Path, found: set[Path]) -> bool:
+    if (type(item) is not dict or set(item) != {"source", "target", "read_only"} or
+            type(item["source"]) is not str or type(item["target"]) is not str or
+            type(item["read_only"]) is not bool):
+        raise ValueError("Docker container-only mount entry differs")
+    source, target = Path(item["source"]), Path(item["target"])
+    if (not source.is_absolute() or not target.is_absolute() or
+            os.path.normpath(item["source"]) != item["source"] or
+            os.path.normpath(item["target"]) != item["target"]):
+        raise ValueError("Docker container-only mount path differs")
+    if not item["read_only"] and empty.is_relative_to(source):
+        raise ValueError("Docker readonly-empty source is writable")
+    if target in protected:
+        if target in found or item["read_only"] is not True or source not in (target, empty):
+            raise ValueError("Docker protected workspace overlay differs")
+        found.add(target)
+        return source == empty
+    elif source == empty or source != target:
+        raise ValueError("Docker container-only mount alias differs")
+    if any(target != root and target.is_relative_to(root) for root in protected):
+        raise ValueError("Docker protected workspace overlay has nested mount")
+    return False
+
+
+def require_container_only_mounts(packet: dict) -> None:
     """Enforce the selected workspace overlays before any container is created."""
     mounts = packet.get("mounts")
     workspace = Path(packet["working_dir"])
@@ -86,26 +110,7 @@ def require_container_only_mounts(packet: dict) -> None:  # noqa: C901 - verify 
     found = set()
     alias_used = False
     for item in mounts:
-        if (type(item) is not dict or set(item) != {"source", "target", "read_only"} or
-                type(item["source"]) is not str or type(item["target"]) is not str or
-                type(item["read_only"]) is not bool):
-            raise ValueError("Docker container-only mount entry differs")
-        source, target = Path(item["source"]), Path(item["target"])
-        if (not source.is_absolute() or not target.is_absolute() or
-                os.path.normpath(item["source"]) != item["source"] or
-                os.path.normpath(item["target"]) != item["target"]):
-            raise ValueError("Docker container-only mount path differs")
-        if not item["read_only"] and empty.is_relative_to(source):
-            raise ValueError("Docker readonly-empty source is writable")
-        if target in protected:
-            if target in found or item["read_only"] is not True or source not in (target, empty):
-                raise ValueError("Docker protected workspace overlay differs")
-            found.add(target)
-            alias_used = alias_used or source == empty
-        elif source == empty or source != target:
-            raise ValueError("Docker container-only mount alias differs")
-        if any(target != root and target.is_relative_to(root) for root in protected):
-            raise ValueError("Docker protected workspace overlay has nested mount")
+        alias_used = _check_container_mount(item, protected, empty, found) or alias_used
     if found != protected:
         raise ValueError("Docker protected workspace overlay is incomplete")
     if alias_used:
@@ -116,7 +121,12 @@ def require_container_only_mounts(packet: dict) -> None:  # noqa: C901 - verify 
             raise ValueError("Docker readonly-empty source differs")
 
 
-def _require_admission(packet: dict, outer: dict, inner: dict) -> None:  # noqa: C901 - validate the complete sealed admission
+def _require_selected_mounts(packet: dict, authorization: dict) -> None:
+    if authorization.get("kind") in CONTAINER_GRANT_KINDS:
+        require_container_only_mounts(packet)
+
+
+def _require_admission(packet: dict, outer: dict, inner: dict) -> None:
     if type(outer.get("schema_version")) is not int:
         raise ValueError("Docker worker admission version is invalid")
     if outer.get("schema_version") == 1:
@@ -146,8 +156,7 @@ def _require_admission(packet: dict, outer: dict, inner: dict) -> None:  # noqa:
             authorization.get("acceptance_sha256") != acceptance["sha256"]):
         raise ValueError("Docker root authorization belongs to another delivery subject")
     require_current_model_grant(packet, inner, authorization)
-    if authorization.get("kind") in CONTAINER_GRANT_KINDS:
-        require_container_only_mounts(packet)
+    _require_selected_mounts(packet, authorization)
     _require_model_controls(packet)
 
 

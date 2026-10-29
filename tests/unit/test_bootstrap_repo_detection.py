@@ -706,7 +706,7 @@ class TestBuildOrchestratorForTesting:
                 planner=None,
             )
 
-            assert orch._session_launcher._dependency_evaluator is orch.scheduler.dependency_evaluator  # noqa: SLF001
+            assert orch.session_launcher._dependency_evaluator is orch.scheduler.dependency_evaluator  # noqa: SLF001
 
     def test_create_planner_wires_dependency_evaluator_to_scheduler(
         self, minimal_config: Config, mock_github: MagicMock

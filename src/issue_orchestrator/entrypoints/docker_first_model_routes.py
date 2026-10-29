@@ -94,3 +94,6 @@ def first_model(body: FirstModelRequest, deps: ControlApiIssueDependency,
         raise HTTPException(401, "Invalid active run capability") from error
     except (ValueError, OSError) as error:
         raise HTTPException(409, "Docker first-model original custody unavailable") from error
+
+from .docker_model_gateway_routes import router as docker_model_gateway_router
+docker_first_model_router.include_router(docker_model_gateway_router)

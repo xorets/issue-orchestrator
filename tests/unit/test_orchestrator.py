@@ -1918,7 +1918,7 @@ class TestRunLoop:
         reconcile = MagicMock()
 
         with patch.object(
-            orchestrator._session_launcher,  # noqa: SLF001
+            orchestrator.session_launcher,  # noqa: SLF001
             "reconcile_stale_tech_lead_needs_human",
             reconcile,
         ):

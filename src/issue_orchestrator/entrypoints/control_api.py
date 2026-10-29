@@ -1289,6 +1289,3 @@ async def control_issue_detail(
 
 from .docker_first_model_routes import docker_first_model_router
 control_app.include_router(docker_first_model_router)
-
-from .docker_model_gateway_routes import router as docker_model_gateway_router
-control_app.include_router(docker_model_gateway_router)
