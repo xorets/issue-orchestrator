@@ -1272,7 +1272,7 @@ def test_generated_sandbox_settings_enforced_by_os(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(not _codex_available(), reason="codex CLI not installed")
-@pytest.mark.skipif(sys.platform.startswith("win"), reason="seatbelt is macOS-only")
+@pytest.mark.skipif(sys.platform != "darwin", reason="seatbelt enforcement is macOS-specific")
 @pytest.mark.usefixtures("isolated_codex_home")
 def test_generated_codex_profile_is_enforced_by_seatbelt(tmp_path: Path) -> None:
     """The generated profile is enforced by the OS, proven without a model.
