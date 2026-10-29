@@ -38,3 +38,13 @@ def docker_first_model(deps: OrchestratorDeps, controller: PauseController, capa
             controller.pause(reason=PauseReason.OPERATOR, actor=PauseActor.CONTROL_API,
                 detail="Authenticated Docker model preflight for " + run.run_id)
         return owner.first_model(run, command)
+
+
+def docker_model_gateway_context(deps: OrchestratorDeps, capability: str, *, shutdown_requested: Callable[[], bool], state_lock: threading.RLock) -> dict[str, object]:
+    """Resolve live ownership under the state lock; never hold it during forwarding."""
+    with state_lock:
+        run = deps.issue_run_ledger.run_for_capability(capability)
+        owner = deps.original_delivery_owner
+        if shutdown_requested() or owner is None or not deps.health_gate.check(paused=False).can_proceed:
+            raise ValueError("Docker model gateway owner or engine health unavailable")
+        return owner.model_gateway_context(run)

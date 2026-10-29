@@ -110,6 +110,46 @@ class OriginalDeliveryOwner:
         evidence = self.docker_custody.seal_first_model(session, receipt)
         return {"schema_version": 1, "kind": "builder-docker-first-model", "receipt": receipt, "controller_evidence": evidence}
 
+    def model_gateway_context(self, run: SessionRunAssets) -> dict[str, object]:
+        """Bind a live allocated Docker request without creating or resuming a hold."""
+        require_model_preflight_barrier(self.state)
+        if self.docker_custody is None or self.config.terminal_adapter != "issue_orchestrator.execution.terminal_docker:DockerPlugin":
+            raise ValueError("Docker model gateway custody unavailable")
+        assert self.state is not None
+        sessions = [session for session in self.state.active_sessions if session.run_assets == run]
+        if len(sessions) != 1:
+            raise ValueError("Docker model gateway allocation unavailable")
+        session = sessions[0]
+        snapshot = self.docker_custody.model_gateway_snapshot(session)
+        if snapshot['engine_run_id'] != run.run_id:
+            raise ValueError("Docker model gateway allocation changed")
+        if session.key.kind.capabilities.reports_verdict:
+            if snapshot['role'] != 'standard-review':
+                raise ValueError("Docker model gateway review role differs")
+            original = self._review_original(session, snapshot)
+        else:
+            if not session.key.kind.capabilities.open_pr_means_done or session.rework_cycle or snapshot['role'] != 'standard-implementation':
+                raise ValueError("Docker model gateway role differs")
+            original = self.observe(session.issue.number)
+            owner = original['owner']
+            if (not isinstance(owner, dict) or owner['run_id'] != run.run_id or
+                    owner['contract_sha256'] != snapshot['contract_sha256'] or owner['cancelled'] or owner['released'] or
+                    not original['lease_current'] or original['lease_id'] != session.lease_id or
+                    tuple(owner['docker_custody']) != (snapshot['custody'],)):
+                raise ValueError("Docker model gateway original claim or custody differs")
+        if self.docker_custody.model_gateway_snapshot(session) != snapshot:
+            raise ValueError("Docker model gateway custody changed during validation")
+        again = self._review_original(session, snapshot) if session.key.kind.capabilities.reports_verdict else self.observe(session.issue.number)
+        if again != original:
+            raise ValueError("Docker model gateway claim changed during validation")
+        worker = snapshot['worker']
+        keys = ('engine_run_id','builder_run_id','role','model','contract_sha256','outer_sha256','launch_sha256',
+                'projection_sha256','grant_sha256','grant_kind','deadline_unix_ns','max_model_requests','max_output_bytes',
+                'outer_contract_path','inner_contract_path','launch_path','controller_home')
+        return {**{key:snapshot[key] for key in keys}, 'issue_number':session.issue.number,
+                'claim_ref_sha':original['fence'], **{key:worker[key] for key in
+                    ('daemon_id','container_id','provider_exec_id','image_id')}}
+
     def first_model_preflight(self, run: SessionRunAssets, command: DockerFirstModelCommand) -> tuple[Session, dict[str, Any]]:
         """Only the exact active admitted allocation may request its fixed planner barrier."""
         require_model_preflight_barrier(self.state)

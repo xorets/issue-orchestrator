@@ -552,6 +552,14 @@ class Orchestrator:
     def original_delivery(self, issue_number: int, command: "OriginalDeliveryCommand | None" = None) -> dict[str, object]:
         return _original_delivery(self.deps.original_delivery_owner, issue_number, command, state_lock=self.state_lock)
 
+    def docker_model_gateway_credentials(self) -> dict[str, str]:
+        return self._session_launcher.docker_model_credentials()
+
+    def docker_model_gateway_context(self, capability: str) -> dict[str, object]:
+        from ..control.original_delivery_facade import docker_model_gateway_context
+        return docker_model_gateway_context(self.deps, capability,
+            shutdown_requested=lambda: self.shutdown_requested, state_lock=self.state_lock)
+
     def docker_first_model(self, capability: str, command: "DockerFirstModelCommand") -> dict[str, object]:
         return _docker_first_model(self.deps, self.pause_controller, capability, command, shutdown_requested=lambda: self.shutdown_requested, state_lock=self.state_lock)
 

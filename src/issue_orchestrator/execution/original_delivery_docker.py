@@ -21,6 +21,13 @@ class DockerOriginalCustody:
             raise ValueError("Docker first-model provider differs from allocated session")
         return self.runner.first_model_snapshot(session.run_assets, session.terminal_id, contract_sha256, launch_sha256)
 
+    def model_gateway_snapshot(self, session: Session) -> dict:
+        self.verify_session(session)
+        identity = json.loads((session.run_assets.run_dir / "session-identity.json").read_bytes())
+        if session.agent_config.provider != "codex" or identity.get("provider") != "codex":
+            raise ValueError("Docker model gateway requires selected Codex session")
+        return self.runner.model_gateway_snapshot(session.run_assets, session.terminal_id)
+
     def verify_review_parent(self, owner: OriginalDelivery, context: dict) -> None:
         parent, inner = context['review_parent'], context['original_inner']
         rows = [row for row in owner.docker_custody if row.run_id == parent['engine_run_id']]

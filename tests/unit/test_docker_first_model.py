@@ -335,3 +335,22 @@ def test_facade_rechecks_shutdown_after_acquiring_shared_state_custody(sample_or
     assert owner.observe(42)['owner'] is None
     adapter.first_model_snapshot.assert_not_called()
     adapter.seal_first_model.assert_not_called()
+
+
+def test_model_gateway_requires_live_original_and_rechecks_custody(first_model_owner):
+    owner, session, adapter, command = first_model_owner
+    owner.first_model(session.run_assets, command)
+    observed = adapter.first_model_snapshot.return_value
+    gateway = {**observed, 'engine_run_id':command.run_id, 'contract_sha256':command.contract_sha256,
+               'launch_sha256':command.launch_sha256, 'model':'selected', 'grant_sha256':'9'*64,
+               'grant_kind':'builder-docker-container-model-authorization',
+               'max_model_requests':2, 'deadline_unix_ns':1, 'max_output_bytes':100,
+               'outer_contract_path':'/controller/outer','inner_contract_path':'/controller/inner',
+               'launch_path':'/controller/launch','controller_home':'/controller'}
+    adapter.model_gateway_snapshot.return_value = gateway
+    result=owner.model_gateway_context(session.run_assets)
+    assert result['engine_run_id']==command.run_id
+    assert result['claim_ref_sha']==owner.observe(42)['fence']
+    assert adapter.model_gateway_snapshot.call_count==2
+    adapter.model_gateway_snapshot.side_effect=[gateway,{}]
+    with pytest.raises(ValueError): owner.model_gateway_context(session.run_assets)

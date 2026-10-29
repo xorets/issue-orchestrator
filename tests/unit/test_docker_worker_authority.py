@@ -59,7 +59,7 @@ def test_refuses_changed_authority_or_writable_projection(authority, change):
     with pytest.raises(ValueError): worker_environment(packet, {"ISSUE_ORCHESTRATOR_COMPLETION_CAPABILITY": "e" * 64}, "d" * 64)
 
 
-@pytest.mark.parametrize("name", ["XORETS_EXECUTION_CONTRACT", "XORETS_EXECUTION_DIGEST", "ISSUE_ORCHESTRATOR_AGENT_CALLBACK_TOKEN", "ISSUE_ORCHESTRATOR_API_TOKEN", "GH_TOKEN"])
+@pytest.mark.parametrize("name", ["XORETS_EXECUTION_CONTRACT", "XORETS_EXECUTION_DIGEST", "ISSUE_ORCHESTRATOR_AGENT_CALLBACK_TOKEN", "ISSUE_ORCHESTRATOR_MODEL_GATEWAY_TOKEN", "ISSUE_ORCHESTRATOR_API_TOKEN", "GH_TOKEN"])
 def test_provider_credentials_cannot_override_authority_or_add_controller_credentials(authority, name):
     with pytest.raises(ValueError): worker_environment(authority[0], {name: "forged"}, "d" * 64)
 
@@ -251,7 +251,8 @@ def test_selected_provider_port_projects_only_named_model_secret(model_authority
     assert json.loads(result['XORETS_DOCKER_LAUNCH_JSON']) == packet
     assert json.loads(result['XORETS_DOCKER_PROJECTION_JSON'])['CODEX_HOME'] == '/baked/capability/homes/standard-implementation'
     assert secret not in result['XORETS_DOCKER_LAUNCH_JSON'] + result['XORETS_DOCKER_PROJECTION_JSON'] + caplog.text
-    assert result['XORETS_DOCKER_MODEL_AUTH_JSON'] == secret
+    assert 'XORETS_DOCKER_MODEL_AUTH_JSON' not in result
+    assert secret not in str(result)
 
 
 def model_control_marker(packet, command):
@@ -476,3 +477,116 @@ def test_current_model_permission_refuses_before_named_credential_lookup(model_a
     with pytest.raises(ValueError,match='current finite'):
         model_projection_snapshot(packet)
     assert reads==[]
+
+
+def test_container_model_grant_requires_finite_request_limit():
+    import time
+    from issue_orchestrator.execution.docker_worker_authority import require_current_model_grant
+    now = time.time_ns()
+    bounds = {'deadline_unix_ns': now + 10_000_000_000}
+    inner = {'role': 'standard-implementation', 'capabilities': {'model': 'model-a'}, 'bounds': bounds}
+    packet = {'deadline_unix_ns': now + 5_000_000_000}
+    grant = {'schema_version': 2, 'kind': 'builder-docker-container-model-authorization',
+             'role': 'standard-implementation', 'model': 'model-a', 'bounds': bounds,
+             'expires_unix_ns': now + 20_000_000_000, 'max_model_requests': 2}
+    require_current_model_grant(packet, inner, grant)
+    for bad in (0, True, 100001, None):
+        with pytest.raises(ValueError):
+            require_current_model_grant(packet, inner, dict(grant, max_model_requests=bad))
+
+
+def test_container_model_worker_rejects_unapproved_provider_environment(model_authority):
+    import json
+    packet, _, outer, files, _, seal = model_authority
+    grant_path = files[packet['admission_proofs']['authorization']]
+    grant = json.loads(grant_path.read_bytes())
+    grant.update(schema_version=2, kind='builder-docker-container-model-authorization', max_model_requests=3)
+    grant_path.chmod(0o600);grant_path.write_bytes(canonical(grant));grant_path.chmod(0o400)
+    outer['authorization']['sha256'] = sha256(canonical(grant)).hexdigest()
+    packet['mounts'].extend({'source': str(Path(packet['working_dir']) / name), 'target': str(Path(packet['working_dir']) / name), 'read_only': True} for name in ('.codex', '.agents', '.issue-orchestrator'))
+    seal()
+    allowed = {'ISSUE_ORCHESTRATOR_COMPLETION_CAPABILITY':'e'*64,
+               'XORETS_DOCKER_MODEL_AUTH_JSON':'{"token":"controller-only"}'}
+    value = worker_environment(packet, allowed, 'd'*64)
+    assert 'XORETS_DOCKER_MODEL_AUTH_JSON' not in value
+    for extra in ('OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'ARBITRARY_TRANSPORT_SECRET'):
+        with pytest.raises(ValueError): worker_environment(packet, {**allowed, extra:'sentinel'}, 'd'*64)
+
+
+def test_danger_full_access_requires_selected_root_sealed_container_grant(model_authority, tmp_path, monkeypatch):
+    import json
+    from issue_orchestrator.execution.agent_runner_providers.codex import _validate_orchestrated_safety
+    packet, _, outer, files, _, seal = model_authority
+    grant_path = files[packet['admission_proofs']['authorization']]
+    grant = json.loads(grant_path.read_bytes())
+    grant.update(schema_version=2, kind='builder-docker-container-model-authorization', max_model_requests=3)
+    grant_path.chmod(0o600);grant_path.write_bytes(canonical(grant));grant_path.chmod(0o400)
+    outer['authorization']['sha256'] = sha256(canonical(grant)).hexdigest()
+    packet['mounts'].extend({'source': str(Path(packet['working_dir']) / name), 'target': str(Path(packet['working_dir']) / name), 'read_only': True} for name in ('.codex', '.agents', '.issue-orchestrator'))
+    seal()
+    template = tmp_path/'template.json';template.write_bytes(canonical(packet));template.chmod(0o400)
+    monkeypatch.setenv('ISSUE_ORCHESTRATOR_DOCKER_TEMPLATE',str(template))
+    monkeypatch.setenv('XORETS_EXECUTION_CONTRACT',packet['worker_authority']['engine_contract_path'])
+    monkeypatch.setenv('XORETS_EXECUTION_DIGEST',packet['contract_sha256'])
+    _validate_orchestrated_safety(sandbox_scope=None,approval_mode='full-auto',sandbox_mode='danger-full-access')
+    with pytest.raises(ValueError):
+        _validate_orchestrated_safety(sandbox_scope=None,approval_mode='yolo',sandbox_mode='danger-full-access')
+    monkeypatch.setenv('XORETS_EXECUTION_DIGEST','f'*64)
+    with pytest.raises(ValueError):
+        _validate_orchestrated_safety(sandbox_scope=None,approval_mode='full-auto',sandbox_mode='danger-full-access')
+
+
+@pytest.mark.parametrize('change',['missing','writable','duplicate','nested','foreign-alias','traversal','overlimit'])
+def test_container_workspace_overlay_refuses_unsafe_mounts(change):
+    from issue_orchestrator.execution.docker_worker_authority import require_container_only_mounts
+    root='/srv/builder/tasks/run-'+'a'*32
+    workspace=root+'/workspace'
+    overlays=[{'source':workspace+'/'+name,'target':workspace+'/'+name,'read_only':True}
+              for name in ('.codex','.agents','.issue-orchestrator')]
+    packet={'builder_run_id':'run-'+'a'*32,'working_dir':workspace,'mounts':overlays}
+    require_container_only_mounts(packet)
+    if change=='missing': packet['mounts'].pop()
+    elif change=='writable': packet['mounts'][0]['read_only']=False
+    elif change=='duplicate': packet['mounts'].append(dict(overlays[0]))
+    elif change=='nested': packet['mounts'].append({'source':workspace+'/.codex/x','target':workspace+'/.codex/x','read_only':True})
+    elif change=='foreign-alias': packet['mounts'].append({'source':root+'/readonly-empty','target':workspace+'/other','read_only':True})
+    elif change=='traversal': packet['mounts'].append({'source':workspace+'/.codex/../escape','target':workspace+'/.codex/../escape','read_only':False})
+    else: packet['mounts'].extend({'source':workspace+'/p'+str(i),'target':workspace+'/p'+str(i),'read_only':True} for i in range(34))
+    with pytest.raises(ValueError): require_container_only_mounts(packet)
+
+
+def test_synthetic_grant_requires_exact_subject_and_capability():
+    import time
+    from issue_orchestrator.execution.docker_worker_authority import require_current_model_grant
+    now = time.time_ns()
+    bounds = {'deadline_unix_ns': now + 60_000_000_000}
+    inner = {'repository': {'name': 'local/one'}, 'issue': {'number': 42},
+             'role': 'standard-implementation', 'bounds': bounds,
+             'capabilities': {'model': 'test', 'capability_bundle_sha256': 'a' * 64}}
+    grant = {'schema_version': 2, 'kind': 'builder-docker-container-synthetic-authorization',
+             'max_model_requests': 8, 'fixture_capability_sha256': 'a' * 64,
+             'role': inner['role'], 'model': 'test', 'bounds': bounds,
+             'expires_unix_ns': now + 120_000_000_000}
+    packet = {'deadline_unix_ns': bounds['deadline_unix_ns']}
+    require_current_model_grant(packet, inner, grant)
+    for key, value in [('fixture_capability_sha256', 'b' * 64), ('max_model_requests', 0)]:
+        with pytest.raises(ValueError):
+            require_current_model_grant(packet, inner, {**grant, key: value})
+    with pytest.raises(ValueError):
+        require_current_model_grant(packet, {**inner, 'repository': {'name': 'other/repo'}}, grant)
+
+
+def test_builder_generated_overlay_fixture(monkeypatch):
+    """Consume the actual Builder producer output when explicitly supplied."""
+    import json
+    import os
+    from issue_orchestrator.execution.docker_worker_authority import require_container_only_mounts
+    path = os.environ.get('BUILDER_OVERLAY_FIXTURE')
+    if not path:
+        pytest.skip('Builder overlay fixture not supplied')
+    packet = json.loads(Path(path).read_bytes())
+    require_container_only_mounts(packet)
+    overlay = next(item for item in packet['mounts'] if item['target'] == packet['working_dir'] + '/.codex')
+    overlay['read_only'] = False
+    with pytest.raises(ValueError):
+        require_container_only_mounts(packet)

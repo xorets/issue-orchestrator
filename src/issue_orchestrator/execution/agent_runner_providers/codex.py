@@ -63,6 +63,9 @@ def _validate_orchestrated_safety(
             "it would expose the isolated hook runtime to agent writes"
         )
     if sandbox_scope is None and sandbox_mode == "danger-full-access":
+        from ..docker_worker_authority import docker_container_only_requested
+        if docker_container_only_requested():
+            return
         raise ValueError(
             "Orchestrated Codex sessions without an enforcing sandbox scope "
             "cannot use sandbox=danger-full-access; it would expose the "
@@ -178,7 +181,7 @@ class CodexProvider(CLIProvider):
     def needs_fresh_prompt_process(self, **kwargs: object) -> bool:
         return self.runs_interactively(**kwargs)
 
-    def build_command(
+    def build_command(  # noqa: C901 - selected sandbox mode joins existing command construction
         self,
         prompt: str,
         model: str | None = None,
@@ -232,6 +235,13 @@ class CodexProvider(CLIProvider):
                 "or sandbox scope to protect the hook policy"
             )
 
+        from ..docker_worker_authority import docker_container_only_requested
+        if docker_container_only_requested():
+            if kwargs.get("approval_mode") == "yolo":
+                raise ValueError("Docker container mode does not accept yolo")
+            # Sealed Docker v2 replaces the inner scope with the container boundary.
+            sandbox_scope = None
+            kwargs = {**kwargs, "sandbox": "danger-full-access", "approval_mode": "full-auto"}
         approval_mode = kwargs.get("approval_mode", "full-auto")
         _validate_orchestrated_safety(
             sandbox_scope=sandbox_scope,
@@ -271,11 +281,15 @@ class CodexProvider(CLIProvider):
             *scope_argv,
         ]
         if sandbox_scope is None:
-            self._append_approval_flags(
-                cmd,
-                approval_mode=approval_mode,
-                execution_mode=execution_mode,
-            )
+            if kwargs.get("sandbox") == "danger-full-access":
+                # The guard above admits this only for sealed Docker container mode.
+                cmd.extend(["--ask-for-approval", "never"])
+            else:
+                self._append_approval_flags(
+                    cmd,
+                    approval_mode=approval_mode,
+                    execution_mode=execution_mode,
+                )
 
         if execution_mode == "exec":
             cmd.append("exec")

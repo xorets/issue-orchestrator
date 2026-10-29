@@ -27,10 +27,12 @@ class KeyringProviderCredentials:
 
     def session_env(self, provider: str | None, *, docker: bool = False) -> Mapping[str, str]:
         if docker:
-            from .docker_worker_authority import docker_model_auth_requested, MODEL_AUTH_ENV
+            from .docker_worker_authority import docker_model_auth_requested, docker_container_grant_kind, MODEL_AUTH_ENV, SYNTHETIC_AUTH
             if docker_model_auth_requested():
                 if provider != "codex":
                     raise ValueError("Docker model authority requires the selected Codex provider")
+                if docker_container_grant_kind() == "builder-docker-container-synthetic-authorization":
+                    return {MODEL_AUTH_ENV: SYNTHETIC_AUTH}
                 secrets = self._read_secrets(provider, (MODEL_AUTH_ENV,))
                 if MODEL_AUTH_ENV not in secrets:
                     raise ValueError("Docker model authentication is not explicitly configured")

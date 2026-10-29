@@ -165,6 +165,10 @@ class SessionLauncher:
     - get_review_machine: Callback to get/create review state machines
     """
 
+    def docker_model_credentials(self) -> dict[str, str]:
+        """Resolve selected controller-only Docker credentials through the port."""
+        return dict(self._provider_credentials.session_env("codex", docker=True))
+
     def __init__(
         self,
         config: Config,

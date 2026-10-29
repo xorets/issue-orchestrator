@@ -35,7 +35,8 @@ from .docker_worker_state import (
     require_stopped_parent_state, require_stopped_worker_network,
 )
 from .docker_launch_input import canonical as canonical, sealed_bytes as sealed_bytes, network_arguments as network_arguments, control_manifest_bytes, require_create_intent, hook_argv
-from .docker_worker_authority import worker_environment, model_projection_snapshot, model_review_parent
+from .docker_worker_authority import (worker_environment, model_projection_snapshot, model_review_parent,
+    _authority_environment, _model_authority, _public_proof)
 
 logger = logging.getLogger(__name__)
 
@@ -603,6 +604,30 @@ class DockerPlugin:
         return {"role":inner['role'], **review, "builder_run_id": packet["builder_run_id"], "outer_sha256": sha256(canonical(outer)).hexdigest(),
             "projection_sha256": sha256(canonical(projection)).hexdigest(),
             "custody": {key: getattr(custody, key) for key in DockerCustody.__dataclass_fields__}, "worker": worker}
+
+    def model_gateway_snapshot(self, run: SessionRunAssets, session_name: str) -> dict:
+        """Re-read the sealed container-only authority and exact live allocation."""
+        if self.template_path is not None:
+            self.select_run(run.run_id)
+        packet = self._load_packet()
+        environment = _authority_environment(packet)
+        if not environment:
+            raise ValueError('Docker model gateway authority unavailable')
+        outer, inner = _model_authority(packet, environment)
+        grant = _public_proof(outer['authorization'], Path(packet['admission_proofs']['authorization']), packet)
+        if grant.get('schema_version') != 2 or grant.get('kind') not in {'builder-docker-container-model-authorization', 'builder-docker-container-synthetic-authorization'}:
+            raise ValueError('Docker model gateway requires container-only grant')
+        launch_sha = sha256(canonical(packet)).hexdigest()
+        observed = self.first_model_snapshot(run, session_name, packet['contract_sha256'], launch_sha)
+        if self.launch_path is None:
+            raise ValueError('Docker model gateway launch path unavailable')
+        return {**observed, 'engine_run_id': run.run_id, 'model': inner['capabilities']['model'],
+            'contract_sha256': packet['contract_sha256'], 'launch_sha256': launch_sha,
+            'grant_sha256': outer['authorization']['sha256'], 'grant_kind': grant['kind'], 'max_model_requests': grant['max_model_requests'],
+            'deadline_unix_ns': packet['deadline_unix_ns'], 'max_output_bytes': packet['limits']['max_output_bytes'],
+            'outer_contract_path': packet['worker_authority']['contract_path'],
+            'inner_contract_path': packet['worker_authority']['engine_contract_path'],
+            'launch_path': str(self.launch_path), 'controller_home': inner['execution']['controller_home']}
 
     def verify_stopped_parent(self, packet: dict, custody: DockerCustody) -> None:
         """Read-only daemon proof of the granted implementation's terminal custody."""
