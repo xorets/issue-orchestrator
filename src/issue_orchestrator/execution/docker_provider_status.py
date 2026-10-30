@@ -1,5 +1,4 @@
 """Bounded provider status handoff from the selected Docker worker scratch."""
-from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -8,7 +7,6 @@ import shlex
 import stat
 
 from ..infra.provider_resilience import ProviderStatus, write_provider_status
-from ..ports.provider_resilience import ProviderErrorType
 from .docker_launch_input import sealed_bytes
 
 
@@ -78,7 +76,7 @@ def worker_slot(value: str, run_dir: Path) -> Path:
     return expected
 
 
-def _read_status(directory: int, exit_code: int) -> ProviderStatus:
+def _read_status(directory: int, exit_code: int, lane: str, heals: bool) -> ProviderStatus:
     try:
         fd = os.open('provider-status.json', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
     except FileNotFoundError as exc:
@@ -96,27 +94,7 @@ def _read_status(directory: int, exit_code: int) -> ProviderStatus:
             raise ValueError('Docker provider status changed while reading')
     finally:
         os.close(fd)
-    data = json.loads(raw)
-    fields = {'provider', 'error_type', 'attempts', 'succeeded', 'exit_code', 'timed_out', 'last_error_summary',
-        'last_attempt_at', 'quota_heals_on_timer'}
-    if (type(data) is not dict or set(data) != fields or type(data['attempts']) is not int or data['attempts'] != 1 or
-            type(data['succeeded']) is not bool or type(data['timed_out']) is not bool or
-            type(data['quota_heals_on_timer']) is not bool or
-            data['provider'] is not None and (type(data['provider']) is not str or len(data['provider']) > 128) or
-            data['error_type'] is not None and data['error_type'] not in {x.value for x in ProviderErrorType} or
-            data['last_error_summary'] is not None and (type(data['last_error_summary']) is not str or len(data['last_error_summary']) > 303) or
-            type(data['last_attempt_at']) is not str or len(data['last_attempt_at']) > 64 or
-            data['exit_code'] is not None and type(data['exit_code']) is not int or
-            (data['exit_code'] if data['exit_code'] is not None else 124 if data['timed_out'] else 1) != exit_code):
-        raise ValueError('Docker provider status shape or exec result differs')
-    try:
-        observed = datetime.fromisoformat(data['last_attempt_at'])
-    except ValueError as exc:
-        raise ValueError('Docker provider status timestamp differs') from exc
-    if (type(exit_code) is not int or observed.utcoffset() is None or data['succeeded'] != (exit_code == 0) or
-            data['succeeded'] and data['error_type'] is not None):
-        raise ValueError('Docker provider status outcome differs')
-    return ProviderStatus.from_dict(data)
+    return ProviderStatus.from_worker_payload(json.loads(raw), exit_code, lane, heals)
 
 
 def settle(slot: Path, descriptor: int, lane: str, heals: bool, packet: dict, exit_code: int) -> None:
@@ -126,7 +104,5 @@ def settle(slot: Path, descriptor: int, lane: str, heals: bool, packet: dict, ex
             (info.st_dev, info.st_ino) != (current.st_dev, current.st_ino) or
             current.st_uid != os.getuid() or stat.S_IMODE(current.st_mode) != 0o700):
         raise ValueError('Docker provider slot custody changed')
-    status = _read_status(descriptor, exit_code)
-    if status.provider != lane or status.quota_heals_on_timer is not heals:
-        raise ValueError('Docker provider status belongs to another lane')
+    status = _read_status(descriptor, exit_code, lane, heals)
     write_provider_status(Path(packet['engine_run_dir']), status)
