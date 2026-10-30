@@ -436,6 +436,33 @@ class DockerCustodyPayload(BaseModel):
     run_id: str
     schema_version: Literal[1]
 
+class DockerNeverStartedMissingExec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal['exact-exec-not-found']
+    status: Literal[404]
+
+class DockerNeverStartedObservation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    exit_code: None
+    pid: Literal[0]
+    running: bool = Field(..., strict=True)
+
+class DockerNeverStartedPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    after: DockerNeverStartedObservation | DockerNeverStartedMissingExec
+    before: DockerNeverStartedObservation
+    container_id: str
+    contract_sha256: str
+    controller_container_id: str
+    daemon_id: str
+    disposition: Literal['cancelled-before-exec-start']
+    kind: Literal['docker-never-started']
+    launch_sha256: str
+    provider_exec_id: str
+    run_id: str
+    schema_version: Literal[1]
+    stop_wait: Literal['completed']
+
 class DoctorCheckPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
     detail: str | None = None
@@ -1192,6 +1219,7 @@ class OriginalDeliveryPayload(BaseModel):
     issue_number: int = Field(..., ge=1, strict=True)
     lease_current: bool = Field(..., strict=True)
     lease_id: str
+    never_started: DockerNeverStartedPayload | None = None
     owner: OriginalDeliveryOwnerPayload | None
     remote_released: bool = Field(..., strict=True)
 

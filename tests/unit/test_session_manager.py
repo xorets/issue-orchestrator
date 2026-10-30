@@ -34,6 +34,9 @@ class MockSessionRunner:
         self.create_calls: list[dict] = []
         self.kill_calls: list[int] = []
 
+    def activation_pending(self, session_name: str) -> bool:
+        return False
+
     def create_session(
         self,
         session_id: int,
@@ -246,6 +249,14 @@ class TestSessionManager:
         assert event.data["session_type"] == "issue"
         assert event.data["number"] == 123
         assert event.data["session_name"] == "issue-123"
+
+    def test_prepared_activation_delays_launched_event(self, manager, mock_runner, collecting_sink):
+        mock_runner.activation_pending = lambda name: name == 'issue-123'
+        ctx = SessionContext(ref=SessionRef.for_issue(123), command='claude', working_dir=Path('/worktree'))
+        assert manager.start(ctx)
+        assert collecting_sink.events == []
+        manager.mark_launched(ctx.ref, ctx.working_dir)
+        assert [event.name for event in collecting_sink.events] == ['session.launched']
 
     def test_stop_kills_session(self, manager, mock_runner):
         """Test that stop kills session via runner."""

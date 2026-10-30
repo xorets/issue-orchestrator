@@ -181,20 +181,9 @@ class SessionManager:
             secret_env=ctx.secret_env,
         )
 
-        if success:
-            self.events.publish(
-                make_trace_event(
-                    EventName.SESSION_LAUNCHED,
-                    {
-                        "session_type": ctx.ref.session_type.value,
-                        "number": ctx.ref.number,
-                        "session_name": ctx.ref.name,
-                        "working_dir": str(ctx.working_dir),
-                    },
-                )
-            )
-            logger.info(f"Started session: {ctx.ref.name}")
-        else:
+        if success and not self.runner.activation_pending(ctx.ref.name):
+            self.mark_launched(ctx.ref, ctx.working_dir)
+        elif not success:
             self.events.publish(
                 make_trace_event(
                     EventName.SESSION_START_FAILED,
@@ -208,6 +197,20 @@ class SessionManager:
             logger.error(f"Failed to start session: {ctx.ref.name}")
 
         return success
+
+    def mark_launched(self, ref: SessionRef, working_dir: Path) -> None:
+        self.events.publish(
+            make_trace_event(
+                EventName.SESSION_LAUNCHED,
+                {
+                    "session_type": ref.session_type.value,
+                    "number": ref.number,
+                    "session_name": ref.name,
+                    "working_dir": str(working_dir),
+                },
+            )
+        )
+        logger.info(f"Started session: {ref.name}")
 
     def stop(self, ref: SessionRef) -> None:
         """Stop a terminal session.

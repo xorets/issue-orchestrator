@@ -1705,6 +1705,48 @@
           }
         }
       },
+      "DockerNeverStartedObservation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["running", "pid", "exit_code"],
+        "properties": {
+          "running": {"type": "boolean"},
+          "pid": {"type": "integer", "const": 0},
+          "exit_code": {"type": "null"}
+        }
+      },
+      "DockerNeverStartedMissingExec": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "status"],
+        "properties": {
+          "kind": {"type": "string", "const": "exact-exec-not-found"},
+          "status": {"type": "integer", "const": 404}
+        }
+      },
+      "DockerNeverStartedPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schema_version", "kind", "run_id", "contract_sha256", "launch_sha256", "daemon_id", "controller_container_id", "container_id", "provider_exec_id", "disposition", "before", "stop_wait", "after"],
+        "properties": {
+          "schema_version": {"type": "integer", "const": 1},
+          "kind": {"type": "string", "const": "docker-never-started"},
+          "run_id": {"type": "string"},
+          "contract_sha256": {"type": "string"},
+          "launch_sha256": {"type": "string"},
+          "daemon_id": {"type": "string"},
+          "controller_container_id": {"type": "string"},
+          "container_id": {"type": "string"},
+          "provider_exec_id": {"type": "string"},
+          "disposition": {"type": "string", "const": "cancelled-before-exec-start"},
+          "before": {"$ref": "#/components/schemas/DockerNeverStartedObservation"},
+          "stop_wait": {"type": "string", "const": "completed"},
+          "after": {"anyOf": [
+            {"$ref": "#/components/schemas/DockerNeverStartedObservation"},
+            {"$ref": "#/components/schemas/DockerNeverStartedMissingExec"}
+          ]}
+        }
+      },
       "OriginalDeliveryPayload": {
         "type": "object",
         "additionalProperties": false,
@@ -1754,6 +1796,7 @@
               {"type": "null"}
             ]
           },
+          "never_started": {"$ref": "#/components/schemas/DockerNeverStartedPayload"},
           "remote_released": {
             "type": "boolean"
           }

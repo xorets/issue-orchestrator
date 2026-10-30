@@ -273,6 +273,10 @@ class OriginalDeliveryOwner:
                 "remote_released": claim.original is not None and claim.original.released}
         if include_diagnostic and claim.original is not None and claim.original.execution_backend == "docker" and self.docker_custody is not None:
             result["diagnostic"] = self.docker_custody.diagnostic(claim.original)
+            if claim.original.cancelled:
+                proof = self.docker_custody.never_started(claim.original)
+                if proof is not None:
+                    result['never_started'] = proof
         return result
 
     def execute(self, issue_number: int, command: OriginalDeliveryCommand) -> dict[str, object]:
@@ -382,6 +386,45 @@ class OriginalDeliveryOwner:
     def _register(self, issue_number: int, command: OriginalDeliveryCommand, claim: Claim) -> dict[str, object]:
         if self.state is None or not self.state.paused or str(self.state.pause_state.reason) != "operator":
             raise ValueError("Original engine requires current OPERATOR hold")
+        return self._register_bound(issue_number, command, claim)
+
+    def register_prestart(self, session: Session) -> str:
+        """Bind the retained implementation allocation before its provider starts."""
+        if self.state is None or self.docker_custody is None:
+            raise ValueError('Docker original pre-start owner unavailable')
+        if [s for s in self.state.active_sessions if s.issue.number == session.issue.number] != [session]:
+            raise ValueError('Docker pre-start active session changed')
+        snapshot = self.docker_custody.prestart_snapshot(session)
+        claim, fence = self.claims.original_claim(session.issue.number)
+        if claim.original is not None or claim.lease_id != session.lease_id or claim.is_expired():
+            raise ValueError('Docker pre-start claim differs')
+        run = session.run_assets
+        command = OriginalDeliveryCommand('register', claim.lease_id, fence, snapshot['contract_sha256'],
+            run.run_id, 'docker-prestart-' + uuid4().hex, session_name=session.terminal_id, started_at=run.started_at)
+        self._register_bound(session.issue.number, command, claim)
+        fresh, fence = self.claims.original_claim(session.issue.number)
+        self.require_prestart_current(session, fence)
+        return fence
+
+    def require_prestart_current(self, session: Session, fence: str) -> None:
+        if self.state is None or self.docker_custody is None:
+            raise ValueError('Docker original pre-start owner unavailable')
+        if [s for s in self.state.active_sessions if s.issue.number == session.issue.number] != [session]:
+            raise ValueError('Docker pre-start active session changed')
+        snapshot = self.docker_custody.prestart_snapshot(session)
+        self._require_unused_budget(session.issue.number)
+        fresh, current_fence = self.claims.original_claim(session.issue.number)
+        owner = fresh.original
+        if (current_fence != fence or fresh.lease_id != session.lease_id or fresh.is_expired() or owner is None or
+                owner.cancelled or owner.released or owner.run_id != session.run_assets.run_id or
+                owner.contract_sha256 != snapshot['contract_sha256'] or owner.docker_custody != (snapshot['custody'],) or
+                self.identity() != (owner.engine_host, owner.engine_pid, owner.engine_birth) or
+                self.docker_custody.prestart_snapshot(session) != snapshot):
+            raise ValueError('Docker pre-start owner or custody changed')
+        self._require_scope(owner)
+        self._require_live(owner, fresh)
+
+    def _register_bound(self, issue_number: int, command: OriginalDeliveryCommand, claim: Claim) -> dict[str, object]:
         sessions = [s for s in self.state.active_sessions if s.issue.number == issue_number]
         if len(sessions) != 1:
             raise ValueError("One current original session is required")

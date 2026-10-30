@@ -388,6 +388,33 @@ export interface DockerCustodyPayload {
   schema_version: 1;
 }
 
+export interface DockerNeverStartedMissingExec {
+  kind: "exact-exec-not-found";
+  status: 404;
+}
+
+export interface DockerNeverStartedObservation {
+  exit_code: null;
+  pid: 0;
+  running: boolean;
+}
+
+export interface DockerNeverStartedPayload {
+  after: DockerNeverStartedObservation | DockerNeverStartedMissingExec;
+  before: DockerNeverStartedObservation;
+  container_id: string;
+  contract_sha256: string;
+  controller_container_id: string;
+  daemon_id: string;
+  disposition: "cancelled-before-exec-start";
+  kind: "docker-never-started";
+  launch_sha256: string;
+  provider_exec_id: string;
+  run_id: string;
+  schema_version: 1;
+  stop_wait: "completed";
+}
+
 export interface DoctorCheckPayload {
   detail?: string | null;
   name?: string | null;
@@ -1096,6 +1123,7 @@ export interface OriginalDeliveryPayload {
   issue_number: number;
   lease_current: boolean;
   lease_id: string;
+  never_started?: DockerNeverStartedPayload;
   owner: OriginalDeliveryOwnerPayload | null;
   remote_released: boolean;
 }

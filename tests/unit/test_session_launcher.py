@@ -10647,3 +10647,52 @@ class TestAnOpenPrEndsOnlyTheSessionWhoseOutputItIs:
         status = self._observer(sample_config, runner, host).check_session(session)
 
         assert (status is SessionStatus.COMPLETED) is completed
+
+
+@pytest.mark.parametrize('registration_fails', [False, True])
+def test_orchestrator_retains_prepared_session_before_original_activation(
+    sample_orchestrator, sample_config, mock_events, mock_repo_host, mock_worktree_manager,
+    mock_working_copy, mock_command_runner, sample_issue, registration_fails,
+):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from issue_orchestrator.ports.session_preparation import SessionPreparation
+    sample_config.terminal_adapter = 'issue_orchestrator.execution.terminal_docker:DockerPlugin'
+    preparation = MagicMock(spec=SessionPreparation)
+    preparation.activation_pending.return_value = True
+    claims = MagicMock()
+    claims.attempt_claim.return_value = SimpleNamespace(success=True, lease_id='lease-fixture')
+    claims.run_convergence.return_value = True
+    bundle = _build_launcher_bundle(sample_config, mock_events, mock_repo_host,
+        mock_worktree_manager, mock_working_copy, mock_command_runner,
+        claim_manager=claims, session_preparation=preparation)
+    orchestrator = sample_orchestrator
+    orchestrator.__dict__['session_launcher'] = bundle.launcher
+    owner, runner = Mock(), Mock()
+    steps = []
+    def register(session):
+        assert orchestrator.state.active_sessions == [session]
+        assert bundle.issue_run_ledger.recorded_run(session.run_assets).run == session.run_assets
+        assert session.lease_id == 'lease-fixture'
+        steps.append('register')
+        if registration_fails: raise ValueError('synthetic failed CAS')
+        return 'a'*40
+    owner.register_prestart.side_effect = register
+    owner.require_prestart_current.side_effect = lambda session, fence: steps.append('recheck')
+    runner.activate_session.side_effect = lambda run, name, fence: steps.append('activate')
+    orchestrator.deps = replace(orchestrator.deps, original_delivery_owner=owner, runner=runner,
+        health_gate=SimpleNamespace(check=lambda **kwargs:SimpleNamespace(can_proceed=True)))
+    result = orchestrator.launch_session_step(sample_issue)
+    assert len(orchestrator.state.active_sessions) == 1
+    claims.release_claim.assert_not_called()
+    if registration_fails:
+        assert result.session is None and steps == ['register']
+        runner.activate_session.assert_not_called()
+        bundle.launcher.session_manager.mark_launched.assert_not_called()
+        assert orchestrator.launch_session_step(sample_issue).session is None
+        assert claims.attempt_claim.call_count == 1
+        claims.release_claim.assert_not_called()
+    else:
+        assert result.session is orchestrator.state.active_sessions[0]
+        assert steps == ['register', 'recheck', 'activate']
+        bundle.launcher.session_manager.mark_launched.assert_called_once()

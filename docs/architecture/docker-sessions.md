@@ -41,8 +41,18 @@ and interactive input are unsupported in this first noninteractive backend.
 
 The provider command is never evaluated in the service shell. Docker exec-create
 returns an immutable ID, recorded durably before exec-start. Credentials travel
-only in the Unix Docker API request, separately from command argv. The terminal
-hook spec and both built-in implementations require the nullable `secret_env`
+only in the Unix Docker API request, separately from command argv.
+
+For an admitted initial implementation, exec-create leaves the provider
+unstarted while the typed active session is retained and the existing original
+owner binds that exact custody to the current claim by CAS. The engine rechecks
+the owner, grant, cancellation, health and deadline before persisting start
+intent and issuing one start request. Start acknowledgement and stop are
+serialized; output streaming does not hold that lock. Unknown acknowledgements
+are retained and are never retried. The existing live first-model check and
+OPERATOR barrier still apply after the provider starts.
+
+The terminal hook spec and both built-in implementations require the nullable `secret_env`
 argument because Pluggy forwards only required implementation arguments. Public
 session facades supply `None` when absent; plugins that omit this argument remain
 compatible. Provider retries are capped at one attempt on the prepared Docker
@@ -138,6 +148,22 @@ the recorded old controller and all recorded workers to be demonstrably stopped.
 The trusted persistent singleton remains Builder's responsibility.
 
 An exclusive reservation survives uncertain create/start acknowledgement.
+An implementation allocation with missing, legacy or unbound original custody
+refuses restart discovery and new attempts for that delivery until it is
+reconciled; it cannot be treated as an unallocated plain claim. A cancelled
+never-started exec can be released only from a versioned controller-owned
+disposition written after a recorded no-start decision, exact pre- and post-stop
+exec observations and successful container stop and wait. The post-stop
+observation can be either the exact unstarted exec or a typed HTTP 404 for that
+exact exec after the successful wait. Arbitrary absence, null exit alone,
+uncertain start intent or failed recording leaves release unknown. This proof
+uses the existing trusted Docker daemon and client custody; it does not prove
+that another privileged Docker client could not have started the exec.
+The optional `never_started` original-owner projection binds that disposition
+to the registered custody and does not grant model or execution authority.
+The retained helper observation saw the exact exec return HTTP 404 after a
+container kill and wait. The post-stop readback following Engine's container
+stop and wait remains unqualified until exercised by the actual lifecycle.
 Ordinary discovery preserves a provider still owned by the same live in-process
 watcher and its exact record object, after the existing daemon/container identity
 checks. A persisted receipt alone cannot establish that ownership. A fresh plugin

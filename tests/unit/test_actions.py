@@ -62,6 +62,9 @@ class MockLabelSet:
 class MockSessionRunner:
     """Mock SessionRunner for testing."""
 
+    def activation_pending(self, session_name: str) -> bool:
+        return False
+
     def __init__(self):
         self.sessions: dict[int, dict] = {}
 

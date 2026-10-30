@@ -149,3 +149,26 @@ import issue_orchestrator.execution.terminal_docker
 import issue_orchestrator.execution.docker_startup_allowance
 '''
     subprocess.run([sys.executable, '-c', script], check=True, timeout=10)
+
+
+def test_new_start_cannot_refund_unbound_original_allocation(delivery, monkeypatch):
+    packet, template = delivery
+    # Test-container root ownership is mapped to nobody; isolate that platform boundary.
+    monkeypatch.setattr('issue_orchestrator.execution.docker_startup_allowance._require_custody',
+        lambda packet, template, inner, inner_path: template.parent)
+    contract = Path(packet['worker_authority']['engine_contract_path'])
+    inner = json.loads(contract.read_bytes()); inner['role'] = 'standard-implementation'
+    contract.chmod(0o600); contract.write_bytes(canonical(inner)); contract.chmod(0o400)
+    packet['contract_sha256'] = sha256(canonical(inner)).hexdigest()
+    reserve_startup(packet, template)
+    next_packet = {**packet, 'run_id':'20261017-100000Z-' + 'b'*32}
+    with pytest.raises((ValueError, OSError)): reserve_startup(next_packet, template)
+    directory = template.parent / packet['run_id']; directory.mkdir(mode=0o700)
+    receipt = directory / 'docker-session.json'
+    value = {'run_id':packet['run_id'], 'launch_sha256':sha256(canonical(packet)).hexdigest(),
+        'contract_sha256':packet['contract_sha256'], 'original_binding':'pending', 'start_gate_version':1}
+    receipt.write_bytes(canonical(value)); receipt.chmod(0o600)
+    with pytest.raises(ValueError): reserve_startup(next_packet, template)
+    value.update(original_binding='bound', original_fence='a'*40)
+    receipt.write_bytes(canonical(value))
+    reserve_startup(next_packet, template)

@@ -492,3 +492,49 @@ def test_history_reuses_same_immutable_receipt_snapshot(reviewer_owner, claim_ht
     with patch.object(owner.claims, 'original_claim_at', wraps=owner.claims.original_claim_at) as read:
         assert prove_history(owner.claims, owner.config.repo, request)['status'] == 'PASS'
         assert read.call_count == 1
+
+
+def test_prestart_registration_binds_fresh_claim_before_live_first_model(first_model_owner):
+    import asyncio
+    from pathlib import Path
+    from issue_orchestrator.domain.pause_state import PauseActor, PauseReason
+    from issue_orchestrator.entrypoints.mcp_original_delivery import original_delivery_result
+    owner, session, adapter, command = first_model_owner
+    owner.state.pause_state = owner.state.pause_state.running()
+    custody = adapter.capture.return_value
+    adapter.prestart_snapshot.return_value = {'contract_sha256':command.contract_sha256,
+        'launch_sha256':command.launch_sha256, 'custody':custody}
+    adapter.diagnostic.return_value = None
+    before = owner.observe(42)
+    assert before['owner'] is None
+    owner.register_prestart(session)
+    after = owner.observe(42)
+    assert after['fence'] != before['fence'] and after['lease_current']
+    assert after['owner']['run_id'] == session.run_assets.run_id
+    assert after['owner']['docker_custody'][0]['provider_exec_id'] == custody.provider_exec_id
+    class Api:
+        async def original_delivery(self, issue_number, operation, payload):
+            return owner.observe(issue_number)
+    result = asyncio.run(original_delivery_result(Api(), Path('/unused'), 42, 'observe', None, running=True))
+    assert not result.isError and result.structuredContent['fence'] == after['fence']
+    owner.state.pause_state = owner.state.pause_state.paused_now(reason=PauseReason.OPERATOR, actor=PauseActor.MCP)
+    assert owner.first_model(session.run_assets, command)['receipt']['claim_ref_sha'] == after['fence']
+
+
+@pytest.mark.parametrize('failure', ['cancel', 'cas', 'custody', 'foreign', 'expired'])
+def test_prestart_registration_refuses_changed_authority(first_model_owner, monkeypatch, failure):
+    from datetime import datetime, timedelta
+    owner, session, adapter, command = first_model_owner
+    owner.state.pause_state = owner.state.pause_state.running()
+    custody = adapter.capture.return_value
+    adapter.prestart_snapshot.return_value = {'contract_sha256':command.contract_sha256,
+        'launch_sha256':command.launch_sha256, 'custody':custody}
+    if failure == 'cancel': owner.repository.get_issue.return_value.labels.append('dispatch:cancel-requested')
+    if failure == 'cas': monkeypatch.setattr(owner.claims, 'bind_original', lambda *_:False)
+    if failure == 'custody': adapter.prestart_snapshot.side_effect = ValueError('custody changed')
+    if failure == 'foreign': session.lease_id = 'foreign'
+    if failure == 'expired':
+        claim, fence = owner.claims.original_claim(42)
+        monkeypatch.setattr(owner.claims, 'original_claim', lambda _: (replace(claim, expires_at=datetime.now() - timedelta(seconds=1)), fence))
+    with pytest.raises(ValueError): owner.register_prestart(session)
+    assert owner.observe(42)['owner'] is None

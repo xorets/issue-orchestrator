@@ -1774,6 +1774,116 @@
             ],
             "type": "object"
         },
+        "DockerNeverStartedMissingExec": {
+            "additionalProperties": false,
+            "properties": {
+                "kind": {
+                    "const": "exact-exec-not-found",
+                    "type": "string"
+                },
+                "status": {
+                    "const": 404,
+                    "type": "integer"
+                }
+            },
+            "required": [
+                "kind",
+                "status"
+            ],
+            "type": "object"
+        },
+        "DockerNeverStartedObservation": {
+            "additionalProperties": false,
+            "properties": {
+                "exit_code": {
+                    "type": "null"
+                },
+                "pid": {
+                    "const": 0,
+                    "type": "integer"
+                },
+                "running": {
+                    "type": "boolean"
+                }
+            },
+            "required": [
+                "running",
+                "pid",
+                "exit_code"
+            ],
+            "type": "object"
+        },
+        "DockerNeverStartedPayload": {
+            "additionalProperties": false,
+            "properties": {
+                "after": {
+                    "anyOf": [
+                        {
+                            "$ref": "#/components/schemas/DockerNeverStartedObservation"
+                        },
+                        {
+                            "$ref": "#/components/schemas/DockerNeverStartedMissingExec"
+                        }
+                    ]
+                },
+                "before": {
+                    "$ref": "#/components/schemas/DockerNeverStartedObservation"
+                },
+                "container_id": {
+                    "type": "string"
+                },
+                "contract_sha256": {
+                    "type": "string"
+                },
+                "controller_container_id": {
+                    "type": "string"
+                },
+                "daemon_id": {
+                    "type": "string"
+                },
+                "disposition": {
+                    "const": "cancelled-before-exec-start",
+                    "type": "string"
+                },
+                "kind": {
+                    "const": "docker-never-started",
+                    "type": "string"
+                },
+                "launch_sha256": {
+                    "type": "string"
+                },
+                "provider_exec_id": {
+                    "type": "string"
+                },
+                "run_id": {
+                    "type": "string"
+                },
+                "schema_version": {
+                    "const": 1,
+                    "type": "integer"
+                },
+                "stop_wait": {
+                    "const": "completed",
+                    "type": "string"
+                }
+            },
+            "required": [
+                "schema_version",
+                "kind",
+                "run_id",
+                "contract_sha256",
+                "launch_sha256",
+                "daemon_id",
+                "controller_container_id",
+                "container_id",
+                "provider_exec_id",
+                "disposition",
+                "before",
+                "stop_wait",
+                "after"
+            ],
+            "type": "object"
+        },
         "DoctorCheckPayload": {
             "additionalProperties": false,
             "properties": {
@@ -5095,6 +5205,9 @@
                 },
                 "lease_id": {
                     "type": "string"
+                },
+                "never_started": {
+                    "$ref": "#/components/schemas/DockerNeverStartedPayload"
                 },
                 "owner": {
                     "anyOf": [

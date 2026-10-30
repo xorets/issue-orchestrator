@@ -6,8 +6,11 @@ from pathlib import Path
 import pytest
 import time
 import copy
+import threading
 
 from issue_orchestrator.execution.terminal_docker import DockerPlugin, canonical
+from tests.unit.test_docker_first_model import claim_http, first_model_owner  # noqa: F401
+from tests.unit.adapters.github.test_original_delivery_owner import original_owner  # noqa: F401
 
 
 class Engine:
@@ -15,6 +18,7 @@ class Engine:
         self.packet = packet
         self.running = True
         self.starts = 0
+        self.started = threading.Event()
         self.created_exec = None
         self.record_path = None
         self.daemon = packet["daemon_id"]
@@ -23,7 +27,9 @@ class Engine:
     def worker(self):
         p = self.packet
         return {"Id": "2" * 64, "Name": "/" + p["container_name"], "Image": p["image_id"],
-            "State": {"Running": self.running}, "Config": {"User": p["user"], "Labels": {"io.builder.launch": sha256(canonical(p)).hexdigest()}},
+            "State": {"Running": self.running, "Paused":False, "Restarting":False, "OOMKilled":False,
+                "Error":"", "Pid":42 if self.running else 0}, "RestartCount":0,
+            "Config": {"User": p["user"], "Labels": {"io.builder.launch": sha256(canonical(p)).hexdigest()}},
             "Mounts": [], "HostConfig": {"ReadonlyRootfs": True, "Privileged": False, "CapDrop": ["ALL"], "SecurityOpt": ["no-new-privileges:true"],
                 "IpcMode": "private", "NetworkMode": p["network_id"], "LogConfig": {"Type": "none"}, "RestartPolicy": {"Name": "no"},
                 "Memory": p["limits"]["memory_bytes"], "MemorySwap": p["limits"]["swap_bytes"], "NanoCpus": p["limits"]["cpu_nano"],
@@ -48,14 +54,30 @@ class Engine:
         if route.startswith("/exec/"):
             exec_id = route.split("/")[2]
             assert exec_id in self.exec_payloads
-            return {"ID": exec_id, "ContainerID": "2" * 64, "Running": False, "ExitCode": 0}
+            payload = self.exec_payloads[exec_id]
+            command = payload.get('Cmd', ['/bin/sh', '-c', ''])
+            return {"ID": exec_id, "ContainerID": "2" * 64, "Running": False,
+                "Pid":0, "ExitCode":0 if self.starts else None,
+                "ProcessConfig":{"entrypoint":command[0], 'arguments':command[1:],
+                    'user':payload.get('User', '1000:1000'), 'privileged':False, 'tty':False}}
         raise AssertionError((method, route))
 
     def start_exec(self, exec_id, consume, timeout):
         record = json.loads(self.record_path.read_text())
         assert record["provider_exec_id"] == exec_id or exec_id in {row["exec_id"] for row in record["hook_execs"]}
         self.starts += 1
+        self.started.set()
         consume(b"known-output\n")
+
+    def open_exec(self, exec_id, timeout):
+        engine = self
+        class Stream:
+            def consume(self, consume): engine.start_exec(exec_id, consume, timeout)
+            def close(self): pass
+        return Stream()
+
+    def inspect_exec(self, exec_id):
+        return {'status':200, 'value':self.request('GET', '/exec/' + exec_id + '/json')}
 
     def stop(self, container_id):
         assert container_id == "2" * 64
@@ -125,8 +147,10 @@ def test_packet_cannot_be_read_from_writable_or_symlinked_file(tmp_path):
 
 
 def test_launch_persists_exec_before_start_and_stops_entire_worker(launch):
+    from tests.unit.threading_helpers import wait_for_event
     runner, engine, packet, calls = launch
     assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", {"SYNTHETIC_KEY": "secret-canary"})
+    wait_for_event(engine.started, 5, label='provider start')
     runner.on_orchestrator_shutdown()
     assert engine.starts == 1
     assert engine.created_exec["Cmd"] == ["/bin/sh", "-c", "echo safe"]
@@ -1095,7 +1119,7 @@ def test_terminal_provider_handoff_stops_worker_even_on_invalid_status(launch, t
     runner._record = {  # noqa: SLF001
         'issue_number':42, 'session_name':'issue-42', 'daemon_id':packet['daemon_id'], 'run_id':packet['run_id'],
         'container_id':'2'*64, 'provider_exec_id':exec_id, 'launch_sha256':sha256(canonical(packet)).hexdigest(),
-        'state':'exec_created', 'output_bytes':0, 'overflow':False, 'provider_exit_code':None, 'error':''}
+        'state':'exec-created', 'output_bytes':0, 'overflow':False, 'provider_exit_code':None, 'error':''}
     engine.exec_payloads[exec_id] = {}
     runner._run_provider()  # noqa: SLF001
     assert not engine.running
@@ -1215,7 +1239,7 @@ except capabilities.CodexChildFailure as error:
     runner._record = {  # noqa: SLF001
         'issue_number':42, 'session_name':'issue-42', 'daemon_id':packet['daemon_id'], 'run_id':packet['run_id'],
         'container_id':'2'*64, 'provider_exec_id':exec_id, 'launch_sha256':sha256(canonical(packet)).hexdigest(),
-        'state':'exec_created', 'output_bytes':0, 'overflow':False, 'provider_exit_code':None, 'error':''}
+        'state':'exec-created', 'output_bytes':0, 'overflow':False, 'provider_exit_code':None, 'error':''}
     engine.exec_payloads[exec_id] = {}
     original_request = engine.request
     def request(method, route, payload=None):
@@ -1361,7 +1385,7 @@ def test_explicit_cancellation_preserves_existing_primary_and_reaps_child(launch
         runner._record = {  # noqa: SLF001
             'issue_number':42, 'session_name':'issue-42', 'run_id':packet['run_id'], 'daemon_id':packet['daemon_id'],
             'container_id':'2'*64, 'provider_exec_id':'3'*64, 'provider_exit_code':None,
-            'launch_sha256':sha256(canonical(packet)).hexdigest(), 'state':'exec_created', 'error':''}
+            'launch_sha256':sha256(canonical(packet)).hexdigest(), 'state':'exec-created', 'error':''}
         if prior is not None:
             runner._record['diagnostic'] = {'run_id':packet['run_id'], 'launch_sha256':sha256(canonical(packet)).hexdigest(),  # noqa: SLF001
                 'primary':prior, 'secondary':[]}
@@ -1391,7 +1415,7 @@ def test_unobserved_provider_does_not_invent_cancellation(launch):
     runner._record = {  # noqa: SLF001
         'issue_number':42, 'session_name':'issue-42', 'run_id':packet['run_id'], 'daemon_id':packet['daemon_id'],
         'container_id':'2'*64, 'provider_exec_id':'3'*64, 'provider_exit_code':None,
-        'launch_sha256':sha256(canonical(packet)).hexdigest(), 'state':'exec_created', 'error':''}
+        'launch_sha256':sha256(canonical(packet)).hexdigest(), 'state':'exec-created', 'error':''}
     original_request = engine.request
     def request(method, route, payload=None):
         if route == '/exec/' + '3'*64 + '/json': raise OSError('transport unavailable')
@@ -1408,7 +1432,7 @@ def test_controller_deadline_is_distinct_from_provider_timeout(launch):
     runner._record = {  # noqa: SLF001
         'issue_number':42, 'session_name':'issue-42', 'run_id':packet['run_id'], 'daemon_id':packet['daemon_id'],
         'container_id':'2'*64, 'provider_exec_id':'3'*64, 'provider_exit_code':None,
-        'launch_sha256':sha256(canonical(packet)).hexdigest(), 'state':'exec_created', 'error':''}
+        'launch_sha256':sha256(canonical(packet)).hexdigest(), 'state':'exec-created', 'error':''}
     runner._deadline_stop()  # noqa: SLF001
     assert not engine.running
     receipt = json.loads(runner.receipt_path().read_bytes())
@@ -1434,3 +1458,483 @@ def test_startup_record_failure_still_attempts_owned_stop(launch, monkeypatch, s
     assert engine.running is stop_fails
     assert runner._record['error'] == 'launch-refused-or-uncertain'  # noqa: SLF001
     assert runner._record.get('diagnostic') is None  # noqa: SLF001
+
+
+def test_provider_creation_waits_for_original_owner_before_activation(launch):
+    runner, engine, packet, _ = launch
+    runner.launch_path.chmod(0o600)
+    runner.launch_path.write_bytes(canonical(packet))
+    runner.launch_path.chmod(0o400)
+    # The admitted implementation role is normally set by prepare_session.
+    runner._require_original_owner = True  # noqa: SLF001
+    assert runner.create_session(42, 'echo safe', packet['working_dir'], None, 'issue-42', None)
+    runner.on_orchestrator_shutdown()
+    assert engine.starts == 0
+
+
+def test_cancelled_unstarted_exec_retains_explicit_stop_wait_proof(launch):
+    runner, engine, packet, _ = launch
+    runner.launch_path.chmod(0o600)
+    runner.launch_path.write_bytes(canonical(packet))
+    runner.launch_path.chmod(0o400)
+    runner._require_original_owner = True  # noqa: SLF001 - admitted role substituted
+    assert runner.create_session(42, 'echo safe', packet['working_dir'], None, 'issue-42', None)
+    runner._record.update(original_binding='bound', original_fence='a'*40)  # noqa: SLF001 - original CAS substituted
+    runner._save()  # noqa: SLF001
+    runner.kill_session(42, 'issue-42')
+    record = json.loads(runner.receipt_path().read_bytes())
+    assert engine.starts == 0 and not engine.running
+    assert record['start_intent'] == 'cancelled-before-start'
+    assert record['never_started']['kind'] == 'docker-never-started'
+    assert record['never_started']['before'] == record['never_started']['after'] == {
+        'running':False, 'pid':0, 'exit_code':None}
+    assert record['never_started']['stop_wait'] == 'completed'
+
+
+def test_unstarted_exec_without_disposition_does_not_certify_release():
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from issue_orchestrator.domain.original_delivery import DockerCustody
+    from issue_orchestrator.execution.original_delivery_docker import DockerOriginalCustody
+    from tests.unit.test_original_delivery import custody
+
+    # Shape and values are replayed from the actual never-started exec readback.
+    observed = {'ID':'d8897ca0c6141934739d2f5dc8f0d14636bec4fea54774ea6599b04d1e315101',
+        'ContainerID':'4cd659ef470710035774864aa41f7e9c7a7ac2cd1afbb1c250dd6f44282f4004',
+        'Running':False, 'Pid':0, 'ExitCode':None}
+    if source := os.environ.get('DOCKER_PRESTART_INSPECT_FIXTURE'):
+        raw = Path(source).read_bytes()
+        assert sha256(raw).hexdigest() == 'bbd1cf52a5de7fa5bcfc7c0ec2a8e3dcb566cea0801e74e71aaf931ab069d695'
+        observed = json.loads(raw)
+    row = DockerCustody(schema_version=1, run_id='run-1', daemon_id='daemon',
+        controller_container_id='1'*64, container_id=observed['ContainerID'],
+        provider_exec_id=observed['ID'], launch_sha256='a'*64)
+    class Daemon:
+        def request(self, method, route):
+            if route == '/info': return {'ID':'daemon'}
+            if route.startswith('/exec/'): return observed
+            return {'Id':row.container_id, 'Config':{'Labels':{'io.builder.launch':row.launch_sha256}},
+                    'State':{'Running':False}}
+        def inspect_exec(self, exec_id): return {'status':200, 'value':observed}
+    owner = replace(custody(), execution_backend='docker', docker_custody=(row,))
+    with pytest.raises(ValueError):
+        DockerOriginalCustody(SimpleNamespace(engine=Daemon())).quiescent(owner, offline=False)
+
+
+def test_never_started_inspect_requires_exact_process_and_null_exit():
+    from issue_orchestrator.execution.docker_worker_state import require_never_started_exec
+    observed = {'ID':'d8897ca0c6141934739d2f5dc8f0d14636bec4fea54774ea6599b04d1e315101',
+        'ContainerID':'4cd659ef470710035774864aa41f7e9c7a7ac2cd1afbb1c250dd6f44282f4004',
+        'Running':False, 'Pid':0, 'ExitCode':None,
+        'ProcessConfig':{'entrypoint':'/usr/bin/python3', 'arguments':['-I','-B','-c','pass'],
+            'user':'1000:1000', 'privileged':False, 'tty':False}}
+    if source := os.environ.get('DOCKER_PRESTART_INSPECT_FIXTURE'):
+        raw = Path(source).read_bytes()
+        assert sha256(raw).hexdigest() == 'bbd1cf52a5de7fa5bcfc7c0ec2a8e3dcb566cea0801e74e71aaf931ab069d695'
+        observed = json.loads(raw)
+    args = (observed['ContainerID'], observed['ID'], '1000:1000', ['/usr/bin/python3','-I','-B','-c','pass'])
+    require_never_started_exec(observed, *args)
+    for changed in ({'Running':True}, {'Pid':1}, {'ExitCode':0}, {'ID':'f'*64},
+                    {'ProcessConfig':{**observed['ProcessConfig'], 'user':'0:0'}},
+                    {'ProcessConfig':{**observed['ProcessConfig'], 'arguments':['-c','other']}}):
+        with pytest.raises(ValueError):
+            require_never_started_exec({**observed, **changed}, *args)
+
+
+def test_docker_exec_handshake_finishes_before_output_stream_is_read(monkeypatch):
+    from issue_orchestrator.execution.docker_engine import DockerEngine
+    class Sock:
+        def __init__(self): self.timeouts = []
+        def settimeout(self, timeout): self.timeouts.append(timeout)
+    class Response:
+        status = 200
+        def read(self, count): raise AssertionError('stream must not be consumed in handshake')
+    class Connection:
+        def __init__(self, path, timeout): self.sock = Sock(); self.timeout = timeout; self.closed = False
+        def request(self, *args, **kwargs): pass
+        def getresponse(self): return Response()
+        def close(self): self.closed = True
+    monkeypatch.setattr('issue_orchestrator.execution.docker_engine._UnixConnection', Connection)
+    stream = DockerEngine().open_exec('a'*64, 120)
+    assert stream.connection.timeout == 10 and 119 <= stream.connection.sock.timeouts[0] <= 120
+    stream.close()
+    assert stream.connection.closed
+
+
+def test_lost_exec_start_ack_is_retained_and_never_certifies_no_start(launch, monkeypatch):
+    from tests.unit.threading_helpers import wait_for_event
+    runner, engine, packet, _ = launch
+    entered = threading.Event()
+    def lost_ack(exec_id, timeout):
+        entered.set()
+        raise TimeoutError('start acknowledgement unknown')
+    monkeypatch.setattr(engine, 'open_exec', lost_ack)
+    assert runner.create_session(42, 'echo safe', packet['working_dir'], None, 'issue-42', None)
+    wait_for_event(entered, 5, label='start request')
+    runner.on_orchestrator_shutdown()
+    record = json.loads(runner.receipt_path().read_bytes())
+    assert record['start_intent'] == 'requested'
+    assert 'never_started' not in record
+    assert record['error'] == 'provider-unsettled-or-bound-exhausted'
+
+
+def test_original_owner_accepts_only_matching_durable_never_started_proof(launch):
+    from dataclasses import replace
+    from shutil import copyfile
+    from issue_orchestrator.domain.original_delivery import DockerCustody
+    from issue_orchestrator.execution.original_delivery_docker import DockerOriginalCustody
+    from tests.unit.test_original_delivery import custody
+    runner, engine, packet, _ = launch
+    runner.launch_path.chmod(0o600)
+    runner.launch_path.write_bytes(canonical(packet))
+    runner.launch_path.chmod(0o400)
+    runner._require_original_owner = True  # noqa: SLF001 - admitted role substituted
+    assert runner.create_session(42, 'echo safe', packet['working_dir'], None, 'issue-42', None)
+    runner._record.update(original_binding='bound', original_fence='a'*40)  # noqa: SLF001 - original CAS substituted
+    runner._save()  # noqa: SLF001
+    runner.kill_session(42, 'issue-42')
+    record = json.loads(runner.receipt_path().read_bytes())
+    directory = runner.launch_path.parent / packet['run_id']; directory.mkdir(mode=0o700)
+    copyfile(runner.launch_path, directory / 'launch.json'); (directory / 'launch.json').chmod(0o400)
+    copyfile(runner.receipt_path(), directory / 'docker-session.json'); (directory / 'docker-session.json').chmod(0o600)
+    observer = DockerPlugin(launch_path=directory / 'launch.json', engine=engine)
+    observer.template_path = directory.parent / 'template.json'
+    backend = DockerOriginalCustody(observer)
+    row = DockerCustody(**{key:record[key] for key in DockerCustody.__dataclass_fields__})
+    original = replace(custody(), repository=packet['repository'], run_id=packet['run_id'],
+        contract_sha256=packet['contract_sha256'], worktree=packet['working_dir'],
+        run_dir=packet['engine_run_dir'], execution_backend='docker', docker_custody=(row,), cancelled=True)
+    backend.quiescent(original, offline=False)
+    assert backend.never_started(original)['provider_exec_id'] == row.provider_exec_id
+    assert backend.never_started(replace(original, cancelled=False)) is None
+    receipt = directory / 'docker-session.json'
+    record['start_intent'] = 'requested'
+    receipt.write_bytes(canonical(record))
+    assert backend.never_started(original) is None
+    with pytest.raises(ValueError): backend.quiescent(original, offline=False)
+
+
+@pytest.mark.parametrize('wait', [{}, {'StatusCode':None}, {'StatusCode':False},
+                                  {'StatusCode':137,'Error':{'Message':'wait failed'}}])
+def test_docker_stop_requires_positive_wait_result(wait, monkeypatch):
+    from issue_orchestrator.execution.docker_engine import DockerEngine
+    engine = DockerEngine()
+    def request(method, route, payload=None):
+        if '/wait?' in route: return wait
+        if route.endswith('/json'): return {'State':{'Running':False}}
+        return {}
+    monkeypatch.setattr(engine, 'request', request)
+    with pytest.raises(ValueError): engine.stop('a'*64)
+
+
+def test_restart_refuses_unbound_allocated_original_before_discovery(launch):
+    runner, engine, packet, _ = launch
+    runner._require_original_owner = True  # noqa: SLF001 - admitted role substituted
+    assert runner.create_session(42, 'echo safe', packet['working_dir'], None, 'issue-42', None)
+    fresh = DockerPlugin(launch_path=runner.launch_path, engine=engine)
+    with pytest.raises(ValueError, match='retained custody reconciliation'):
+        fresh.on_orchestrator_startup()
+    assert engine.starts == 0 and engine.running
+    assert json.loads(fresh.receipt_path().read_bytes())['original_binding'] == 'pending'
+
+
+def test_real_typed_implementation_preparation_defers_exec(launch, monkeypatch):
+    import pluggy
+    from issue_orchestrator.execution.session_output_adapter import FileSystemSessionOutput
+    from issue_orchestrator.execution.session_runner_adapter import PluggySessionRunner
+    from issue_orchestrator.infra.hooks.hookspec import TerminalSpec
+    _, engine, packet, _ = launch
+    root = engine.record_path.parent
+    template_path = root / 'template.json'
+    template = {**packet, 'run_id':'', 'engine_run_dir':'', 'command_sha256':'0'*64}
+    intent = {key:value for key, value in template.items() if key not in {'contract_sha256','run_id','engine_run_dir','command_sha256'}}
+    contract = {'role':'standard-implementation', 'execution':{'backend':'docker', 'docker_launch':{
+        'template_path':str(template_path), 'intent_sha256':sha256(canonical(intent)).hexdigest()}}}
+    contract_path = root / 'contract.json'; contract_path.write_bytes(canonical(contract)); contract_path.chmod(0o400)
+    template['contract_sha256'] = sha256(canonical(contract)).hexdigest()
+    template_path.write_bytes(canonical(template)); template_path.chmod(0o400)
+    monkeypatch.setenv('ISSUE_ORCHESTRATOR_DOCKER_TEMPLATE', str(template_path))
+    monkeypatch.setenv('XORETS_EXECUTION_CONTRACT', str(contract_path))
+    monkeypatch.setenv('XORETS_EXECUTION_DIGEST', template['contract_sha256'])
+    plugin = DockerPlugin(engine=engine)
+    pm = pluggy.PluginManager('issue_orchestrator'); pm.add_hookspecs(TerminalSpec); pm.register(plugin)
+    runner = PluggySessionRunner(pm)
+    assets = FileSystemSessionOutput().start_run(Path(packet['working_dir']), 'coding-1', issue_number=42)
+    runner.prepare_session(assets, 'issue-42', 'echo safe')
+    engine.packet = json.loads(plugin.launch_path.read_bytes()); engine.record_path = plugin.receipt_path()
+    assert runner.create_session(42, 'echo safe', packet['working_dir'], None, 'issue-42')
+    assert json.loads(plugin.receipt_path().read_bytes())['original_binding'] == 'pending'
+    assert engine.starts == 0
+    plugin.on_orchestrator_shutdown()
+
+
+@pytest.mark.parametrize('missing_after_stop', [False, True])
+def test_owner_retains_prestart_cancellation_and_public_proof(launch, first_model_owner, monkeypatch, missing_after_stop):
+    import asyncio
+    import sys
+    from types import SimpleNamespace
+    from issue_orchestrator.adapters.github.http_client import GitHubHttpClient, GitHubHttpConfig
+    from issue_orchestrator.adapters.github.ref_claim_adapter import GitHubRefClaimAdapter
+    from issue_orchestrator.control.original_delivery import OriginalDeliveryCommand
+    from issue_orchestrator.control.issue_termination import terminate_every_session
+    from issue_orchestrator.control.review_exchange_lifecycle import CoreIssueRuntimeOwners
+    from issue_orchestrator.control.session_manager import SessionManager
+    from issue_orchestrator.domain.validated_work_commands import ValidatedWorkDispositionBatch
+    from issue_orchestrator.entrypoints.mcp_original_delivery import original_delivery_result
+    from issue_orchestrator.execution.original_delivery_docker import DockerOriginalCustody
+
+    fixture = None
+    http = None
+    try:
+        owner, session, _, _ = first_model_owner
+        claims = owner.claims
+        lease_id = session.lease_id
+        if os.environ.get('ENGINE_REAL_GIT_FIXTURE'):
+            source = Path(os.environ['BUILDER_CHILD_PRODUCER_SOURCE']) / 'tools/orchestration'
+            monkeypatch.syspath_prepend(str(source))
+            from test_claim_fixture import ClaimFixtureTests
+            fixture = ClaimFixtureTests(); fixture.setUp()
+            fixture.public('POST', 'refs', {'ref':'refs/heads/master', 'sha':fixture.commit()})
+            http = GitHubHttpClient(GitHubHttpConfig(repo='local/one', token='fixture', base_url=fixture.api.split('/repos/')[0]))
+            claims = GitHubRefClaimAdapter(http, 'fixture', label_adapter=SimpleNamespace(add_label=lambda *_:None, remove_label=lambda *_:None))
+            acquired = claims.attempt_claim(42); assert acquired.success
+            lease_id = acquired.lease_id
+            session.lease_id = lease_id
+        owner.claims = claims; owner.config.repo = 'local/one'
+        owner.state.pause_state = owner.state.pause_state.running()
+        runner, engine, packet, _ = launch
+        inspect = engine.inspect_exec
+        if missing_after_stop:
+            monkeypatch.setattr(engine, 'inspect_exec', lambda exec_id:
+                {'status':404} if not engine.running else inspect(exec_id))
+        run = session.run_assets
+        packet.update(run_id=run.run_id, engine_run_dir=str(run.run_dir), contract_sha256='a'*64)
+        root = runner.launch_path.parent
+        folder = root / run.run_id; folder.mkdir(mode=0o700)
+        path = folder / 'launch.json'; path.write_bytes(canonical(packet)); path.chmod(0o400)
+        runner.launch_path = path; runner.template_path = root / 'template.json'
+        runner._require_original_owner = True  # noqa: SLF001 - sealed role admission substituted
+        engine.packet = packet; engine.record_path = runner.receipt_path()
+        run.run_dir.mkdir(parents=True)
+        run.manifest.path.write_text(json.dumps({'run_id':run.run_id, 'run_dir':str(run.run_dir),
+            'session_name':run.identity.session_name, 'started_at':run.started_at, 'worktree':str(run.worktree_path),
+            'agent_label':session.agent_label}))
+        (run.run_dir / 'session-identity.json').write_text(json.dumps({'session_name':session.terminal_id,
+            'issue_number':42, 'worktree':str(run.worktree_path), 'branch':session.branch_name,
+            'agent':session.agent_label, 'session_key':session.key.stable_id(), 'task':session.key.kind.value}))
+        monkeypatch.setattr('issue_orchestrator.execution.terminal_docker.model_projection_snapshot',
+            lambda packet: ({}, {'role':'standard-implementation'}, {}))
+        monkeypatch.setattr('issue_orchestrator.execution.terminal_docker._authority_environment', lambda packet: {'admitted':'fixture'})
+        assert runner.create_session(42, 'echo safe', packet['working_dir'], None, 'issue-42', None)
+        assert engine.starts == 0
+        backend = DockerOriginalCustody(runner)
+        owner.docker_custody = backend
+        owner.quiescent = lambda original, offline: backend.quiescent(original, offline=offline)
+        owner.verify_contract = backend.verify_contract
+        owner.verify_session = backend.verify_session
+        owner.termination_scope = backend.termination_scope
+        before = claims.original_claim(42)[1]
+        fence = owner.register_prestart(session)
+        assert fence != before and claims.original_claim(42)[0].original is not None
+        monkeypatch.setattr('issue_orchestrator.execution.terminal_docker.time.time_ns', lambda:packet['deadline_unix_ns'] + 1)
+        with pytest.raises(ValueError, match='deadline'):
+            runner.activate_session(run, session.terminal_id, fence)
+        assert engine.starts == 0
+        from unittest.mock import Mock
+        manager = SessionManager(runner, Mock(), owner.config)
+        core = CoreIssueRuntimeOwners(manager, owner.state.active_sessions, None, None, Mock(), Mock(), claims)
+        owners = SimpleNamespace(core=core)
+        owner.terminate = lambda issue: terminate_every_session(owners, issue, 'fixture-cancel',
+            capture=lambda:ValidatedWorkDispositionBatch.no_work(issue, 'fixture-cancel'), observe=lambda _:None)
+        command = OriginalDeliveryCommand('cancel', lease_id, fence, packet['contract_sha256'], run.run_id, 'cancel-fixture')
+        released = owner.execute(42, command)
+        assert owner.state.active_sessions == [] and not engine.running
+        assert released['owner']['cancelled'] and released['remote_released']
+        class Api:
+            async def original_delivery(self, issue_number, operation, payload): return owner.observe(issue_number)
+        public = asyncio.run(original_delivery_result(Api(), Path('/unused'), 42, 'observe', None, running=True))
+        assert not public.isError and public.structuredContent['never_started']['provider_exec_id'] == '3'*64
+        assert public.structuredContent['never_started']['stop_wait'] == 'completed'
+        if missing_after_stop:
+            assert public.structuredContent['never_started']['after'] == {'kind':'exact-exec-not-found','status':404}
+        if builder_source := os.environ.get('BUILDER_CHILD_PRODUCER_SOURCE'):
+            from unittest.mock import patch
+            monkeypatch.syspath_prepend(str(Path(builder_source) / 'tools/orchestration'))
+            import qualification_runner as builder
+            observed = public.structuredContent
+            public_owner = observed['owner']
+            contract = {'repository':{'name':public_owner['repository']}, 'issue':{'number':42},
+                'branch':{'name':public_owner['branch']}, 'execution':{'backend':'docker',
+                    'workspace':public_owner['worktree'], 'agent_label':public_owner['agent'],
+                    'logical_child':public_owner['logical_child'], 'session_name':public_owner['session_name'],
+                    'docker_launch':{'template_path':str(runner.template_path)}},
+                'supervised':{'correction':{'budget':{'max_rework_cycles':public_owner['max_cycles']}}}}
+            row = {**public_owner['docker_custody'][0], 'contract_sha256':packet['contract_sha256']}
+            independent_fence = claims.original_claim(42)[1]
+            observation = {'original_delivery':observed, 'claim_ref_sha':independent_fence,
+                'status':{'active_sessions':[]}, 'supervisor':{'state':'running'}}
+            authority = SimpleNamespace(document={'subject':{'run':'fixture'},'worker':{'image_id':packet['image_id']}},
+                engine_digest=packet['contract_sha256'], engine_contract=contract)
+            result = {'released':True, 'receipts':[row], 'owner':public_owner, 'outer_sha256':'fixture',
+                'engine_sha256':packet['contract_sha256'], 'observation':observation}
+            lifecycle = Mock(); lifecycle.observe.return_value = result
+            supervisor = Mock(); supervisor.drain.return_value = {'status':'drained'}; supervisor.stop.return_value = {'stopped':True}
+            class BuilderDocker:
+                def request(self, method, route):
+                    value = engine.request(method, route)
+                    if route == '/containers/' + row['container_id'] + '/json':
+                        value['State'].update(Pid=0, Status='exited', OOMKilled=False, Error='')
+                        value['RestartCount'] = 0
+                    return value
+                def inspect_exec(self, exec_id): return engine.inspect_exec(exec_id)
+            with patch.object(builder, 'read_authority', return_value=authority), \
+                    patch.object(builder, 'DockerControllerLifecycle', return_value=lifecycle), \
+                    patch.object(builder, 'engine_stop_proof', return_value={'pid':42}):
+                evidence = builder.verify_original_release(supervisor, 'repo', {}, 'path', 'sha',
+                    authority.document['subject'], [row], BuilderDocker(), lambda event:None)
+            assert evidence['containers'][0]['never_started'] == observed['never_started']
+    finally:
+        if http is not None: http.close()
+        if fixture is not None: fixture.doCleanups()
+
+
+def test_start_ack_serializes_with_cancel_without_locking_output_stream(launch, monkeypatch):
+    from types import SimpleNamespace
+    from tests.unit.threading_helpers import wait_for_event
+    runner, engine, packet, _ = launch
+    runner._require_original_owner = True  # noqa: SLF001 - admitted role substituted
+    assert runner.create_session(42, 'echo safe', packet['working_dir'], None, 'issue-42', None)
+    monkeypatch.setattr('issue_orchestrator.execution.terminal_docker._authority_environment', lambda _: {'admitted':'fixture'})
+    entered, acknowledge, reading, finish, cancel_entered = (threading.Event() for _ in range(5))
+    operations = []
+    class Stream:
+        def consume(self, consume):
+            reading.set()
+            wait_for_event(finish, 5, label='stream finish')
+        def close(self): pass
+    def open_exec(exec_id, timeout):
+        operations.append('post'); entered.set()
+        wait_for_event(acknowledge, 5, label='start acknowledgement')
+        operations.append('ack')
+        return Stream()
+    def stop(container_id):
+        operations.append('stop'); engine.running = False
+    monkeypatch.setattr(engine, 'open_exec', open_exec)
+    monkeypatch.setattr(engine, 'stop', stop)
+    failures = []
+    def activate():
+        try: runner.activate_session(SimpleNamespace(run_id=packet['run_id']), 'issue-42', 'a'*40)
+        except Exception as error: failures.append(error)
+    def cancel():
+        cancel_entered.set()
+        try: runner.kill_session(42, 'issue-42')
+        except Exception as error: failures.append(error)
+    starter = threading.Thread(target=activate); starter.start()
+    wait_for_event(entered, 5, label='start POST')
+    canceller = threading.Thread(target=cancel); canceller.start()
+    wait_for_event(cancel_entered, 5, label='cancellation requested')
+    acknowledge.set()
+    starter.join(5); canceller.join(5)
+    assert not starter.is_alive() and not canceller.is_alive() and not failures
+    wait_for_event(reading, 5, label='provider stream')
+    assert operations[:3] == ['post', 'ack', 'stop']
+    assert json.loads(runner.receipt_path().read_bytes())['start_intent'] == 'requested'
+    finish.set()
+    runner.on_orchestrator_shutdown()
+
+
+def test_start_intent_record_failure_never_posts_and_still_stops(launch, monkeypatch):
+    from types import SimpleNamespace
+    runner, engine, packet, _ = launch
+    runner._require_original_owner = True  # noqa: SLF001 - admitted role substituted
+    assert runner.create_session(42, 'echo safe', packet['working_dir'], None, 'issue-42', None)
+    monkeypatch.setattr('issue_orchestrator.execution.terminal_docker._authority_environment', lambda _: {'admitted':'fixture'})
+    save = runner._save  # noqa: SLF001
+    def fail_intent():
+        if runner._record.get('start_intent') == 'requested':  # noqa: SLF001
+            raise OSError('synthetic recorder failure')
+        save()
+    monkeypatch.setattr(runner, '_save', fail_intent)
+    with pytest.raises(RuntimeError, match='start intent'):
+        runner.activate_session(SimpleNamespace(run_id=packet['run_id']), 'issue-42', 'a'*40)
+    with pytest.raises(OSError): runner.kill_session(42, 'issue-42')
+    assert engine.starts == 0 and not engine.running
+    assert 'never_started' not in json.loads(runner.receipt_path().read_bytes())
+
+
+def test_exec_start_ack_past_original_deadline_is_unknown(monkeypatch):
+    from issue_orchestrator.execution.docker_engine import DockerEngine
+    class Sock:
+        def settimeout(self, timeout): pass
+    class Connection:
+        closed = False
+        def __init__(self, path, timeout): self.sock = Sock()
+        def request(self, *args, **kwargs): pass
+        def getresponse(self): return type('Response', (), {'status':200})()
+        def close(self): self.closed = True
+    class Timer:
+        def __init__(self, limit, callback): self.daemon = False
+        def start(self): pass
+        def cancel(self): pass
+    times = iter((100.0, 106.0))
+    monkeypatch.setattr('issue_orchestrator.execution.docker_engine._UnixConnection', Connection)
+    monkeypatch.setattr('issue_orchestrator.execution.docker_engine.threading.Timer', Timer)
+    monkeypatch.setattr('issue_orchestrator.execution.docker_engine.time.monotonic', lambda:next(times))
+    with pytest.raises(TimeoutError): DockerEngine().open_exec('a'*64, 5)
+
+
+@pytest.mark.parametrize(('status', 'accepted'), [(200, True), (404, True), (500, False)])
+def test_exact_exec_inspection_preserves_only_expected_http_status(monkeypatch, status, accepted):
+    from issue_orchestrator.execution.docker_engine import DockerEngine
+    if status == 404 and (source := os.environ.get('DOCKER_POSTSTOP_FAILURE_FIXTURE')):
+        raw = Path(source).read_bytes()
+        assert sha256(raw).hexdigest() == 'a4d1473bcf435f6fd95165fb059a43219a39372acbc9f44b14ea21642ded2180'
+        # Substitute only the captured HTTP status; the receipt is not an API response.
+        assert json.loads(raw)['http_status'] == status
+    class Response:
+        def __init__(self): self.status = status
+        def read(self, count): return b'{"ID":"' + b'a'*64 + b'"}'
+    class Connection:
+        def __init__(self, path, timeout): pass
+        def request(self, method, route, **kwargs):
+            assert method == 'GET' and route == '/v1.45/exec/' + 'a'*64 + '/json'
+        def getresponse(self): return Response()
+        def close(self): pass
+    monkeypatch.setattr('issue_orchestrator.execution.docker_engine._UnixConnection', Connection)
+    if not accepted:
+        with pytest.raises(ValueError): DockerEngine().inspect_exec('a'*64)
+    else:
+        result = DockerEngine().inspect_exec('a'*64)
+        assert result == ({'status':404} if status == 404 else {'status':200,'value':{'ID':'a'*64}})
+    with pytest.raises(ValueError): DockerEngine().inspect_exec('../foreign')
+
+
+def test_legacy_poststop_failure_is_not_a_typed_exec_inspection():
+    from issue_orchestrator.execution.docker_never_started import after_stop
+    legacy = {'exception_type':'ValueError', 'http_status':404, 'phase':'inspect', 'reason':'other', 'result':'NONPASS'}
+    if source := os.environ.get('DOCKER_POSTSTOP_FAILURE_FIXTURE'):
+        raw = Path(source).read_bytes()
+        assert sha256(raw).hexdigest() == 'a4d1473bcf435f6fd95165fb059a43219a39372acbc9f44b14ea21642ded2180'
+        legacy = json.loads(raw)
+    record = {'daemon_id':'daemon', 'container_id':'b'*64, 'provider_exec_id':'c'*64, 'launch_sha256':'d'*64}
+    class Daemon:
+        def request(self, method, route):
+            if route == '/info': return {'ID':'daemon'}
+            return {'Id':record['container_id'], 'State':{'Running':False},
+                'Config':{'Labels':{'io.builder.launch':record['launch_sha256']}}}
+        def inspect_exec(self, exec_id): return legacy
+    with pytest.raises(ValueError): after_stop(Daemon(), None, record)
+
+
+def test_retained_poststop_preobservation_matches_exact_exec_validator():
+    from issue_orchestrator.execution.docker_worker_state import require_never_started_exec
+    observed = {'ContainerID':'d9225630ffe45009b2059869c7897472a4f96269abed5f3d361227a22aa3dca8',
+        'ExitCode':None, 'ID':'276cb6e1ad7e17b73b4bddf474ed26fb1fc5ee639eb4357cc493e37af14bb6eb',
+        'Pid':0, 'ProcessConfig':{'arguments':['-I','-B','-c','pass'], 'entrypoint':'/usr/bin/python3',
+            'privileged':False, 'tty':False, 'user':'1000:1000'}, 'Running':False}
+    if source := os.environ.get('DOCKER_POSTSTOP_PRE_FIXTURE'):
+        raw = Path(source).read_bytes()
+        assert sha256(raw).hexdigest() == 'f739c54048df02e09109cfdf3979cfd852fb5480e297476201f3fba7fbda9113'
+        observed = json.loads(raw)
+    require_never_started_exec(observed, observed['ContainerID'], observed['ID'], '1000:1000',
+        ['/usr/bin/python3','-I','-B','-c','pass'])

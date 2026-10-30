@@ -99,7 +99,8 @@ from .needs_human_block import (
     SharedNeedsHumanBlock,
 )
 from .tech_lead_needs_human_reconcile import TechLeadNeedsHumanLifecycle, discover_tech_lead_needs_human_issue_numbers
-from .session_manager import SessionManager
+from .session_manager import SessionManager, SessionRef
+from .active_sessions import append_unique_active_sessions
 from .tech_lead_run_inputs import preserved_source_run, transfer_launch_authority
 from .launch_transaction import (
     NO_LAUNCH_WORK_CLAIM,
@@ -668,6 +669,7 @@ class SessionLauncher:
         *,
         tech_lead_scope: "TechLeadLaunchScope | None" = None,
         work_claim: LaunchWorkClaim = NO_LAUNCH_WORK_CLAIM,
+        activate_original: Callable[[Session], None] | None = None,
     ) -> LaunchResult:
         """Launch a session for an issue.
 
@@ -1106,6 +1108,18 @@ class SessionLauncher:
                 # GitHub read (#6994).
                 tech_lead_scope=tech_lead_scope,
             )
+
+            if self._session_preparation is not None and self._session_preparation.activation_pending(session_name) is True:
+                if append_unique_active_sessions(active_sessions, [session]) != [session]:
+                    raise ValueError('Docker prepared session is not unique')
+                try:
+                    if activate_original is None:
+                        raise ValueError('Docker original activation is unavailable')
+                    activate_original(session)
+                except Exception:
+                    logger.exception('Docker prepared original retained without activation')
+                    return LaunchResult(None, False, 'Docker original activation unavailable')
+                self.session_manager.mark_launched(SessionRef.for_issue(issue.number), worktree_path)
 
             total_time = time.time() - launch_start
             logger.info(

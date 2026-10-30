@@ -226,7 +226,8 @@ class Orchestrator(DockerModelGatewayMixin):
     @shutdown_requested.setter
     def shutdown_requested(self, value: bool) -> None:
         """Set shutdown requested flag (use request_shutdown() for proper event emission)."""
-        self._shutdown_requested = value
+        with self.state_lock:
+            self._shutdown_requested = value
 
     @property
     def event_context(self) -> EventContext:
@@ -499,7 +500,7 @@ class Orchestrator(DockerModelGatewayMixin):
             # repository-host error from a non-fetch startup phase propagates
             # unchanged, exactly as it did before issue-fetch resilience existed.
             self._record_permanent_fetch_failure(error.verdict, context="STARTUP")
-            self._shutdown_requested = True
+            self.shutdown_requested = True
 
     def _record_permanent_fetch_failure(self, verdict: FetchFailureVerdict, *, context: str) -> None:
         """Log an actionable message and persist a clear failure record.
@@ -528,7 +529,19 @@ class Orchestrator(DockerModelGatewayMixin):
         return self.launch_session_step(issue, tech_lead_scope=tech_lead_scope).session
 
     def launch_session_step(self, issue: Issue, *, tech_lead_scope: "TechLeadLaunchScope | None" = None) -> LaunchStep:
-        return _launch_session(issue, self.state, self.session_launcher, self.deps.session_restorer, tech_lead_scope=tech_lead_scope)
+        with self.state_lock:
+            return _launch_session(issue, self.state, self.session_launcher, self.deps.session_restorer,
+                tech_lead_scope=tech_lead_scope, activate_original=self._activate_docker_original)
+
+    def _activate_docker_original(self, session: Session) -> None:
+        owner = self.deps.original_delivery_owner
+        if self.shutdown_requested or self.state.paused or owner is None or not self.deps.health_gate.check(paused=False).can_proceed:
+            raise ValueError('Docker pre-start owner or engine health unavailable')
+        fence = owner.register_prestart(session)
+        if self.shutdown_requested or self.state.paused or not self.deps.health_gate.check(paused=False).can_proceed:
+            raise ValueError('Docker pre-start engine health changed')
+        owner.require_prestart_current(session, fence)
+        self.deps.runner.activate_session(session.run_assets, session.terminal_id, fence)
 
     def handle_session_completion(self, session: Session, status: SessionStatus, *, provider_error_type: "ProviderErrorType | None" = None) -> None:
         _handle_session_completion(
@@ -947,7 +960,7 @@ class Orchestrator(DockerModelGatewayMixin):
                 # actionable message and shut down cleanly rather than crashing
                 # with a raw traceback or spinning the loop-error budget.
                 self._record_permanent_fetch_failure(e.verdict, context="LOOP")
-                self._shutdown_requested = True
+                self.shutdown_requested = True
                 break
             except Exception as e:
                 self._handle_loop_error(e)
@@ -992,8 +1005,8 @@ class Orchestrator(DockerModelGatewayMixin):
 
     def request_shutdown(self, force: bool = False) -> None:
         """Request graceful or forced shutdown."""
-        self._shutdown_requested = True
         with self.state_lock:
+            self._shutdown_requested = True
             active = self.state.active_sessions
         self.deps.events.publish(
             TraceEvent(

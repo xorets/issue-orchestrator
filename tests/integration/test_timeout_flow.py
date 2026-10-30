@@ -26,6 +26,9 @@ from tests.callback_endpoint_helpers import ready_callback_endpoint
 
 
 class StubSessionRunner:
+    def activation_pending(self, session_name: str) -> bool:
+        return False
+
     def session_exists_by_name(self, session_name: str) -> bool:
         return True
 

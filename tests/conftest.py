@@ -841,6 +841,9 @@ class MockSessionRunner:
     Implements the SessionRunner protocol and tracks calls.
     """
 
+    def activation_pending(self, session_name: str) -> bool:
+        return False
+
     def __init__(self, plugin: MockTerminalPlugin | None = None):
         self._plugin = plugin or MockTerminalPlugin()
 
