@@ -5,6 +5,8 @@ packet, retains Docker identities before start, and never replays a launch.
 """
 from __future__ import annotations
 
+from contextlib import suppress
+
 from hashlib import sha256
 import json
 import logging
@@ -426,7 +428,7 @@ class DockerPlugin:
             if reserved and self._record is not None:
                 self._record["error"] = "launch-refused-or-uncertain"
                 self._record["state"] = DockerSessionState.RETAINED
-                self._save()
+                with suppress(OSError): self._save()
                 if not self._record.get("container_id") and packet is not None:
                     try:
                         self._recover_created_identity(packet)
@@ -436,9 +438,9 @@ class DockerPlugin:
                     try:
                         self._stop_owned(session_id, session_name)
                     except Exception:
-                        self._record["error"] = "container-stop-unproven"
+                        logger.exception("Docker startup stop unverified")
                         self._record["state"] = DockerSessionState.RETAINED
-                        self._save()
+                        with suppress(OSError): self._save()
             return False
 
     def _deadline_stop(self) -> None:

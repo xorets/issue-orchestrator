@@ -1323,3 +1323,24 @@ def test_controller_deadline_is_distinct_from_provider_timeout(launch):
     assert not engine.running
     receipt = json.loads(runner.receipt_path().read_bytes())
     assert receipt['diagnostic']['primary'] == {'phase':'provider', 'reason':'controller_deadline'}
+
+@pytest.mark.parametrize('stop_fails', [False, True])
+def test_startup_record_failure_still_attempts_owned_stop(launch, monkeypatch, stop_fails):
+    runner, engine, packet, _ = launch
+    original_save = runner._save  # noqa: SLF001
+    stopped = []
+    def fail_allocated_save():
+        if runner._record and runner._record.get('container_id'):  # noqa: SLF001
+            raise OSError('synthetic recording failure')
+        original_save()
+    def stop(container):
+        stopped.append(container)
+        if stop_fails: raise OSError('synthetic stop failure')
+        engine.running = False
+    monkeypatch.setattr(runner, '_save', fail_allocated_save)
+    monkeypatch.setattr(engine, 'stop', stop)
+    assert runner.create_session(42, 'echo safe', packet['working_dir'], None, 'issue-42', secret_env=None) is False
+    assert stopped == ['2' * 64]
+    assert engine.running is stop_fails
+    assert runner._record['error'] == 'launch-refused-or-uncertain'  # noqa: SLF001
+    assert runner._record.get('diagnostic') is None  # noqa: SLF001
