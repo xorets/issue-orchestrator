@@ -962,6 +962,10 @@ class TestBuildOrchestratorForTesting:
 class TestBuildOrchestrator:
     """Tests for build_orchestrator function (main composition root)."""
 
+    @pytest.fixture(autouse=True)
+    def fake_github_token(self, monkeypatch):
+        monkeypatch.setenv("ISSUE_ORCH_GITHUB_TOKEN", "test-only-bootstrap-token")
+
     @pytest.fixture
     def minimal_config(self, tmp_path) -> Config:
         """Minimal valid config for testing."""
