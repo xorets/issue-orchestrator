@@ -1105,8 +1105,12 @@ def test_terminal_provider_handoff_stops_worker_even_on_invalid_status(launch, t
     assert runner._record['diagnostic']['primary'] is None  # noqa: SLF001
 
 
-@pytest.mark.parametrize(('status_recording_fails', 'receipt_recording_fails', 'transport_fails', 'corrupt_status'), [(False, False, False, ''), (True, False, False, ''), (False, True, False, ''), (True, True, False, ''), (False, True, True, ''), (False, True, False, 'malformed'), (False, True, False, 'foreign')])
-def test_real_provider_failure_survives_stop_failure(launch, tmp_path, monkeypatch, status_recording_fails, receipt_recording_fails, transport_fails, corrupt_status):
+@pytest.mark.parametrize(('outcome', 'status_recording_fails', 'receipt_recording_fails', 'transport_fails', 'corrupt_status'),
+    [(outcome, *case) for outcome in ('failure', 'timeout') for case in
+        [(False, False, False, ''), (True, False, False, ''), (False, True, False, ''),
+         (True, True, False, ''), (False, True, True, ''), (False, True, False, 'malformed'),
+         (False, True, False, 'foreign')]] + [('cancel', False, False, False, '')])
+def test_real_provider_failure_survives_stop_failure(launch, tmp_path, monkeypatch, status_recording_fails, receipt_recording_fails, transport_fails, corrupt_status, outcome):
     """Actual provider status must survive the later Docker stop error."""
     import shlex
     import subprocess
@@ -1133,10 +1137,13 @@ def test_real_provider_failure_survives_stop_failure(launch, tmp_path, monkeypat
     agent = AgentConfig(prompt_path=tmp_path / 'prompt', provider='codex', provider_args={'execution_mode':'exec'})
     wrapper = ProviderCommandWrapper(ProviderShortRetryConfig(max_attempts=1, initial_backoff_seconds=1,
         max_backoff_seconds=1, jitter=False))
-    command = wrapper.wrap('printf "connection refused\\n" >&2; exit 1', agent, slot)
+    command = wrapper.wrap("/usr/bin/python3 -c 'import select; select.select([], [], [])'" if outcome == 'timeout' else 'printf "connection refused\\n" >&2; exit 1', agent, slot)
     env = {**os.environ, 'PYTHONPATH':str(Path(__file__).resolve().parents[2] / 'src')}
-    child = subprocess.run(shlex.split(command), cwd=tmp_path, env=env, capture_output=True, timeout=10)
-    assert child.returncode == 1
+    if outcome != 'cancel':
+        argv = shlex.split(command)
+        if outcome == 'timeout': argv[argv.index('--timeout-seconds') + 1] = '1'
+        child = subprocess.run(argv, cwd=tmp_path, env=env, capture_output=True, timeout=15)
+        assert child.returncode == (124 if outcome == 'timeout' else 1)
     descriptor = os.open(slot, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     exec_id = '3'*64
     runner._provider_slot = (slot, descriptor, 'codex', False)  # noqa: SLF001
@@ -1149,21 +1156,34 @@ def test_real_provider_failure_survives_stop_failure(launch, tmp_path, monkeypat
     original_request = engine.request
     def request(method, route, payload=None):
         result = original_request(method, route, payload)
-        if route == '/exec/' + exec_id + '/json': result['ExitCode'] = 1
+        if route == '/exec/' + exec_id + '/json':
+            result['ExitCode'] = 124 if outcome == 'timeout' else 1
+            if outcome == 'cancel': result['Running'] = cancel_child.poll() is None
         return result
+    cancel_child = subprocess.Popen(['/usr/bin/python3', '-c', 'import sys; sys.stdin.read()'], stdin=subprocess.PIPE) if outcome == 'cancel' else None
     def stop(_):
+        if cancel_child is not None:
+            cancel_child.terminate(); cancel_child.wait(timeout=5); engine.running = False
+            return
         if receipt_recording_fails: launch_dir.chmod(0o500)
         raise OSError('sensitive-stop-detail')
     engine.request = request
     engine.stop = stop
     if status_recording_fails: run.chmod(0o500)
     try:
-        if receipt_recording_fails:
+        if outcome == 'cancel':
+            os.close(descriptor); runner._provider_slot = None  # noqa: SLF001
+            runner.kill_session(42, 'issue-42')
+            assert cancel_child is not None and cancel_child.returncode is not None
+        elif receipt_recording_fails:
             with pytest.raises(OSError): runner._run_provider()  # noqa: SLF001
         else:
             runner._run_provider()  # noqa: SLF001
     finally:
         run.chmod(0o700); launch_dir.chmod(0o700)
+        if cancel_child is not None:
+            if cancel_child.poll() is None: cancel_child.kill(); cancel_child.wait(timeout=5)
+            if cancel_child.stdin: cancel_child.stdin.close()
     if corrupt_status:
         status_path = run / 'provider-status.json'
         if corrupt_status == 'malformed': status_path.write_text('{')
@@ -1214,11 +1234,11 @@ def test_real_provider_failure_survives_stop_failure(launch, tmp_path, monkeypat
         assert diagnostic['secondary'] == [{'phase':'record', 'reason':'record_unavailable'},
             {'phase':'status', 'reason':'status_unavailable'}]
     else:
-        assert diagnostic['primary'] == {'phase':'provider', 'reason':'provider_transient'}
+        assert diagnostic['primary'] == {'phase':'provider', 'reason':{'failure':'provider_transient', 'timeout':'provider_timeout', 'cancel':'provider_cancelled'}[outcome]}
         expected = ([{'phase':'record', 'reason':'record_unavailable'}] if receipt_recording_fails else
             ([{'phase':'record', 'reason':'record_failed'}] if status_recording_fails else []) +
             [{'phase':'stop', 'reason':'stop_unverified'}])
-        assert diagnostic['secondary'] == expected
+        assert diagnostic['secondary'] == ([] if outcome == 'cancel' else expected)
     assert 'connection refused' not in json.dumps(result.structuredContent)
     assert 'sensitive-stop-detail' not in json.dumps(result.structuredContent)
 
