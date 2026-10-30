@@ -71,6 +71,9 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv or sys.argv[1:])
 
     run_dir = _resolve_run_dir(args)
+    if os.environ.get("ISSUE_ORCHESTRATOR_CALLBACK_SCOPE") == "docker":
+        from issue_orchestrator.execution.docker_provider_status import worker_slot
+        run_dir = worker_slot(os.environ["ISSUE_ORCHESTRATOR_DOCKER_PROVIDER_DIR"], run_dir)
     output_dir = run_dir / "provider-runner"
 
     provider = args.provider or detect_ai_system_from_command(args.command) or None

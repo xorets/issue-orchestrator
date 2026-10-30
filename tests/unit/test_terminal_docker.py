@@ -1075,3 +1075,30 @@ def test_builder_delivery_startup_allowance_survives_fresh_engine_run(bridge_lau
         runner.launch_path = path / 'launch.json'; runner.launch_path.write_bytes(canonical(packet)); runner.launch_path.chmod(0o400)
         assert not runner.create_session(42, 'echo safe', packet['working_dir'], None, 'issue-42', secret)
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize('invalid', [False, True])
+def test_terminal_provider_handoff_stops_worker_even_on_invalid_status(launch, tmp_path, invalid):
+    from issue_orchestrator.infra.provider_resilience import read_provider_status
+    runner, engine, packet, _ = launch
+    run = tmp_path / 'controller-run'; run.mkdir(mode=0o700)
+    packet['engine_run_dir'] = str(run)
+    ordinary = Path(packet['output_root']) / packet['run_id']; ordinary.mkdir(mode=0o700)
+    slot = tmp_path / 'worker-slot'; slot.mkdir(mode=0o700)
+    status = {'provider':'codex', 'error_type':None, 'attempts':1, 'succeeded':True, 'exit_code':0,
+        'timed_out':False, 'last_error_summary':None, 'last_attempt_at':'2026-10-30T00:00:00+00:00', 'quota_heals_on_timer':False}
+    (slot / 'provider-status.json').write_text('{}' if invalid else json.dumps(status))
+    fd = os.open(slot, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    exec_id = '3'*64
+    runner._provider_slot = (slot, fd)  # noqa: SLF001
+    runner._packet = packet  # noqa: SLF001
+    runner._record = {  # noqa: SLF001
+        'issue_number':42, 'session_name':'issue-42', 'daemon_id':packet['daemon_id'],
+        'container_id':'2'*64, 'provider_exec_id':exec_id, 'launch_sha256':sha256(canonical(packet)).hexdigest(),
+        'state':'exec_created', 'output_bytes':0, 'overflow':False, 'provider_exit_code':None, 'error':''}
+    engine.exec_payloads[exec_id] = {}
+    runner._run_provider()  # noqa: SLF001
+    assert not engine.running
+    assert runner._record['provider_exit_code'] == 0  # noqa: SLF001
+    assert runner._record['error'] == ('provider-status-invalid' if invalid else '')  # noqa: SLF001
+    assert (read_provider_status(run) is None) == invalid

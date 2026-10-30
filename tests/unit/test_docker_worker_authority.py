@@ -605,3 +605,49 @@ def test_review_request_bound_matches_history_proof_capacity():
     require_current_model_grant(packet, inner, grant)
     with pytest.raises(ValueError, match='history proof bound'):
         require_current_model_grant(packet, inner, {**grant, 'max_model_requests':257})
+
+
+def test_authenticated_docker_command_runner_and_status_handoff(model_authority, tmp_path, monkeypatch):
+    """Public proof locations/root custody alone are virtualized by model_authority."""
+    import json
+    import os
+    import shlex
+    from issue_orchestrator.control.provider_command_wrapper import ProviderCommandWrapper
+    from issue_orchestrator.domain.models import AgentConfig
+    from issue_orchestrator.entrypoints.cli_tools.provider_runner import main
+    from issue_orchestrator.execution.docker_provider_status import allocate, settle, worker_slot
+    from issue_orchestrator.infra.config_models import ProviderShortRetryConfig
+    from issue_orchestrator.infra.provider_resilience import read_provider_status
+
+    packet, _, _, _, _, seal = model_authority
+    scratch = tmp_path / 'scratch'; scratch.mkdir(mode=0o700)
+    controller = tmp_path / (packet['run_id'] + '__coding-1'); controller.mkdir(mode=0o700)
+    packet['engine_run_dir'] = str(controller)
+    packet['mounts'].append({'source':str(scratch), 'target':str(scratch), 'read_only':False})
+    path = Path(packet['worker_authority']['engine_contract_path'])
+    inner = json.loads(path.read_bytes()); inner['capabilities']['scratch'] = str(scratch)
+    path.chmod(0o600); path.write_bytes(canonical(inner)); path.chmod(0o400)
+    seal()
+    slot, descriptor = allocate(packet, tmp_path)
+    monkeypatch.setenv('ISSUE_ORCHESTRATOR_CALLBACK_SCOPE', 'docker')
+    monkeypatch.setenv('ISSUE_ORCHESTRATOR_DOCKER_PROVIDER_DIR', str(slot))
+    monkeypatch.setenv('XORETS_DOCKER_LAUNCH_JSON', canonical(packet).decode())
+    with pytest.raises(ValueError): worker_slot(str(tmp_path / 'foreign'), controller)
+    with pytest.raises(ValueError): worker_slot(str(slot), tmp_path / 'foreign-run')
+    marker = tmp_path / 'provider-started'
+    agent = AgentConfig(prompt_path=tmp_path / 'prompt', provider='codex', provider_args={'execution_mode':'exec'})
+    wrapper = ProviderCommandWrapper(ProviderShortRetryConfig(max_attempts=1, initial_backoff_seconds=1,
+        max_backoff_seconds=1, jitter=False))
+    command = wrapper.wrap(f'printf started > {shlex.quote(str(marker))}', agent, controller)
+    argv = shlex.split(command)
+    try:
+        controller.chmod(0o500)  # Worker sees controller metadata read-only.
+        assert main(argv[3:]) == 0
+        assert marker.read_text() == 'started'
+        controller.chmod(0o700)  # Controller retains write custody.
+        settle(slot, descriptor, packet, 0)
+    finally:
+        controller.chmod(0o700)
+        os.close(descriptor)
+    status = read_provider_status(controller)
+    assert status is not None and status.succeeded

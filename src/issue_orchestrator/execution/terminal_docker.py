@@ -24,6 +24,7 @@ from ..domain.docker_execution import DockerSessionState
 from ..domain.session_run import SessionRunAssets
 from ..infra.hooks.hookspec import hookimpl
 from .docker_startup_allowance import reserve_startup
+from .docker_provider_status import ENV as PROVIDER_DIR_ENV, allocate as allocate_provider_dir, settle as settle_provider_status
 from .docker_engine import DockerEngine
 from .docker_output import (
     bounded_output, private_directory as private_directory,
@@ -131,6 +132,7 @@ class DockerPlugin:
         self._lock = threading.RLock()
         self._watcher: threading.Thread | None = None
         self._watched_record: dict | None = None
+        self._provider_slot: tuple[Path, int] | None = None
 
     def select_run(self, run_id: str) -> None:
         if self.template_path is None or not re.fullmatch(r"[0-9]{8}-[0-9]{6}Z-[0-9a-f]{32}", run_id):
@@ -382,6 +384,17 @@ class DockerPlugin:
             require_selected_bridge(self.engine, packet, controller)
         return actual
 
+    def _prepare_provider_dir(self, packet: dict, environment: dict[str, str]) -> None:
+        if "XORETS_DOCKER_LAUNCH_JSON" in environment:
+            root = Path("/srv/builder/tasks") / packet["builder_run_id"]
+            self._provider_slot = allocate_provider_dir(packet, root)
+            environment[PROVIDER_DIR_ENV] = str(self._provider_slot[0])
+
+    def _close_provider_dir(self) -> None:
+        if self._provider_slot is not None:
+            os.close(self._provider_slot[1])
+            self._provider_slot = None
+
     @hookimpl
     def create_session(self, session_id: int, command: str, working_dir: str, title: str | None,
                        session_name: str, secret_env: dict[str, str] | None) -> bool:
@@ -395,6 +408,7 @@ class DockerPlugin:
             environment_values = worker_environment(packet, secret_env or {},
                 self._callback_token or os.environ.get("ISSUE_ORCHESTRATOR_AGENT_CALLBACK_TOKEN"))
             reserve_startup(packet, self.template_path)
+            self._prepare_provider_dir(packet, environment_values)
             launch_digest = sha256(canonical(packet)).hexdigest()
             with self._lock:
                 descriptor = os.open(self.receipt_path(), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -456,6 +470,7 @@ class DockerPlugin:
             return True
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
             logger.exception("Docker session creation refused; no Native fallback")
+            self._close_provider_dir()
             if reserved and self._record is not None:
                 self._record["error"] = "launch-refused-or-uncertain"
                 self._record["state"] = DockerSessionState.RETAINED
@@ -555,14 +570,26 @@ class DockerPlugin:
                     raise ValueError("Docker launch deadline exhausted")
                 self.engine.start_exec(record["provider_exec_id"], consume, remaining)
             provider = self.engine.request("GET", f"/exec/{record['provider_exec_id']}/json")
-            if provider.get("ContainerID") != record["container_id"] or provider.get("Running") is not False:
+            if (provider.get("ID") != record["provider_exec_id"] or
+                    provider.get("ContainerID") != record["container_id"] or provider.get("Running") is not False or
+                    type(provider.get("ExitCode")) is not int):
                 raise ValueError("Docker provider did not settle")
             record["provider_exit_code"] = provider.get("ExitCode")
+            if self._provider_slot is not None:
+                try:
+                    settle_provider_status(*self._provider_slot, packet, record["provider_exit_code"])
+                except (OSError, ValueError, TypeError, KeyError):
+                    logger.exception("Docker provider status refused")
+                    record["error"] = record["error"] or "provider-status-invalid"
         except Exception:
             logger.exception("Docker provider result retained as unknown")
             record["error"] = "provider-unsettled-or-bound-exhausted"
         finally:
             deadline.cancel()
+            try:
+                self._close_provider_dir()
+            except OSError:
+                logger.exception("Docker provider slot descriptor close failed")
             try:
                 self.kill_session(record["issue_number"], record["session_name"])
             except Exception:

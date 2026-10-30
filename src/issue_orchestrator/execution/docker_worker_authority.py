@@ -373,7 +373,7 @@ def _model_environment(packet: dict, provider: dict[str, str], environment: dict
 def worker_environment(packet: dict, provider: dict[str, str], callback_token: str | None) -> dict[str, str]:
     """Only explicit provider secrets, scoped callback and verified seals cross."""
     reserved = {*DEFAULT_FORBIDDEN_ENV_VARS, "ISSUE_ORCH_GITHUB_TOKEN", "XORETS_EXECUTION_CONTRACT",
-        "XORETS_EXECUTION_DIGEST", "ISSUE_ORCHESTRATOR_AGENT_CALLBACK_TOKEN", "ISSUE_ORCHESTRATOR_MODEL_GATEWAY_TOKEN", "ISSUE_ORCHESTRATOR_MODEL_GATEWAY_PID", "ISSUE_ORCHESTRATOR_MODEL_GATEWAY_BIRTH", MODEL_LAUNCH_ENV, MODEL_PROJECTION_ENV}
+        "XORETS_EXECUTION_DIGEST", "ISSUE_ORCHESTRATOR_AGENT_CALLBACK_TOKEN", "ISSUE_ORCHESTRATOR_MODEL_GATEWAY_TOKEN", "ISSUE_ORCHESTRATOR_MODEL_GATEWAY_PID", "ISSUE_ORCHESTRATOR_MODEL_GATEWAY_BIRTH", "ISSUE_ORCHESTRATOR_DOCKER_PROVIDER_DIR", MODEL_LAUNCH_ENV, MODEL_PROJECTION_ENV}
     if any(name in reserved or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) or "\x00" in value
             for name, value in provider.items()):
         raise ValueError("Docker provider environment overrides controller authority")

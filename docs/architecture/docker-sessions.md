@@ -68,6 +68,16 @@ in the settlement receipt. Restored output reads the same sealed root and run;
 restart never replays exec. Session-run projections inside the worker worktree
 remain ordinary task data and do not confer custody.
 
+For the authenticated v2 worker, the controller verifies the sealed scratch path
+has an exact same-path writable mount, then allocates an exclusive engine-run
+slot there. The provider runner reauthenticates the delivery and writes only its
+runtime files and status to that slot; controller run metadata remains read-only
+to the worker. After the original exec settles, the terminal adapter validates a
+bounded regular single-link status and its exit code before copying the diagnostic
+classification into the controller run directory. Worker-written status is not
+admission or release evidence; a missing or invalid status never prevents the
+terminal adapter from stopping the owned worker.
+
 CLI **worker-side** user/session scratch lives under bounded `/tmp`; system patch markers stay
 on the immutable root at `/var/devcontainer`. The selected CLI skips system
 environment/profile patching when it cannot create those markers. A writable
