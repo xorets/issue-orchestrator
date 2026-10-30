@@ -121,3 +121,14 @@ def settle(slot: Path, descriptor: int, lane: str, heals: bool, packet: dict, ex
     except OSError as exc:
         raise ProviderStatusWriteError(status) from exc
     return status
+
+
+def record_diagnostic(lock, record: dict, primary: dict | None = None, secondary: dict | None = None) -> None:
+    """Keep the first observed origin and a bounded list of subsequent failures."""
+    with lock:
+        diagnostic = record.setdefault('diagnostic', {'run_id':record['run_id'],
+            'launch_sha256':record['launch_sha256'], 'primary':None, 'secondary':[]})
+        if primary is not None and diagnostic['primary'] is None:
+            diagnostic['primary'] = primary
+        if secondary is not None and secondary not in diagnostic['secondary'] and len(diagnostic['secondary']) < 4:
+            diagnostic['secondary'].append(secondary)

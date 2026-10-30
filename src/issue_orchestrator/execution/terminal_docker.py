@@ -5,7 +5,6 @@ packet, retains Docker identities before start, and never replays a launch.
 """
 from __future__ import annotations
 
-from contextlib import suppress
 from hashlib import sha256
 import json
 import logging
@@ -13,8 +12,6 @@ import os
 from pathlib import Path
 import pwd
 import re
-import selectors
-import signal
 import subprocess
 import threading
 import time
@@ -25,10 +22,10 @@ from ..domain.session_run import SessionRunAssets
 from ..infra.hooks.hookspec import hookimpl
 from .docker_startup_allowance import reserve_startup
 from .docker_provider_status import (ENV as PROVIDER_DIR_ENV, ProviderStatusWriteError,
-    allocate as allocate_provider_dir, settle as settle_provider_status)
+    allocate as allocate_provider_dir, settle as settle_provider_status, record_diagnostic)
 from .docker_engine import DockerEngine
 from .docker_output import (
-    bounded_output, private_directory as private_directory,
+    run_cli_capture as run_cli_capture, bounded_output, private_directory as private_directory,
     seal_first_model_bytes as seal_first_model_bytes, first_model_evidence_size as first_model_evidence_size,
 )
 from .docker_worker_state import (
@@ -58,52 +55,6 @@ def seed_control_manifest(packet: dict, temporary: Path) -> None:
         destination.write(raw)
     fetched = packet["control_manifest"]["fetched_unix_ns"]
     os.utime(cache, ns=(fetched, fetched), follow_symlinks=False)
-
-
-def run_cli_capture(argv: list[str], *, environment: dict[str, str], timeout: float,
-                    output_limit: int = 1024 * 1024, diagnostic_path: Path | None = None) -> tuple[bytes, bytes, int]:
-    """Bound both CLI pipes before allocation and kill descendants on timeout."""
-    if timeout <= 0:
-        raise ValueError("Dev Container CLI deadline exhausted")
-    child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, env=environment, start_new_session=True)
-    assert child.stdout is not None and child.stderr is not None
-    output, errors = bytearray(), bytearray()
-    completed = False
-    deadline = time.monotonic() + timeout
-    selector = selectors.DefaultSelector()
-    try:
-        selector.register(child.stdout, selectors.EVENT_READ, output)
-        selector.register(child.stderr, selectors.EVENT_READ, errors)
-        while selector.get_map():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise ValueError("Dev Container CLI deadline exhausted")
-            for key, _ in selector.select(min(remaining, 0.2)):
-                chunk = os.read(key.fd, 65536)
-                if not chunk:
-                    selector.unregister(key.fileobj)
-                elif len(output) + len(errors) + len(chunk) > output_limit:
-                    raise ValueError("Dev Container CLI output bound exhausted")
-                else:
-                    key.data.extend(chunk)
-        exit_code = child.wait(timeout=max(0.001, deadline - time.monotonic()))
-        completed = exit_code == 0
-        return bytes(output), bytes(errors), exit_code
-    finally:
-        selector.close()
-        if not completed:
-            with suppress(ProcessLookupError):
-                os.killpg(child.pid, signal.SIGKILL)
-        child.wait(timeout=5)
-        child.stdout.close()
-        child.stderr.close()
-        if diagnostic_path is not None:
-            descriptor = os.open(diagnostic_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-            with os.fdopen(descriptor, "wb") as destination:
-                destination.write(bytes(output) + b"\n--- stderr ---\n" + bytes(errors))
-                destination.flush()
-                os.fsync(destination.fileno())
 
 
 def run_cli(argv: list[str], *, environment: dict[str, str], timeout: float, diagnostic_path: Path | None = None) -> bytes:
@@ -490,20 +441,11 @@ class DockerPlugin:
                         self._save()
             return False
 
-    def _record_diagnostic(self, record: dict, primary: dict | None = None, secondary: dict | None = None) -> None:
-        with self._lock:
-            diagnostic = record.setdefault('diagnostic', {'run_id':record['run_id'],
-                'launch_sha256':record['launch_sha256'], 'primary':None, 'secondary':[]})
-            if primary is not None and diagnostic['primary'] is None:
-                diagnostic['primary'] = primary
-            if secondary is not None and secondary not in diagnostic['secondary'] and len(diagnostic['secondary']) < 4:
-                diagnostic['secondary'].append(secondary)
-
     def _deadline_stop(self) -> None:
         assert self._record is not None
         self._record["error"] = "global-deadline-exhausted"
         if self._record.get("provider_exit_code") is None and self._record.get("provider_exec_id"):
-            self._record_diagnostic(self._record, {"phase":"provider", "reason":"controller_deadline"})
+            record_diagnostic(self._lock, self._record, {"phase":"provider", "reason":"controller_deadline"})
         try:
             self._stop_owned(self._record["issue_number"], self._record["session_name"])
         except Exception:
@@ -594,19 +536,19 @@ class DockerPlugin:
             if self._provider_slot is not None:
                 try:
                     status = settle_provider_status(*self._provider_slot, packet, exit_code)
-                    self._record_diagnostic(record, status.diagnostic())
+                    record_diagnostic(self._lock, record, status.diagnostic())
                 except ProviderStatusWriteError as error:
-                    self._record_diagnostic(record, error.value.diagnostic(), {'phase':'record', 'reason':'record_failed'})
+                    record_diagnostic(self._lock, record, error.value.diagnostic(), {'phase':'record', 'reason':'record_failed'})
                     record['error'] = record['error'] or 'provider-status-invalid'
                 except (OSError, ValueError, TypeError, KeyError):
                     logger.exception("Docker provider status refused")
-                    self._record_diagnostic(record, {'phase':'provider', 'reason':'provider_nonzero'} if exit_code else None,
+                    record_diagnostic(self._lock, record, {'phase':'provider', 'reason':'provider_nonzero'} if exit_code else None,
                         {'phase':'status', 'reason':'status_unavailable'})
                     record["error"] = record["error"] or "provider-status-invalid"
         except Exception:
             logger.exception("Docker provider result retained as unknown")
             phase = "output" if record.get("overflow") else stage
-            self._record_diagnostic(record, secondary={"phase":phase, "reason":{
+            record_diagnostic(self._lock, record, secondary={"phase":phase, "reason":{
                 "output":"output_failed", "record":"record_failed", "transport":"transport_failed"}[phase]})
             record["error"] = "provider-unsettled-or-bound-exhausted"
         finally:
@@ -618,7 +560,7 @@ class DockerPlugin:
             try:
                 self._stop_owned(record["issue_number"], record["session_name"])
             except Exception:
-                self._record_diagnostic(record, secondary={"phase":"stop", "reason":"stop_unverified"})
+                record_diagnostic(self._lock, record, secondary={"phase":"stop", "reason":"stop_unverified"})
                 record["error"] = "container-stop-unproven"
                 record["state"] = DockerSessionState.RETAINED
                 self._save()
@@ -742,7 +684,7 @@ class DockerPlugin:
     def kill_session(self, session_id: int, session_name: str) -> None:
         record = self._record_for(session_name)
         if record is not None and self._provider_is_active(record):
-            self._record_diagnostic(record, {'phase':'provider', 'reason':'provider_cancelled'})
+            record_diagnostic(self._lock, record, {'phase':'provider', 'reason':'provider_cancelled'})
         self._stop_owned(session_id, session_name)
 
     def _provider_is_active(self, record: dict) -> bool:

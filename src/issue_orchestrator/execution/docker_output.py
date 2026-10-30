@@ -1,9 +1,12 @@
 """Controller-only Docker output custody and bounded per-run allocation."""
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from hashlib import sha256
 import os
 from pathlib import Path
 import re
+import selectors
+import signal
+import subprocess
 import stat
 import time
 from uuid import uuid4
@@ -82,3 +85,49 @@ def bounded_output(root: Path, size: int, limit: int, deadline_unix_ns: int):
         yield
     finally:
         os.close(descriptor)
+
+
+def run_cli_capture(argv: list[str], *, environment: dict[str, str], timeout: float,
+                    output_limit: int = 1024 * 1024, diagnostic_path: Path | None = None) -> tuple[bytes, bytes, int]:
+    """Bound both CLI pipes before allocation and kill descendants on timeout."""
+    if timeout <= 0:
+        raise ValueError("Dev Container CLI deadline exhausted")
+    child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, env=environment, start_new_session=True)
+    assert child.stdout is not None and child.stderr is not None
+    output, errors = bytearray(), bytearray()
+    completed = False
+    deadline = time.monotonic() + timeout
+    selector = selectors.DefaultSelector()
+    try:
+        selector.register(child.stdout, selectors.EVENT_READ, output)
+        selector.register(child.stderr, selectors.EVENT_READ, errors)
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ValueError("Dev Container CLI deadline exhausted")
+            for key, _ in selector.select(min(remaining, 0.2)):
+                chunk = os.read(key.fd, 65536)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                elif len(output) + len(errors) + len(chunk) > output_limit:
+                    raise ValueError("Dev Container CLI output bound exhausted")
+                else:
+                    key.data.extend(chunk)
+        exit_code = child.wait(timeout=max(0.001, deadline - time.monotonic()))
+        completed = exit_code == 0
+        return bytes(output), bytes(errors), exit_code
+    finally:
+        selector.close()
+        if not completed:
+            with suppress(ProcessLookupError):
+                os.killpg(child.pid, signal.SIGKILL)
+        child.wait(timeout=5)
+        child.stdout.close()
+        child.stderr.close()
+        if diagnostic_path is not None:
+            descriptor = os.open(diagnostic_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(descriptor, "wb") as destination:
+                destination.write(bytes(output) + b"\n--- stderr ---\n" + bytes(errors))
+                destination.flush()
+                os.fsync(destination.fileno())
