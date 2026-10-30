@@ -40,8 +40,12 @@ def prove_history(claims: object, repository: str, request: dict[str, Any]) -> d
         raise ValueError('Docker review original parent changed')
     previous_expiry = anchor.expires_at
     previous_time = 0
+    snapshots = {parent['fence']: anchor, fence: current}
     for receipt in request['receipts']:
-        claim = claims.original_claim_at(issue, receipt['claim_ref_sha'])
+        receipt_fence = receipt['claim_ref_sha']
+        if receipt_fence not in snapshots:
+            snapshots[receipt_fence] = claims.original_claim_at(issue, receipt_fence)
+        claim = snapshots[receipt_fence]
         require_expiry_only(anchor, claim)
         reserved = receipt['reserved_unix_ns']
         if (reserved < previous_time or reserved < _unix_ns(claim.started_at) or reserved > time.time_ns() or

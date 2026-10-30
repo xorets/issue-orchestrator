@@ -471,3 +471,24 @@ def test_history_request_rejects_overflow_and_malformed_fence():
         HistoryRequest.model_validate({**data, 'receipts':[{'claim_ref_sha':'a'*40, 'reserved_unix_ns':1}]*257})
     with pytest.raises(ValidationError):
         HistoryRequest.model_validate({**data, 'expected_current_fence':'bad'})
+
+
+def test_history_reuses_same_immutable_receipt_snapshot(reviewer_owner, claim_http):
+    import time
+    from unittest.mock import patch
+    from issue_orchestrator.adapters.github.claim_parser import format_claim_comment
+    from issue_orchestrator.adapters.github.ref_claim_adapter import CLAIM_REF_PREFIX
+    from issue_orchestrator.control.original_delivery_history import prove_history
+    owner, _, _, _, parent, anchor = reviewer_owner
+    claim_http.seed_record(CLAIM_REF_PREFIX+'/issue-42', format_claim_comment(anchor))
+    selected, selected_fence = owner.claims.original_claim(42)
+    assert owner.claims.renew_claim(42, selected.lease_id)
+    _, fence = owner.claims.original_claim(42)
+    timestamp = time.time_ns()
+    request = {'issue_number':42, 'parent':{'fence':selected_fence,
+        'original_inner_sha256':selected.original.contract_sha256, 'engine_run_id':selected.original.run_id,
+        'head_sha':parent['head_sha']}, 'expected_current_fence':fence,
+        'receipts':[{'claim_ref_sha':selected_fence, 'reserved_unix_ns':timestamp} for _ in range(2)]}
+    with patch.object(owner.claims, 'original_claim_at', wraps=owner.claims.original_claim_at) as read:
+        assert prove_history(owner.claims, owner.config.repo, request)['status'] == 'PASS'
+        assert read.call_count == 1

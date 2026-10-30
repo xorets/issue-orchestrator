@@ -30,6 +30,7 @@ current ref. The trusted controller authenticates the sealed parent and receipt
 source before calling it. The proof compares authenticated full claim snapshots;
 it does not prove Git commit ancestry or protect against a compromised controller
 receipt store. It returns only the current fence and a canonical input digest.
+Large histories may exceed the trusted controller's bounded MCP call and fail closed.
 
 Every mutation requires `lease_id`, `fence`, `contract_sha256`, `run_id`, and a
 bounded `request_id`. `fence` is the current remote claim commit SHA returned by
