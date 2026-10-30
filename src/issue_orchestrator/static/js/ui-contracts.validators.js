@@ -4916,6 +4916,16 @@
                 "claimant": {
                     "type": "string"
                 },
+                "diagnostic": {
+                    "anyOf": [
+                        {
+                            "$ref": "#/components/schemas/ProviderDiagnosticPayload"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ]
+                },
                 "expires_at": {
                     "type": "string"
                 },
@@ -5279,6 +5289,102 @@
                 "next_retry_at",
                 "entries",
                 "status_unavailable"
+            ],
+            "type": "object"
+        },
+        "ProviderDiagnosticPayload": {
+            "additionalProperties": false,
+            "properties": {
+                "launch_sha256": {
+                    "pattern": "^[0-9a-f]{64}$",
+                    "type": "string"
+                },
+                "primary": {
+                    "anyOf": [
+                        {
+                            "$ref": "#/components/schemas/ProviderPrimaryDiagnosticPayload"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ]
+                },
+                "run_id": {
+                    "pattern": "^[0-9]{8}-[0-9]{6}Z-[0-9a-f]{32}$",
+                    "type": "string"
+                },
+                "secondary": {
+                    "items": {
+                        "$ref": "#/components/schemas/ProviderSecondaryDiagnosticPayload"
+                    },
+                    "maxItems": 4,
+                    "type": "array"
+                }
+            },
+            "required": [
+                "run_id",
+                "launch_sha256",
+                "primary",
+                "secondary"
+            ],
+            "type": "object"
+        },
+        "ProviderPrimaryDiagnosticPayload": {
+            "additionalProperties": false,
+            "properties": {
+                "phase": {
+                    "enum": [
+                        "provider"
+                    ],
+                    "type": "string"
+                },
+                "reason": {
+                    "enum": [
+                        "provider_nonzero",
+                        "provider_timeout",
+                        "provider_cancelled",
+                        "provider_auth",
+                        "provider_quota",
+                        "provider_transient",
+                        "controller_deadline"
+                    ],
+                    "type": "string"
+                }
+            },
+            "required": [
+                "phase",
+                "reason"
+            ],
+            "type": "object"
+        },
+        "ProviderSecondaryDiagnosticPayload": {
+            "additionalProperties": false,
+            "properties": {
+                "phase": {
+                    "enum": [
+                        "status",
+                        "record",
+                        "stop",
+                        "output",
+                        "transport"
+                    ],
+                    "type": "string"
+                },
+                "reason": {
+                    "enum": [
+                        "status_unavailable",
+                        "record_failed",
+                        "stop_unverified",
+                        "output_failed",
+                        "transport_failed",
+                        "record_unavailable"
+                    ],
+                    "type": "string"
+                }
+            },
+            "required": [
+                "phase",
+                "reason"
             ],
             "type": "object"
         },

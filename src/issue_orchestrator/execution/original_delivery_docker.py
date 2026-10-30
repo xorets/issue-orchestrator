@@ -7,6 +7,8 @@ from .terminal_docker import DockerPlugin, canonical, sealed_bytes
 from .original_delivery_session import require_native_session_assets
 from hashlib import sha256
 import json
+import os
+import stat
 from pathlib import Path
 
 
@@ -53,6 +55,92 @@ class DockerOriginalCustody:
         if (receipt["repository"], receipt["run_id"], receipt["contract_sha256"]) != (owner.repository, run_id, owner.contract_sha256):
             raise ValueError("Docker original claim does not match session custody")
         return self.runner.custody(name)
+
+    def diagnostic(self, owner: OriginalDelivery) -> dict | None:
+        """Read only the exact original's validated, non-authoritative diagnostics."""
+        try:
+            return self._diagnostic(owner)
+        except (OSError, ValueError, TypeError, KeyError):
+            return None
+
+    def _diagnostic(self, owner: OriginalDelivery) -> dict | None:
+        from ..contracts.ui_openapi_models import ProviderDiagnosticPayload
+        rows = [row for row in owner.docker_custody if row.run_id == owner.run_id]
+        if len(rows) != 1 or self.runner.template_path is None:
+            return None
+        row = rows[0]
+        self.runner.select_run(owner.run_id)
+        assert self.runner.launch_path is not None
+        packet = json.loads(sealed_bytes(self.runner.launch_path, expected=row.launch_sha256))
+        if (packet['run_id'], packet['engine_run_dir'], packet['contract_sha256'], packet['working_dir'],
+                packet['repository'], packet['session_name'], packet['daemon_id'], packet['controller_container_id']) != (
+                owner.run_id, owner.run_dir, owner.contract_sha256, owner.worktree, owner.repository, owner.session_name,
+                row.daemon_id, row.controller_container_id):
+            return None
+        try:
+            record = json.loads(_private_diagnostic_bytes(self.runner.receipt_path(), 65536))
+            if type(record) is not dict:
+                raise ValueError('Docker receipt shape differs')
+            diagnostic = record.get('diagnostic')
+            if (record.get('run_id') == owner.run_id and record.get('launch_sha256') == row.launch_sha256 and
+                    diagnostic is not None):
+                value = ProviderDiagnosticPayload.model_validate(diagnostic).model_dump(mode='json')
+                pairs = {('status', 'status_unavailable'), ('record', 'record_failed'),
+                    ('record', 'record_unavailable'), ('stop', 'stop_unverified'),
+                    ('output', 'output_failed'), ('transport', 'transport_failed')}
+                if (value['run_id'] == owner.run_id and value['launch_sha256'] == row.launch_sha256 and
+                        all((item['phase'], item['reason']) in pairs for item in value['secondary'])):
+                    return value
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
+        return self._diagnostic_from_status(owner, packet, row)
+
+    def _diagnostic_from_status(self, owner: OriginalDelivery, packet: dict, row: DockerCustody) -> dict:
+        from ..ports.provider_resilience import ProviderStatus
+        result = {'run_id':owner.run_id, 'launch_sha256':row.launch_sha256, 'primary':None,
+            'secondary':[{'phase':'record', 'reason':'record_unavailable'}]}
+        path = Path(owner.run_dir)
+        protected = Path(owner.worktree) / '.issue-orchestrator'
+        try:
+            overlays = [m for m in packet['mounts'] if m['target'] == str(protected)]
+            if (path.resolve(strict=True) != path or not path.is_relative_to(protected) or len(overlays) != 1 or
+                    overlays[0]['read_only'] is not True or
+                    Path(overlays[0]['source']) not in {protected, Path('/srv/builder/tasks') / packet['builder_run_id'] / 'readonly-empty'} or
+                    any(not m['read_only'] and Path(m['target']).is_relative_to(protected) for m in packet['mounts'])):
+                raise ValueError('controller status custody unavailable')
+            value = json.loads(_private_diagnostic_bytes(path / 'provider-status.json', 4096))
+            if type(value) is not dict:
+                raise ValueError('controller status shape differs')
+        except (OSError, ValueError, TypeError, KeyError):
+            result['secondary'].append({'phase':'status', 'reason':'status_unavailable'})
+            return result
+        try:
+            info = self.runner.engine.request('GET', '/info')
+            if info.get('ID') != row.daemon_id:
+                return result
+            actual = self.runner.engine.request('GET', f'/exec/{row.provider_exec_id}/json')
+        except (OSError, ValueError, RuntimeError):
+            result['secondary'].append({'phase':'transport', 'reason':'transport_failed'})
+            return result
+        if type(actual) is not dict:
+            return result
+        exit_code = actual.get('ExitCode')
+        if (actual.get('ID') != row.provider_exec_id or actual.get('ContainerID') != row.container_id or
+                actual.get('Running') is not False or type(exit_code) is not int):
+            return result
+        try:
+            inner = json.loads(sealed_bytes(Path(packet['worker_authority']['engine_contract_path']),
+                expected=owner.contract_sha256))
+            lane = value.get('provider')
+            if (not isinstance(lane, str) or lane.partition(':')[0] != inner['execution']['provider'] or
+                    type(value.get('quota_heals_on_timer')) is not bool):
+                raise ValueError('controller status provider differs')
+            status = ProviderStatus.from_worker_payload(value, exit_code, lane, value['quota_heals_on_timer'])
+        except (OSError, ValueError, TypeError, KeyError):
+            result['secondary'].append({'phase':'status', 'reason':'status_unavailable'})
+            return result
+        result['primary'] = status.diagnostic()
+        return result
 
     def verify_session(self, session: Session) -> None:
         # The engine's typed run manifest/identity remain backend independent.
@@ -108,3 +196,25 @@ class DockerOriginalCustody:
             raise ValueError("Docker original launch binding changed")
         if owner.docker_custody and any(row.run_id == owner.run_id and row.launch_sha256 != sha256(canonical(packet)).hexdigest() for row in owner.docker_custody):
             raise ValueError("Docker original launch material changed")
+
+
+def _private_diagnostic_bytes(path: Path, limit: int) -> bytes:
+    if path.resolve(strict=True) != path:
+        raise ValueError('Docker diagnostic path is not canonical')
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_nlink != 1 or
+                not 0 < before.st_size <= limit):
+            raise ValueError('Docker diagnostic custody differs')
+        raw = os.read(fd, limit + 1)
+        after = os.fstat(fd)
+        named = path.lstat()
+        if (named.st_dev, named.st_ino) != (before.st_dev, before.st_ino):
+            raise ValueError('Docker diagnostic path changed while reading')
+        if len(raw) != before.st_size or any(getattr(before, key) != getattr(after, key) for key in
+                ('st_dev', 'st_ino', 'st_uid', 'st_nlink', 'st_mode', 'st_size', 'st_mtime_ns', 'st_ctime_ns')):
+            raise ValueError('Docker diagnostic changed while reading')
+        return raw
+    finally:
+        os.close(fd)

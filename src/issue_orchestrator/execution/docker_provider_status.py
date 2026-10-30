@@ -14,6 +14,13 @@ from .docker_launch_input import sealed_bytes
 ENV = 'ISSUE_ORCHESTRATOR_DOCKER_PROVIDER_DIR'
 
 
+class ProviderStatusWriteError(OSError):
+    """A validated result was observed but its controller copy failed."""
+    def __init__(self, value: ProviderStatus):
+        super().__init__('Docker provider status recording failed')
+        self.value = value
+
+
 def allocate(packet: dict, root: Path, command: str) -> tuple[Path, int, str, bool]:
     inner = json.loads(sealed_bytes(Path(packet['worker_authority']['engine_contract_path']), expected=packet['contract_sha256']))
     words = shlex.split(command)
@@ -98,7 +105,7 @@ def _read_status(directory: int, exit_code: int, lane: str, heals: bool) -> Prov
     return ProviderStatus.from_worker_payload(json.loads(raw), exit_code, lane, heals)
 
 
-def settle(slot: Path, descriptor: int, lane: str, heals: bool, packet: dict, exit_code: int) -> None:
+def settle(slot: Path, descriptor: int, lane: str, heals: bool, packet: dict, exit_code: int) -> ProviderStatus:
     info = os.fstat(descriptor)
     current = slot.lstat()
     if (slot.resolve(strict=True) != slot or not stat.S_ISDIR(current.st_mode) or
@@ -108,4 +115,9 @@ def settle(slot: Path, descriptor: int, lane: str, heals: bool, packet: dict, ex
     # Circuit chronology belongs to the controller, not the worker.
     observed_at = now_iso()
     status = _read_status(descriptor, exit_code, lane, heals)
-    write_provider_status(Path(packet['engine_run_dir']), replace(status, last_attempt_at=observed_at))
+    status = replace(status, last_attempt_at=observed_at)
+    try:
+        write_provider_status(Path(packet['engine_run_dir']), status)
+    except OSError as exc:
+        raise ProviderStatusWriteError(status) from exc
+    return status

@@ -87,6 +87,15 @@ class ProviderStatus:
         )
 
 
+    def diagnostic(self) -> dict[str, str] | None:
+        """Classify only observed provider outcomes, without worker text."""
+        if self.succeeded:
+            return None
+        kind = self.error_type.value if self.error_type else ''
+        reason = ('provider_timeout' if self.timed_out else
+            {'auth':'provider_auth', 'quota':'provider_quota', 'transient':'provider_transient'}.get(kind, 'provider_nonzero'))
+        return {'phase':'provider', 'reason':reason}
+
     @classmethod
     def from_worker_payload(cls, data: object, exit_code: int, lane: str, heals: bool) -> "ProviderStatus":
         """Validate bounded untrusted provider results before they affect a circuit."""

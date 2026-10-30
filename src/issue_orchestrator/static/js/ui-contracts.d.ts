@@ -1071,6 +1071,7 @@ export interface OriginalDeliveryOwnerPayload {
 
 export interface OriginalDeliveryPayload {
   claimant: string;
+  diagnostic?: ProviderDiagnosticPayload | null;
   expires_at: string;
   fence: string;
   issue_number: number;
@@ -1154,6 +1155,23 @@ export interface ProviderCircuitStatusPayload {
   open_providers: string[];
   status_unavailable: boolean;
   summary_text: string;
+}
+
+export interface ProviderDiagnosticPayload {
+  launch_sha256: string;
+  primary: ProviderPrimaryDiagnosticPayload | null;
+  run_id: string;
+  secondary: ProviderSecondaryDiagnosticPayload[];
+}
+
+export interface ProviderPrimaryDiagnosticPayload {
+  phase: "provider";
+  reason: "provider_nonzero" | "provider_timeout" | "provider_cancelled" | "provider_auth" | "provider_quota" | "provider_transient" | "controller_deadline";
+}
+
+export interface ProviderSecondaryDiagnosticPayload {
+  phase: "status" | "record" | "stop" | "output" | "transport";
+  reason: "status_unavailable" | "record_failed" | "stop_unverified" | "output_failed" | "transport_failed" | "record_unavailable";
 }
 
 export interface PublishFailedCodingAttemptPayload {

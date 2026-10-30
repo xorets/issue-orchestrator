@@ -1153,6 +1153,7 @@ class OriginalDeliveryOwnerPayload(BaseModel):
 class OriginalDeliveryPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
     claimant: str
+    diagnostic: ProviderDiagnosticPayload | None = None
     expires_at: str
     fence: str
     issue_number: int = Field(..., ge=1, strict=True)
@@ -1243,6 +1244,37 @@ class ProviderCircuitStatusPayload(BaseModel):
     open_providers: list[str]
     status_unavailable: bool = Field(..., strict=True)
     summary_text: str
+
+class ProviderDiagnosticPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    launch_sha256: str
+    primary: ProviderPrimaryDiagnosticPayload | None
+    run_id: str
+    secondary: list[ProviderSecondaryDiagnosticPayload] = Field(..., max_length=4)
+
+    @field_validator('launch_sha256')
+    @classmethod
+    def _validate_launch_sha256_pattern(cls, value: Any) -> Any:
+        if value is not None and re.search('^[0-9a-f]{64}$', value) is None:
+            raise ValueError("launch_sha256 must match '^[0-9a-f]{64}$'")
+        return value
+
+    @field_validator('run_id')
+    @classmethod
+    def _validate_run_id_pattern(cls, value: Any) -> Any:
+        if value is not None and re.search('^[0-9]{8}-[0-9]{6}Z-[0-9a-f]{32}$', value) is None:
+            raise ValueError("run_id must match '^[0-9]{8}-[0-9]{6}Z-[0-9a-f]{32}$'")
+        return value
+
+class ProviderPrimaryDiagnosticPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    phase: Literal['provider']
+    reason: Literal['provider_nonzero', 'provider_timeout', 'provider_cancelled', 'provider_auth', 'provider_quota', 'provider_transient', 'controller_deadline']
+
+class ProviderSecondaryDiagnosticPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    phase: Literal['status', 'record', 'stop', 'output', 'transport']
+    reason: Literal['status_unavailable', 'record_failed', 'stop_unverified', 'output_failed', 'transport_failed', 'record_unavailable']
 
 class PublishFailedCodingAttemptPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")

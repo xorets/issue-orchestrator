@@ -99,7 +99,7 @@ class OriginalDeliveryOwner:
         # Recheck the live daemon after registration and before producing evidence.
         if self.docker_custody.first_model_snapshot(session, command.contract_sha256, command.launch_sha256) != snapshot:
             raise ValueError("Docker first-model custody changed during registration")
-        current = self._review_original(session, snapshot) if reviewing else self.observe(session.issue.number)
+        current = self._review_original(session, snapshot) if reviewing else self.observe(session.issue.number, include_diagnostic=False)
         if reviewing:
             original = current  # Both reads independently authenticated only expiry renewal from the anchor.
         elif current != original:
@@ -135,7 +135,7 @@ class OriginalDeliveryOwner:
         else:
             if not session.key.kind.capabilities.open_pr_means_done or session.rework_cycle or snapshot['role'] != 'standard-implementation':
                 raise ValueError("Docker model gateway role differs")
-            original = self.observe(session.issue.number)
+            original = self.observe(session.issue.number, include_diagnostic=False)
             owner = original['owner']
             if (not isinstance(owner, dict) or owner['run_id'] != run.run_id or
                     owner['contract_sha256'] != snapshot['contract_sha256'] or owner['cancelled'] or owner['released'] or
@@ -144,7 +144,7 @@ class OriginalDeliveryOwner:
                 raise ValueError("Docker model gateway original claim or custody differs")
         if self.docker_custody.model_gateway_snapshot(session) != snapshot:
             raise ValueError("Docker model gateway custody changed during validation")
-        again = self._review_original(session, snapshot) if session.key.kind.capabilities.reports_verdict else self.observe(session.issue.number)
+        again = self._review_original(session, snapshot) if session.key.kind.capabilities.reports_verdict else self.observe(session.issue.number, include_diagnostic=False)
         if again != original:
             raise ValueError("Docker model gateway claim changed during validation")
         worker = snapshot['worker']
@@ -203,7 +203,7 @@ class OriginalDeliveryOwner:
             self.execute(session.issue.number, OriginalDeliveryCommand("register", str(observed["lease_id"]),
                 str(observed["fence"]), command.contract_sha256, command.run_id,
                 "docker-first-model-" + uuid4().hex, session_name=session.terminal_id, started_at=run.started_at))
-        original = self.observe(session.issue.number)
+        original = self.observe(session.issue.number, include_diagnostic=False)
         owner = original["owner"]
         if (not isinstance(owner, dict) or owner["run_id"] != run.run_id or
                 owner["contract_sha256"] != command.contract_sha256 or owner["cancelled"] or owner["released"] or
@@ -262,15 +262,18 @@ class OriginalDeliveryOwner:
             return self.claims.bind_original_docker_custody(issue_number, lease_id, fence, captured.docker_custody)
         return self.claims.bind_original_processes(issue_number, lease_id, fence, captured.process_roots)
 
-    def observe(self, issue_number: int) -> dict[str, object]:
+    def observe(self, issue_number: int, *, include_diagnostic: bool = True) -> dict[str, object]:
         claim, fence = self.claims.original_claim(issue_number)
         if claim.original is not None:
             self._require_scope(claim.original)
-        return {"issue_number": issue_number, "lease_id": claim.lease_id, "claimant": claim.claimant,
+        result: dict[str, object] = {"issue_number": issue_number, "lease_id": claim.lease_id, "claimant": claim.claimant,
                 "fence": fence, "lease_current": not claim.is_expired(),
                 "expires_at": claim.expires_at.isoformat(),
                 "owner": None if claim.original is None else claim.original.to_dict(),
                 "remote_released": claim.original is not None and claim.original.released}
+        if include_diagnostic and claim.original is not None and claim.original.execution_backend == "docker" and self.docker_custody is not None:
+            result["diagnostic"] = self.docker_custody.diagnostic(claim.original)
+        return result
 
     def execute(self, issue_number: int, command: OriginalDeliveryCommand) -> dict[str, object]:
         claim, fence = self.claims.original_claim(issue_number)

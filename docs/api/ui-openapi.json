@@ -1465,6 +1465,102 @@
           }
         }
       },
+      "ProviderPrimaryDiagnosticPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "phase",
+          "reason"
+        ],
+        "properties": {
+          "phase": {
+            "type": "string",
+            "enum": [
+              "provider"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "provider_nonzero",
+              "provider_timeout",
+              "provider_cancelled",
+              "provider_auth",
+              "provider_quota",
+              "provider_transient",
+              "controller_deadline"
+            ]
+          }
+        }
+      },
+      "ProviderSecondaryDiagnosticPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "phase",
+          "reason"
+        ],
+        "properties": {
+          "phase": {
+            "type": "string",
+            "enum": [
+              "status",
+              "record",
+              "stop",
+              "output",
+              "transport"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "status_unavailable",
+              "record_failed",
+              "stop_unverified",
+              "output_failed",
+              "transport_failed",
+              "record_unavailable"
+            ]
+          }
+        }
+      },
+      "ProviderDiagnosticPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "run_id",
+          "launch_sha256",
+          "primary",
+          "secondary"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "pattern": "^[0-9]{8}-[0-9]{6}Z-[0-9a-f]{32}$"
+          },
+          "launch_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "primary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderPrimaryDiagnosticPayload"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "secondary": {
+            "type": "array",
+            "maxItems": 4,
+            "items": {
+              "$ref": "#/components/schemas/ProviderSecondaryDiagnosticPayload"
+            }
+          }
+        }
+      },
       "OriginalDeliveryPayload": {
         "type": "object",
         "additionalProperties": false,
@@ -1506,6 +1602,12 @@
               {
                 "type": "null"
               }
+            ]
+          },
+          "diagnostic": {
+            "anyOf": [
+              {"$ref": "#/components/schemas/ProviderDiagnosticPayload"},
+              {"type": "null"}
             ]
           },
           "remote_released": {

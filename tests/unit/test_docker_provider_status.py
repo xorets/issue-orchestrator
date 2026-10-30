@@ -120,3 +120,33 @@ def test_worker_timestamp_cannot_set_circuit_chronology(tmp_path, worker_time, m
     evidence = store.get_evidence('codex')
     assert evidence is not None
     assert evidence.success_observed_at == observed
+
+
+def test_real_timed_out_runner_status_reports_timeout(tmp_path):
+    import shlex
+    slot = tmp_path / 'slot'; slot.mkdir(mode=0o700)
+    target = tmp_path / 'controller'; target.mkdir(mode=0o700)
+    descriptor = os.open(slot, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    agent = AgentConfig(prompt_path=tmp_path / 'prompt', provider='codex', provider_args={'execution_mode':'exec'})
+    wrapper = ProviderCommandWrapper(ProviderShortRetryConfig(max_attempts=1, initial_backoff_seconds=1,
+        max_backoff_seconds=1, jitter=False))
+    command = wrapper.wrap("/usr/bin/python3 -c 'import select; select.select([], [], [])'", agent, slot)
+    argv = shlex.split(command); argv[argv.index('--timeout-seconds') + 1] = '1'
+    env = {**os.environ, 'PYTHONPATH':str(Path(__file__).resolve().parents[2] / 'src')}
+    try:
+        child = subprocess.run(argv, cwd=tmp_path, env=env, capture_output=True, timeout=15)
+        assert child.returncode == 124
+        status = settle(slot, descriptor, 'codex', False, {'engine_run_dir':str(target)}, child.returncode)
+    finally:
+        os.close(descriptor)
+    assert status.timed_out and status.diagnostic() == {'phase':'provider', 'reason':'provider_timeout'}
+
+@pytest.mark.parametrize('kind', ['auth', 'quota'])
+def test_observed_timeout_is_diagnostic_even_with_circuit_classification(kind):
+    from issue_orchestrator.ports.provider_resilience import ProviderStatus
+    payload = {'provider':'codex', 'error_type':kind, 'attempts':1, 'succeeded':False, 'exit_code':124,
+        'timed_out':True, 'last_error_summary':None, 'last_attempt_at':'2026-10-30T00:00:00+00:00',
+        'quota_heals_on_timer':False}
+    status = ProviderStatus.from_worker_payload(payload, 124, 'codex', False)
+    assert status.error_type.value == kind
+    assert status.diagnostic() == {'phase':'provider', 'reason':'provider_timeout'}

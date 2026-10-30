@@ -1093,7 +1093,7 @@ def test_terminal_provider_handoff_stops_worker_even_on_invalid_status(launch, t
     runner._provider_slot = (slot, fd, 'codex', False)  # noqa: SLF001
     runner._packet = packet  # noqa: SLF001
     runner._record = {  # noqa: SLF001
-        'issue_number':42, 'session_name':'issue-42', 'daemon_id':packet['daemon_id'],
+        'issue_number':42, 'session_name':'issue-42', 'daemon_id':packet['daemon_id'], 'run_id':packet['run_id'],
         'container_id':'2'*64, 'provider_exec_id':exec_id, 'launch_sha256':sha256(canonical(packet)).hexdigest(),
         'state':'exec_created', 'output_bytes':0, 'overflow':False, 'provider_exit_code':None, 'error':''}
     engine.exec_payloads[exec_id] = {}
@@ -1102,3 +1102,186 @@ def test_terminal_provider_handoff_stops_worker_even_on_invalid_status(launch, t
     assert runner._record['provider_exit_code'] == 0  # noqa: SLF001
     assert runner._record['error'] == ('provider-status-invalid' if invalid else '')  # noqa: SLF001
     assert (read_provider_status(run) is None) == invalid
+    assert runner._record['diagnostic']['primary'] is None  # noqa: SLF001
+
+
+@pytest.mark.parametrize(('status_recording_fails', 'receipt_recording_fails', 'transport_fails', 'corrupt_status'), [(False, False, False, ''), (True, False, False, ''), (False, True, False, ''), (True, True, False, ''), (False, True, True, ''), (False, True, False, 'malformed'), (False, True, False, 'foreign')])
+def test_real_provider_failure_survives_stop_failure(launch, tmp_path, monkeypatch, status_recording_fails, receipt_recording_fails, transport_fails, corrupt_status):
+    """Actual provider status must survive the later Docker stop error."""
+    import shlex
+    import subprocess
+    from issue_orchestrator.control.provider_command_wrapper import ProviderCommandWrapper
+    from issue_orchestrator.domain.models import AgentConfig
+    from issue_orchestrator.infra.config_models import ProviderShortRetryConfig
+
+    runner, engine, packet, _ = launch
+    protected = tmp_path / '.issue-orchestrator'; protected.mkdir(mode=0o700)
+    sessions = protected / 'sessions'; sessions.mkdir(mode=0o700)
+    run = sessions / (packet['run_id'] + '__coding-1'); run.mkdir(mode=0o700)
+    packet['engine_run_dir'] = str(run)
+    packet['mounts'].append({'source':str(protected), 'target':str(protected), 'read_only':True})
+    inner = tmp_path / 'inner.json'; inner.write_bytes(canonical({'execution':{'provider':'codex'}})); inner.chmod(0o400)
+    packet['contract_sha256'] = sha256(inner.read_bytes()).hexdigest()
+    packet['worker_authority'] = {'engine_contract_path':str(inner)}
+    launch_dir = tmp_path / 'control' / packet['run_id']; launch_dir.mkdir(mode=0o700)
+    runner.template_path = launch_dir.parent / 'template.json'
+    runner.launch_path = launch_dir / 'launch.json'; runner.launch_path.write_bytes(canonical(packet)); runner.launch_path.chmod(0o400)
+    engine.record_path = runner.receipt_path()
+    monkeypatch.setattr(DockerPlugin, '_output_root', lambda self, packet: Path(packet['output_root']))
+    ordinary = Path(packet['output_root']) / packet['run_id']; ordinary.mkdir(mode=0o700)
+    slot = tmp_path / 'worker-slot'; slot.mkdir(mode=0o700)
+    agent = AgentConfig(prompt_path=tmp_path / 'prompt', provider='codex', provider_args={'execution_mode':'exec'})
+    wrapper = ProviderCommandWrapper(ProviderShortRetryConfig(max_attempts=1, initial_backoff_seconds=1,
+        max_backoff_seconds=1, jitter=False))
+    command = wrapper.wrap('printf "connection refused\\n" >&2; exit 1', agent, slot)
+    env = {**os.environ, 'PYTHONPATH':str(Path(__file__).resolve().parents[2] / 'src')}
+    child = subprocess.run(shlex.split(command), cwd=tmp_path, env=env, capture_output=True, timeout=10)
+    assert child.returncode == 1
+    descriptor = os.open(slot, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    exec_id = '3'*64
+    runner._provider_slot = (slot, descriptor, 'codex', False)  # noqa: SLF001
+    runner._packet = packet  # noqa: SLF001
+    runner._record = {  # noqa: SLF001
+        'issue_number':42, 'session_name':'issue-42', 'daemon_id':packet['daemon_id'], 'run_id':packet['run_id'],
+        'container_id':'2'*64, 'provider_exec_id':exec_id, 'launch_sha256':sha256(canonical(packet)).hexdigest(),
+        'state':'exec_created', 'output_bytes':0, 'overflow':False, 'provider_exit_code':None, 'error':''}
+    engine.exec_payloads[exec_id] = {}
+    original_request = engine.request
+    def request(method, route, payload=None):
+        result = original_request(method, route, payload)
+        if route == '/exec/' + exec_id + '/json': result['ExitCode'] = 1
+        return result
+    def stop(_):
+        if receipt_recording_fails: launch_dir.chmod(0o500)
+        raise OSError('sensitive-stop-detail')
+    engine.request = request
+    engine.stop = stop
+    if status_recording_fails: run.chmod(0o500)
+    try:
+        if receipt_recording_fails:
+            with pytest.raises(OSError): runner._run_provider()  # noqa: SLF001
+        else:
+            runner._run_provider()  # noqa: SLF001
+    finally:
+        run.chmod(0o700); launch_dir.chmod(0o700)
+    if corrupt_status:
+        status_path = run / 'provider-status.json'
+        if corrupt_status == 'malformed': status_path.write_text('{')
+        else:
+            payload = json.loads(status_path.read_text()); payload['provider'] = 'foreign'
+            status_path.write_text(json.dumps(payload))
+    from dataclasses import replace
+    from datetime import datetime
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    import asyncio
+    from issue_orchestrator.control.original_delivery import OriginalDeliveryOwner
+    from issue_orchestrator.domain.claim import Claim
+    from issue_orchestrator.domain.original_delivery import DockerCustody
+    from issue_orchestrator.entrypoints.mcp_original_delivery import original_delivery_result
+    from issue_orchestrator.execution.original_delivery_docker import DockerOriginalCustody
+    from tests.unit.test_original_delivery import custody
+    digest = sha256(canonical(packet)).hexdigest()
+    row = DockerCustody(schema_version=1, run_id=packet['run_id'], daemon_id=packet['daemon_id'],
+        controller_container_id=packet['controller_container_id'], container_id='2'*64,
+        provider_exec_id=exec_id, launch_sha256=digest)
+    selected = replace(custody(), run_id=packet['run_id'], run_dir=str(run), worktree=packet['working_dir'],
+        contract_sha256=packet['contract_sha256'], execution_backend='docker', docker_custody=(row,))
+    claim = Claim(lease_id='fixture', claimant='fixture', issue_number=42, started_at=datetime(2026, 1, 1),
+        expires_at=datetime(2099, 1, 1), priority=1, original=selected)
+    claims = SimpleNamespace(original_claim=lambda _: (claim, 'a'*40))
+    config = SimpleNamespace(repo=selected.repository, config_fingerprint=selected.config_fingerprint)
+    if transport_fails:
+        def unavailable(*_args, **_kwargs): raise OSError('sensitive-transport-detail')
+        engine.request = unavailable
+    observer = DockerPlugin(engine=engine)
+    observer.template_path = runner.template_path
+    backend = DockerOriginalCustody(observer)
+    owner = OriginalDeliveryOwner(claims, MagicMock(), None, config, None, lambda:('',0,''),
+        MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), docker_custody=backend)
+    class Api:
+        async def original_delivery(self, issue_number, operation, payload):
+            return owner.observe(issue_number)
+    result = asyncio.run(original_delivery_result(Api(), Path('/unused'), 42, 'observe', None, running=True))
+    assert not result.isError
+    diagnostic = result.structuredContent['diagnostic']
+    if transport_fails:
+        assert diagnostic['primary'] is None
+        assert diagnostic['secondary'] == [{'phase':'record', 'reason':'record_unavailable'},
+            {'phase':'transport', 'reason':'transport_failed'}]
+    elif (status_recording_fails and receipt_recording_fails) or corrupt_status:
+        assert diagnostic['primary'] is None
+        assert diagnostic['secondary'] == [{'phase':'record', 'reason':'record_unavailable'},
+            {'phase':'status', 'reason':'status_unavailable'}]
+    else:
+        assert diagnostic['primary'] == {'phase':'provider', 'reason':'provider_transient'}
+        expected = ([{'phase':'record', 'reason':'record_unavailable'}] if receipt_recording_fails else
+            ([{'phase':'record', 'reason':'record_failed'}] if status_recording_fails else []) +
+            [{'phase':'stop', 'reason':'stop_unverified'}])
+        assert diagnostic['secondary'] == expected
+    assert 'connection refused' not in json.dumps(result.structuredContent)
+    assert 'sensitive-stop-detail' not in json.dumps(result.structuredContent)
+
+
+@pytest.mark.parametrize('prior', [None, {'phase':'provider', 'reason':'provider_auth'}])
+def test_explicit_cancellation_preserves_existing_primary_and_reaps_child(launch, prior):
+    import subprocess
+    import sys
+    runner, engine, packet, _ = launch
+    child = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.read()'], stdin=subprocess.PIPE)
+    try:
+        runner._record = {  # noqa: SLF001
+            'issue_number':42, 'session_name':'issue-42', 'run_id':packet['run_id'], 'daemon_id':packet['daemon_id'],
+            'container_id':'2'*64, 'provider_exec_id':'3'*64, 'provider_exit_code':None,
+            'launch_sha256':sha256(canonical(packet)).hexdigest(), 'state':'exec_created', 'error':''}
+        if prior is not None:
+            runner._record['diagnostic'] = {'run_id':packet['run_id'], 'launch_sha256':sha256(canonical(packet)).hexdigest(),  # noqa: SLF001
+                'primary':prior, 'secondary':[]}
+        engine.exec_payloads['3'*64] = {}
+        original_request = engine.request
+        def request(method, route, payload=None):
+            actual = original_request(method, route, payload)
+            if route == '/exec/' + '3'*64 + '/json': actual['Running'] = child.poll() is None
+            return actual
+        engine.request = request
+        def stop(container):
+            assert container == '2'*64
+            child.terminate(); child.wait(timeout=5)
+            engine.running = False
+        engine.stop = stop
+        runner.kill_session(42, 'issue-42')
+        assert child.returncode is not None
+        receipt = json.loads(runner.receipt_path().read_bytes())
+        assert receipt['diagnostic']['primary'] == (prior or {'phase':'provider', 'reason':'provider_cancelled'})
+    finally:
+        if child.poll() is None: child.kill(); child.wait(timeout=5)
+        if child.stdin: child.stdin.close()
+
+
+def test_unobserved_provider_does_not_invent_cancellation(launch):
+    runner, engine, packet, _ = launch
+    runner._record = {  # noqa: SLF001
+        'issue_number':42, 'session_name':'issue-42', 'run_id':packet['run_id'], 'daemon_id':packet['daemon_id'],
+        'container_id':'2'*64, 'provider_exec_id':'3'*64, 'provider_exit_code':None,
+        'launch_sha256':sha256(canonical(packet)).hexdigest(), 'state':'exec_created', 'error':''}
+    original_request = engine.request
+    def request(method, route, payload=None):
+        if route == '/exec/' + '3'*64 + '/json': raise OSError('transport unavailable')
+        return original_request(method, route, payload)
+    engine.request = request
+    runner.kill_session(42, 'issue-42')
+    assert not engine.running
+    receipt = json.loads(runner.receipt_path().read_bytes())
+    assert receipt.get('diagnostic') is None
+
+
+def test_controller_deadline_is_distinct_from_provider_timeout(launch):
+    runner, engine, packet, _ = launch
+    runner._record = {  # noqa: SLF001
+        'issue_number':42, 'session_name':'issue-42', 'run_id':packet['run_id'], 'daemon_id':packet['daemon_id'],
+        'container_id':'2'*64, 'provider_exec_id':'3'*64, 'provider_exit_code':None,
+        'launch_sha256':sha256(canonical(packet)).hexdigest(), 'state':'exec_created', 'error':''}
+    runner._deadline_stop()  # noqa: SLF001
+    assert not engine.running
+    receipt = json.loads(runner.receipt_path().read_bytes())
+    assert receipt['diagnostic']['primary'] == {'phase':'provider', 'reason':'controller_deadline'}

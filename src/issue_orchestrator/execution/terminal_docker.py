@@ -24,7 +24,8 @@ from ..domain.docker_execution import DockerSessionState
 from ..domain.session_run import SessionRunAssets
 from ..infra.hooks.hookspec import hookimpl
 from .docker_startup_allowance import reserve_startup
-from .docker_provider_status import ENV as PROVIDER_DIR_ENV, allocate as allocate_provider_dir, settle as settle_provider_status
+from .docker_provider_status import (ENV as PROVIDER_DIR_ENV, ProviderStatusWriteError,
+    allocate as allocate_provider_dir, settle as settle_provider_status)
 from .docker_engine import DockerEngine
 from .docker_output import (
     bounded_output, private_directory as private_directory,
@@ -482,18 +483,29 @@ class DockerPlugin:
                         logger.error("Docker create acknowledgement unknown; immutable reservation retained")
                 if self._record.get("container_id"):
                     try:
-                        self.kill_session(session_id, session_name)
+                        self._stop_owned(session_id, session_name)
                     except Exception:
                         self._record["error"] = "container-stop-unproven"
                         self._record["state"] = DockerSessionState.RETAINED
                         self._save()
             return False
 
+    def _record_diagnostic(self, record: dict, primary: dict | None = None, secondary: dict | None = None) -> None:
+        with self._lock:
+            diagnostic = record.setdefault('diagnostic', {'run_id':record['run_id'],
+                'launch_sha256':record['launch_sha256'], 'primary':None, 'secondary':[]})
+            if primary is not None and diagnostic['primary'] is None:
+                diagnostic['primary'] = primary
+            if secondary is not None and secondary not in diagnostic['secondary'] and len(diagnostic['secondary']) < 4:
+                diagnostic['secondary'].append(secondary)
+
     def _deadline_stop(self) -> None:
         assert self._record is not None
         self._record["error"] = "global-deadline-exhausted"
+        if self._record.get("provider_exit_code") is None and self._record.get("provider_exec_id"):
+            self._record_diagnostic(self._record, {"phase":"provider", "reason":"controller_deadline"})
         try:
-            self.kill_session(self._record["issue_number"], self._record["session_name"])
+            self._stop_owned(self._record["issue_number"], self._record["session_name"])
         except Exception:
             self._record["error"] = "deadline-stop-unproven"
             self._record["state"] = DockerSessionState.RETAINED
@@ -558,13 +570,16 @@ class DockerPlugin:
         deadline = threading.Timer(remaining, self._deadline_stop)
         deadline.daemon = True
         deadline.start()
+        stage = "output"
         try:
             output = self._output_directory(packet) / "docker-output.log"
             with output.open("xb") as destination:
                 def consume(chunk: bytes) -> None:
                     self._consume_output(packet, record, destination, chunk)
                 record["state"] = DockerSessionState.STARTING
+                stage = "record"
                 self._save()
+                stage = "transport"
                 remaining = (packet["deadline_unix_ns"] - time.time_ns()) / 1e9
                 if remaining <= 0:
                     raise ValueError("Docker launch deadline exhausted")
@@ -578,12 +593,21 @@ class DockerPlugin:
             record["provider_exit_code"] = exit_code
             if self._provider_slot is not None:
                 try:
-                    settle_provider_status(*self._provider_slot, packet, exit_code)
+                    status = settle_provider_status(*self._provider_slot, packet, exit_code)
+                    self._record_diagnostic(record, status.diagnostic())
+                except ProviderStatusWriteError as error:
+                    self._record_diagnostic(record, error.value.diagnostic(), {'phase':'record', 'reason':'record_failed'})
+                    record['error'] = record['error'] or 'provider-status-invalid'
                 except (OSError, ValueError, TypeError, KeyError):
                     logger.exception("Docker provider status refused")
+                    self._record_diagnostic(record, {'phase':'provider', 'reason':'provider_nonzero'} if exit_code else None,
+                        {'phase':'status', 'reason':'status_unavailable'})
                     record["error"] = record["error"] or "provider-status-invalid"
         except Exception:
             logger.exception("Docker provider result retained as unknown")
+            phase = "output" if record.get("overflow") else stage
+            self._record_diagnostic(record, secondary={"phase":phase, "reason":{
+                "output":"output_failed", "record":"record_failed", "transport":"transport_failed"}[phase]})
             record["error"] = "provider-unsettled-or-bound-exhausted"
         finally:
             deadline.cancel()
@@ -592,8 +616,9 @@ class DockerPlugin:
             except OSError:
                 logger.exception("Docker provider slot descriptor close failed")
             try:
-                self.kill_session(record["issue_number"], record["session_name"])
+                self._stop_owned(record["issue_number"], record["session_name"])
             except Exception:
+                self._record_diagnostic(record, secondary={"phase":"stop", "reason":"stop_unverified"})
                 record["error"] = "container-stop-unproven"
                 record["state"] = DockerSessionState.RETAINED
                 self._save()
@@ -716,6 +741,22 @@ class DockerPlugin:
     @hookimpl
     def kill_session(self, session_id: int, session_name: str) -> None:
         record = self._record_for(session_name)
+        if record is not None and self._provider_is_active(record):
+            self._record_diagnostic(record, {'phase':'provider', 'reason':'provider_cancelled'})
+        self._stop_owned(session_id, session_name)
+
+    def _provider_is_active(self, record: dict) -> bool:
+        if not record.get('provider_exec_id') or record.get('provider_exit_code') is not None:
+            return False
+        try:
+            actual = self.engine.request('GET', f"/exec/{record['provider_exec_id']}/json")
+        except Exception:
+            return False  # Unobserved is not evidence of cancellation.
+        return (actual.get('ID') == record['provider_exec_id'] and
+                actual.get('ContainerID') == record.get('container_id') and actual.get('Running') is True)
+
+    def _stop_owned(self, session_id: int, session_name: str) -> None:
+        record = self._record_for(session_name)
         if record is None or not record.get("container_id"):
             raise ValueError("Docker stop target is unknown; retain evidence")
         self._inspect_owned(record)
@@ -737,7 +778,7 @@ class DockerPlugin:
                 return []  # This exact in-process watcher still owns provider settlement.
             # Restart never starts/reattaches the provider. Stop the old worker;
             # the original owner must explicitly settle its retained claim.
-            self.kill_session(record["issue_number"], record["session_name"])
+            self._stop_owned(record["issue_number"], record["session_name"])
             record["error"] = "controller-restart-provider-result-unknown"
             self._save()
         return []
@@ -784,7 +825,7 @@ class DockerPlugin:
     @hookimpl
     def on_orchestrator_shutdown(self) -> None:
         if self._record and self._record.get("container_id"):
-            self.kill_session(self._record["issue_number"], self._record["session_name"])
+            self._stop_owned(self._record["issue_number"], self._record["session_name"])
         if self._watcher:
             self._watcher.join(timeout=3)
 

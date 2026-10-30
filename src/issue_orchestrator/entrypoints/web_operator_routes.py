@@ -190,7 +190,7 @@ async def original_delivery_status(issue_number: int, orchestrator: WebOrchestra
     if orchestrator is None:
         return JSONResponse({"error": "Original engine is not running"}, status_code=503)
     try:
-        return JSONResponse(OriginalDeliveryPayload.model_validate(orchestrator.original_delivery(issue_number)).model_dump(mode="json"))
+        return JSONResponse(OriginalDeliveryPayload.model_validate(orchestrator.original_delivery(issue_number)).model_dump(mode="json", exclude_unset=True))
     except (ValueError, ClaimFetchError) as refusal:
         return JSONResponse({"error": str(refusal)}, status_code=409)
 
@@ -201,7 +201,7 @@ async def original_delivery_command(issue_number: int, operation: str, body: Ori
     if orchestrator is None:
         return JSONResponse({"error": "Original engine is not running"}, status_code=503)
     try:
-        return JSONResponse(OriginalDeliveryPayload.model_validate(orchestrator.original_delivery(issue_number, body.command(operation))).model_dump(mode="json"))
+        return JSONResponse(OriginalDeliveryPayload.model_validate(orchestrator.original_delivery(issue_number, body.command(operation))).model_dump(mode="json", exclude_unset=True))
     except (ValueError, ClaimFetchError) as refusal:
         return JSONResponse({"error": str(refusal)}, status_code=409)
 
