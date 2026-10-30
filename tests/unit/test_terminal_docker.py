@@ -1109,7 +1109,8 @@ def test_terminal_provider_handoff_stops_worker_even_on_invalid_status(launch, t
     [(outcome, *case) for outcome in ('failure', 'timeout') for case in
         [(False, False, False, ''), (True, False, False, ''), (False, True, False, ''),
          (True, True, False, ''), (False, True, True, ''), (False, True, False, 'malformed'),
-         (False, True, False, 'foreign')]] + [('cancel', False, False, False, '')])
+         (False, True, False, 'foreign')]] + [('cancel', False, False, False, ''), ('cancel', True, False, False, ''),
+            ('cancel', True, True, False, '')])
 def test_real_provider_failure_survives_stop_failure(launch, tmp_path, monkeypatch, status_recording_fails, receipt_recording_fails, transport_fails, corrupt_status, outcome):
     """Actual provider status must survive the later Docker stop error."""
     import shlex
@@ -1163,8 +1164,8 @@ def test_real_provider_failure_survives_stop_failure(launch, tmp_path, monkeypat
     cancel_child = subprocess.Popen(['/usr/bin/python3', '-c', 'import sys; sys.stdin.read()'], stdin=subprocess.PIPE) if outcome == 'cancel' else None
     def stop(_):
         if cancel_child is not None:
-            cancel_child.terminate(); cancel_child.wait(timeout=5); engine.running = False
-            return
+            cancel_child.terminate(); cancel_child.wait(timeout=5)
+            raise OSError('sensitive-stop-detail')
         if receipt_recording_fails: launch_dir.chmod(0o500)
         raise OSError('sensitive-stop-detail')
     engine.request = request
@@ -1173,7 +1174,18 @@ def test_real_provider_failure_survives_stop_failure(launch, tmp_path, monkeypat
     try:
         if outcome == 'cancel':
             os.close(descriptor); runner._provider_slot = None  # noqa: SLF001
-            runner.kill_session(42, 'issue-42')
+            runner._save()  # noqa: SLF001
+            original_save = runner._save  # noqa: SLF001
+            saves = 0
+            def failing_save():
+                nonlocal saves
+                saves += 1
+                if status_recording_fails and (saves == 1 or receipt_recording_fails):
+                    raise OSError('sensitive-record-detail')
+                original_save()
+            monkeypatch.setattr(runner, '_save', failing_save)
+            with pytest.raises(OSError, match='sensitive-stop-detail'):
+                runner.kill_session(42, 'issue-42')
             assert cancel_child is not None and cancel_child.returncode is not None
         elif receipt_recording_fails:
             with pytest.raises(OSError): runner._run_provider()  # noqa: SLF001
@@ -1225,6 +1237,7 @@ def test_real_provider_failure_survives_stop_failure(launch, tmp_path, monkeypat
     result = asyncio.run(original_delivery_result(Api(), Path('/unused'), 42, 'observe', None, running=True))
     assert not result.isError
     diagnostic = result.structuredContent['diagnostic']
+    assert result.structuredContent['remote_released'] is False
     if transport_fails:
         assert diagnostic['primary'] is None
         assert diagnostic['secondary'] == [{'phase':'record', 'reason':'record_unavailable'},
@@ -1238,7 +1251,7 @@ def test_real_provider_failure_survives_stop_failure(launch, tmp_path, monkeypat
         expected = ([{'phase':'record', 'reason':'record_unavailable'}] if receipt_recording_fails else
             ([{'phase':'record', 'reason':'record_failed'}] if status_recording_fails else []) +
             [{'phase':'stop', 'reason':'stop_unverified'}])
-        assert diagnostic['secondary'] == ([] if outcome == 'cancel' else expected)
+        assert diagnostic['secondary'] == expected
     assert 'connection refused' not in json.dumps(result.structuredContent)
     assert 'sensitive-stop-detail' not in json.dumps(result.structuredContent)
 

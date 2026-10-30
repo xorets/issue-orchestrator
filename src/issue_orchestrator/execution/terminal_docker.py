@@ -685,7 +685,20 @@ class DockerPlugin:
         record = self._record_for(session_name)
         if record is not None and self._provider_is_active(record):
             record_diagnostic(self._lock, record, {'phase':'provider', 'reason':'provider_cancelled'})
-        self._stop_owned(session_id, session_name)
+            try:
+                self._save()
+            except OSError:
+                record_diagnostic(self._lock, record, secondary={'phase':'record', 'reason':'record_failed'})
+        try:
+            self._stop_owned(session_id, session_name)
+        except Exception:
+            if record is not None:
+                record_diagnostic(self._lock, record, secondary={'phase':'stop', 'reason':'stop_unverified'})
+                try:
+                    self._save()
+                except OSError:
+                    logger.exception('Docker stop diagnostic recording failed')
+            raise
 
     def _provider_is_active(self, record: dict) -> bool:
         if not record.get('provider_exec_id') or record.get('provider_exit_code') is not None:
