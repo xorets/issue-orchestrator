@@ -77,11 +77,14 @@ class DockerOriginalCustody:
                 owner.run_id, owner.run_dir, owner.contract_sha256, owner.worktree, owner.repository, owner.session_name,
                 row.daemon_id, row.controller_container_id):
             return None
+        pending = False
         try:
             record = json.loads(_private_diagnostic_bytes(self.runner.receipt_path(), 65536))
             if type(record) is not dict:
                 raise ValueError('Docker receipt shape differs')
             diagnostic = record.get('diagnostic')
+            pending = (record.get('run_id') == owner.run_id and record.get('launch_sha256') == row.launch_sha256
+                and diagnostic is None)
             if (record.get('run_id') == owner.run_id and record.get('launch_sha256') == row.launch_sha256 and
                     diagnostic is not None):
                 value = ProviderDiagnosticPayload.model_validate(diagnostic).model_dump(mode='json')
@@ -93,7 +96,10 @@ class DockerOriginalCustody:
                     return value
         except (OSError, ValueError, TypeError, KeyError):
             pass
-        return self._diagnostic_from_status(owner, packet, row)
+        fallback = self._diagnostic_from_status(owner, packet, row)
+        if pending:
+            return {**fallback, 'secondary':[]} if fallback['primary'] is not None else None
+        return fallback
 
     def _diagnostic_from_status(self, owner: OriginalDelivery, packet: dict, row: DockerCustody) -> dict:
         from ..ports.provider_resilience import ProviderStatus

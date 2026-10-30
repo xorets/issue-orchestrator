@@ -649,7 +649,12 @@ def test_authenticated_docker_command_runner_and_status_handoff(model_authority,
     argv = shlex.split(command)
     try:
         controller.chmod(0o500)  # Worker sees controller metadata read-only.
-        assert main(argv[3:]) == 0
+        previous_umask = os.umask(0o022)
+        try:
+            assert main(argv[3:]) == 0
+        finally:
+            os.umask(previous_umask)
+        assert (slot / 'provider-runner').stat().st_mode & 0o777 == 0o700
         assert marker.read_text() == 'started'
         controller.chmod(0o700)  # Controller retains write custody.
         settle(slot, descriptor, lane, heals, packet, 0)

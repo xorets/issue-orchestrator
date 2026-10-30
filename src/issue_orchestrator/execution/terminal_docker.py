@@ -449,6 +449,7 @@ class DockerPlugin:
         try:
             self._stop_owned(self._record["issue_number"], self._record["session_name"])
         except Exception:
+            record_diagnostic(self._lock, self._record, secondary={"phase":"stop", "reason":"stop_unverified"})
             self._record["error"] = "deadline-stop-unproven"
             self._record["state"] = DockerSessionState.RETAINED
             self._save()

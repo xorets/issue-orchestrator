@@ -75,6 +75,8 @@ def main(argv: list[str] | None = None) -> int:
         from issue_orchestrator.execution.docker_provider_status import worker_slot
         run_dir = worker_slot(os.environ["ISSUE_ORCHESTRATOR_DOCKER_PROVIDER_DIR"], run_dir)
     output_dir = run_dir / "provider-runner"
+    if os.environ.get("ISSUE_ORCHESTRATOR_CALLBACK_SCOPE") == "docker":
+        output_dir.mkdir(mode=0o700)  # The authenticated worker slot is private and one-shot.
 
     provider = args.provider or detect_ai_system_from_command(args.command) or None
     retry_policy = RetryPolicy(

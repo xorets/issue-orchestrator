@@ -1110,7 +1110,8 @@ def test_terminal_provider_handoff_stops_worker_even_on_invalid_status(launch, t
         [(False, False, False, ''), (True, False, False, ''), (False, True, False, ''),
          (True, True, False, ''), (False, True, True, ''), (False, True, False, 'malformed'),
          (False, True, False, 'foreign')]] + [('cancel', False, False, False, ''), ('cancel', True, False, False, ''),
-            ('cancel', True, True, False, '')])
+            ('cancel', True, True, False, ''), ('active', False, False, False, ''),
+            ('active_status', False, False, False, ''), ('deadline', False, False, False, '')])
 def test_real_provider_failure_survives_stop_failure(launch, tmp_path, monkeypatch, status_recording_fails, receipt_recording_fails, transport_fails, corrupt_status, outcome):
     """Actual provider status must survive the later Docker stop error."""
     import shlex
@@ -1140,7 +1141,7 @@ def test_real_provider_failure_survives_stop_failure(launch, tmp_path, monkeypat
         max_backoff_seconds=1, jitter=False))
     command = wrapper.wrap("/usr/bin/python3 -c 'import select; select.select([], [], [])'" if outcome == 'timeout' else 'printf "connection refused\\n" >&2; exit 1', agent, slot)
     env = {**os.environ, 'PYTHONPATH':str(Path(__file__).resolve().parents[2] / 'src')}
-    if outcome != 'cancel':
+    if outcome not in ('cancel', 'active', 'deadline'):
         argv = shlex.split(command)
         if outcome == 'timeout': argv[argv.index('--timeout-seconds') + 1] = '1'
         child = subprocess.run(argv, cwd=tmp_path, env=env, capture_output=True, timeout=15)
@@ -1160,6 +1161,7 @@ def test_real_provider_failure_survives_stop_failure(launch, tmp_path, monkeypat
         if route == '/exec/' + exec_id + '/json':
             result['ExitCode'] = 124 if outcome == 'timeout' else 1
             if outcome == 'cancel': result['Running'] = cancel_child.poll() is None
+            if outcome in ('active', 'active_status'): result['Running'] = True
         return result
     cancel_child = subprocess.Popen(['/usr/bin/python3', '-c', 'import sys; sys.stdin.read()'], stdin=subprocess.PIPE) if outcome == 'cancel' else None
     def stop(_):
@@ -1172,7 +1174,16 @@ def test_real_provider_failure_survives_stop_failure(launch, tmp_path, monkeypat
     engine.stop = stop
     if status_recording_fails: run.chmod(0o500)
     try:
-        if outcome == 'cancel':
+        if outcome in ('active', 'active_status'):
+            os.close(descriptor); runner._provider_slot = None  # noqa: SLF001
+            if outcome == 'active_status':
+                from shutil import copyfile
+                copyfile(slot / 'provider-status.json', run / 'provider-status.json')
+            runner._save()  # noqa: SLF001
+        elif outcome == 'deadline':
+            os.close(descriptor); runner._provider_slot = None  # noqa: SLF001
+            runner._deadline_stop()  # noqa: SLF001
+        elif outcome == 'cancel':
             os.close(descriptor); runner._provider_slot = None  # noqa: SLF001
             runner._save()  # noqa: SLF001
             original_save = runner._save  # noqa: SLF001
@@ -1238,17 +1249,11 @@ def test_real_provider_failure_survives_stop_failure(launch, tmp_path, monkeypat
     assert not result.isError
     diagnostic = result.structuredContent['diagnostic']
     assert result.structuredContent['remote_released'] is False
-    if transport_fails:
-        assert diagnostic['primary'] is None
-        assert diagnostic['secondary'] == [{'phase':'record', 'reason':'record_unavailable'},
-            {'phase':'transport', 'reason':'transport_failed'}]
-    elif (status_recording_fails and receipt_recording_fails) or corrupt_status:
-        assert diagnostic['primary'] is None
-        assert diagnostic['secondary'] == [{'phase':'record', 'reason':'record_unavailable'},
-            {'phase':'status', 'reason':'status_unavailable'}]
+    if outcome in ('active', 'active_status') or receipt_recording_fails and (transport_fails or status_recording_fails or corrupt_status):
+        assert diagnostic is None
     else:
-        assert diagnostic['primary'] == {'phase':'provider', 'reason':{'failure':'provider_transient', 'timeout':'provider_timeout', 'cancel':'provider_cancelled'}[outcome]}
-        expected = ([{'phase':'record', 'reason':'record_unavailable'}] if receipt_recording_fails else
+        assert diagnostic['primary'] == {'phase':'provider', 'reason':{'failure':'provider_transient', 'timeout':'provider_timeout', 'cancel':'provider_cancelled', 'deadline':'controller_deadline'}[outcome]}
+        expected = ([] if receipt_recording_fails else
             ([{'phase':'record', 'reason':'record_failed'}] if status_recording_fails else []) +
             [{'phase':'stop', 'reason':'stop_unverified'}])
         assert diagnostic['secondary'] == expected
