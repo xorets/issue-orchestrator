@@ -27,6 +27,10 @@ if TYPE_CHECKING:
     from ..infra.config import Config
 
 
+class ModelGatewayGrantUnavailable(ValueError):
+    """The active allocation does not carry a supported model grant."""
+
+
 @dataclass(frozen=True)
 class OriginalDeliveryCommand:
     operation: str
@@ -111,7 +115,7 @@ class OriginalDeliveryOwner:
         evidence = self.docker_custody.seal_first_model(session, receipt)
         return {"schema_version": 1, "kind": "builder-docker-first-model", "receipt": receipt, "controller_evidence": evidence}
 
-    def model_gateway_context(self, run: SessionRunAssets) -> dict[str, object]:
+    def model_gateway_context(self, run: SessionRunAssets, previous: dict[str, object] | None = None) -> dict[str, object]:
         """Bind a live allocated Docker request without creating or resuming a hold."""
         require_model_preflight_barrier(self.state)
         if self.docker_custody is None or self.config.terminal_adapter != "issue_orchestrator.execution.terminal_docker:DockerPlugin":
@@ -147,9 +151,20 @@ class OriginalDeliveryOwner:
         keys = ('engine_run_id','builder_run_id','role','model','contract_sha256','outer_sha256','launch_sha256',
                 'projection_sha256','grant_sha256','grant_kind','deadline_unix_ns','max_model_requests','max_output_bytes',
                 'outer_contract_path','inner_contract_path','launch_path','controller_home')
-        return {**{key:snapshot[key] for key in keys}, 'issue_number':session.issue.number,
+        context = {**{key:snapshot[key] for key in keys}, 'issue_number':session.issue.number,
                 'claim_ref_sha':original['fence'], **{key:worker[key] for key in
                     ('daemon_id','container_id','provider_exec_id','image_id')}}
+        return self.admit_model_gateway_context(context, previous)
+
+    @staticmethod
+    def admit_model_gateway_context(context: dict[str, object], previous: dict[str, object] | None) -> dict[str, object]:
+        if previous is not None and {k: v for k, v in context.items() if k != 'claim_ref_sha'} != {
+                k: v for k, v in previous.items() if k != 'claim_ref_sha'}:
+            raise ValueError('Docker model gateway authority changed')
+        if previous is not None and context.get('grant_kind') not in {'builder-docker-container-model-authorization',
+                'builder-docker-container-synthetic-authorization'}:
+            raise ModelGatewayGrantUnavailable('Docker model grant kind unavailable')
+        return context
 
     def first_model_preflight(self, run: SessionRunAssets, command: DockerFirstModelCommand) -> tuple[Session, dict[str, Any]]:
         """Only the exact active admitted allocation may request its fixed planner barrier."""

@@ -77,7 +77,7 @@ def test_actual_callback_router_to_private_uds(gateway_dir, monkeypatch, auth_en
     path=gateway_dir/'model-gateway.sock'; server=UnixStreamServer(str(path),Handler);os.chmod(path,0o600)
     thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
     context={'grant_kind':'builder-docker-container-model-authorization','controller_home':str(gateway_dir),'deadline_unix_ns':time.time_ns()+10_000_000_000,'max_output_bytes':1000}
-    engine=SimpleNamespace(docker_model_gateway_context=lambda capability:context if capability=='cap' else (_ for _ in ()).throw(ValueError('denied')), docker_model_gateway_credentials=lambda:{'XORETS_DOCKER_MODEL_AUTH_JSON':'DUMMY-PRIVATE'})
+    engine=SimpleNamespace(docker_model_gateway_context=lambda capability, previous=None:context if capability=='cap' else (_ for _ in ()).throw(ValueError('denied')), docker_model_gateway_credentials=lambda:{'XORETS_DOCKER_MODEL_AUTH_JSON':'DUMMY-PRIVATE'})
     deps=ControlApiIssueDependencies(get_orchestrator=lambda:engine,with_state_lock=lambda fn:fn())
     monkeypatch.setitem(control_api.control_app.dependency_overrides,get_control_api_issue_dependencies,lambda:deps)
     monkeypatch.setattr(KeyringProviderCredentials,'_read_secrets',staticmethod(lambda *_:{'XORETS_DOCKER_MODEL_AUTH_JSON':'DUMMY-PRIVATE'}))
@@ -120,9 +120,12 @@ async def test_changed_live_authority_refuses_before_credential_lookup(monkeypat
     from issue_orchestrator.entrypoints import control_api, docker_model_gateway_routes as route
     monkeypatch.setattr(control_api,'verify_docker_callback_authorization',lambda _:True)
     
-    states=iter([{'deadline_unix_ns':time.time_ns()+1_000_000_000,'claim_ref_sha':'a'},
+    states=iter([{'grant_kind':'builder-docker-container-model-authorization','deadline_unix_ns':time.time_ns()+1_000_000_000,'claim_ref_sha':'a'},
                  {'deadline_unix_ns':time.time_ns()+1_000_000_000,'engine_run_id':'foreign','claim_ref_sha':'b'}])
-    engine=SimpleNamespace(docker_model_gateway_context=lambda _: next(states))
+    from issue_orchestrator.control.original_delivery import OriginalDeliveryOwner
+    def current(_, previous=None):
+        return OriginalDeliveryOwner.admit_model_gateway_context(next(states), previous)
+    engine=SimpleNamespace(docker_model_gateway_context=current)
     class Body:
         async def stream(self): yield b'{"model":"test"}'
     with pytest.raises(HTTPException) as raised:
@@ -140,7 +143,7 @@ async def test_idle_stream_stops_when_owner_is_cancelled(monkeypatch):
     monkeypatch.setenv('ISSUE_ORCHESTRATOR_MODEL_GATEWAY_TOKEN','a'*64)
     context={'grant_kind':'builder-docker-container-model-authorization','deadline_unix_ns':time.time_ns()+5_000_000_000,'controller_home':'/unused','max_output_bytes':100}
     calls=[];closed=[]
-    def current(_):
+    def current(_, previous=None):
         calls.append(True)
         if len(calls)>2: raise ValueError('cancelled')
         return context
@@ -221,7 +224,7 @@ async def test_synthetic_route_uses_fixed_dummy_without_keyring(monkeypatch):
     class Body:
         async def stream(self):
             yield b'{}'
-    def current(_):
+    def current(_, previous=None):
         return context
     engine = SimpleNamespace(docker_model_gateway_context=current, docker_model_gateway_credentials=lambda: KeyringProviderCredentials().session_env('codex', docker=True))
     response = await asyncio.wait_for(route.model_gateway(Body(), SimpleNamespace(get_orchestrator=lambda: engine),
@@ -263,8 +266,68 @@ async def test_actual_builder_listener_with_engine_client(gateway_dir, monkeypat
         server.close()
 
 
-def test_renewed_claim_fence_keeps_only_same_allocation():
-    from issue_orchestrator.entrypoints.docker_model_gateway_routes import _same_allocation
-    old = {'claim_ref_sha': 'a' * 40, 'engine_run_id': 'same'}
-    assert _same_allocation(old, {'claim_ref_sha': 'b' * 40, 'engine_run_id': 'same'})
-    assert not _same_allocation(old, {'claim_ref_sha': 'b' * 40, 'engine_run_id': 'other'})
+def test_owner_admits_only_same_allocation_and_supported_grant():
+    from issue_orchestrator.control.original_delivery import OriginalDeliveryOwner
+    admit = OriginalDeliveryOwner.admit_model_gateway_context
+    old = {'claim_ref_sha': 'a' * 40, 'engine_run_id': 'same',
+           'grant_kind': 'builder-docker-container-model-authorization'}
+    renewed = {**old, 'claim_ref_sha': 'b' * 40}
+    assert admit(renewed, old) == renewed
+    with pytest.raises(ValueError, match='authority changed'):
+        admit({**renewed, 'engine_run_id': 'other'}, old)
+    with pytest.raises(ValueError, match='grant kind unavailable'):
+        admit({**old, 'grant_kind': 'other'}, {**old, 'grant_kind': 'other'})
+
+
+
+@pytest.mark.asyncio
+async def test_continuous_stream_stops_after_authority_revoked(monkeypatch):
+    from types import SimpleNamespace
+    from issue_orchestrator.entrypoints import docker_model_gateway_routes as route
+
+    clock = [0.0]
+    monkeypatch.setattr(route, 'time', SimpleNamespace(time_ns=time.time_ns, monotonic=lambda: clock[0]))
+    emitted = []
+    async def forward(**kwargs):
+        for i in range(100):
+            clock[0] += 0.1
+            emitted.append(i)
+            yield b'data: fixture\n\n'
+    monkeypatch.setattr(route, 'forward_model_request', forward)
+    def current(_, previous=None):
+        if len(emitted) >= 2:
+            raise ValueError('revoked')
+        return context
+    context = {'controller_home': '/unused'}
+    allocation = route._Allocation('continuous-test')
+    stream = route._stream(SimpleNamespace(docker_model_gateway_context=current), 'cap', allocation,
+                           context, time.time_ns() + 10_000_000_000, {}, 'dummy')
+    with pytest.raises(ValueError, match='revoked'):
+        _ = [chunk async for chunk in stream]
+    assert 2 <= len(emitted) <= 7
+
+
+@pytest.mark.asyncio
+async def test_continuous_stream_accepts_renewed_fence(monkeypatch):
+    from types import SimpleNamespace
+    from issue_orchestrator.control.original_delivery import OriginalDeliveryOwner
+    from issue_orchestrator.entrypoints import docker_model_gateway_routes as route
+
+    clock = [0.0]
+    monkeypatch.setattr(route, 'time', SimpleNamespace(time_ns=time.time_ns, monotonic=lambda: clock[0]))
+    async def forward(**kwargs):
+        for _ in range(20):
+            clock[0] += 0.1
+            yield b'data: fixture\n\n'
+    monkeypatch.setattr(route, 'forward_model_request', forward)
+    context = {'controller_home': '/unused', 'claim_ref_sha': 'old',
+               'grant_kind': 'builder-docker-container-model-authorization'}
+    checks = []
+    def current(_, previous):
+        checks.append(clock[0])
+        return OriginalDeliveryOwner.admit_model_gateway_context({**context, 'claim_ref_sha': 'renewed'}, previous)
+    allocation = route._Allocation('renewal-test')
+    stream = route._stream(SimpleNamespace(docker_model_gateway_context=current), 'cap', allocation,
+                           context, time.time_ns() + 10_000_000_000, {}, 'dummy')
+    assert len([chunk async for chunk in stream]) == 20
+    assert 2 <= len(checks) <= 4

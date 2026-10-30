@@ -27,7 +27,7 @@ class DockerModelGatewayMixin:
         owner = cast(_GatewayOwner, self)
         return owner.session_launcher.docker_model_credentials()
 
-    def docker_model_gateway_context(self, capability: str) -> dict[str, object]:
+    def docker_model_gateway_context(self, capability: str, previous: dict[str, object] | None = None) -> dict[str, object]:
         owner = cast(_GatewayOwner, self)
-        return docker_model_gateway_context(owner.deps, capability,
+        return docker_model_gateway_context(owner.deps, capability, previous,
             shutdown_requested=lambda: owner.shutdown_requested, state_lock=owner.state_lock)

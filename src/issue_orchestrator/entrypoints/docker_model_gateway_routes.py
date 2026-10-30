@@ -11,6 +11,7 @@ import time
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from ..control.original_delivery import ModelGatewayGrantUnavailable
 from ..domain.completion_intake import IntakeUnauthorized
 from ..execution.docker_model_gateway_client import forward_model_request
 from ..execution.docker_worker_authority import MODEL_AUTH_ENV
@@ -20,12 +21,6 @@ router = APIRouter()
 _active: set[str] = set()
 _lock = threading.Lock()
 _MAX_REQUEST = 16 * 1024 * 1024
-
-
-def _same_allocation(left: dict, right: dict) -> bool:
-    """A renewed claim has a fresh fence but the same validated allocation."""
-    return {k: v for k, v in left.items() if k != 'claim_ref_sha'} == {
-        k: v for k, v in right.items() if k != 'claim_ref_sha'}
 
 
 class _Allocation:
@@ -88,14 +83,11 @@ async def _prepare(request, engine, capability, allocation, context, deadline):
         async with asyncio.timeout((deadline - time.time_ns()) / 1e9):
             value = await _body(request)
             try:
-                fresh = await allocation.blocking(engine.docker_model_gateway_context, capability)
+                fresh = await allocation.blocking(engine.docker_model_gateway_context, capability, context)
+            except ModelGatewayGrantUnavailable as error:
+                raise HTTPException(409, 'Docker model grant kind unavailable') from error
             except (IntakeUnauthorized, ValueError, OSError, KeyError, TypeError) as error:
                 raise HTTPException(409, 'Docker model gateway authority changed') from error
-            if not _same_allocation(fresh, context):
-                raise HTTPException(409, 'Docker model gateway authority changed')
-            if fresh.get('grant_kind') not in {'builder-docker-container-model-authorization',
-                    'builder-docker-container-synthetic-authorization'}:
-                raise HTTPException(409, 'Docker model grant kind unavailable')
             secret = await allocation.blocking(engine.docker_model_gateway_credentials)
             provider_auth = secret.get(MODEL_AUTH_ENV)
             if not isinstance(provider_auth, str):
@@ -105,17 +97,17 @@ async def _prepare(request, engine, capability, allocation, context, deadline):
         raise HTTPException(408, 'Docker model gateway deadline exhausted') from error
 
 
-async def _next_with_owner(iterator, engine, capability, allocation, context):
+async def _next_with_owner(iterator, engine, capability, allocation, context, next_check):
     task = asyncio.ensure_future(anext(iterator))
     try:
-        while not task.done():
-            done, _ = await asyncio.wait({task}, timeout=0.5)
-            if done:
-                break
-            fresh = await allocation.blocking(engine.docker_model_gateway_context, capability)
-            if not _same_allocation(fresh, context):
-                raise ValueError('Docker model gateway authority changed')
-        return task.result()
+        while True:
+            remaining = next_check - time.monotonic()
+            if remaining <= 0:
+                await allocation.blocking(engine.docker_model_gateway_context, capability, context)
+                next_check = time.monotonic() + 0.5
+            if task.done():
+                return task.result(), next_check
+            await asyncio.wait({task}, timeout=max(0, next_check - time.monotonic()))
     finally:
         if not task.done():
             task.cancel()
@@ -131,9 +123,11 @@ async def _stream(engine, capability, allocation, context, deadline, value, prov
         context=context, request=value, provider_auth=provider_auth)
     try:
         async with asyncio.timeout(max(0.0, (deadline - time.time_ns()) / 1e9)):
+            next_check = time.monotonic() + 0.5
             while True:
                 try:
-                    yield await _next_with_owner(iterator, engine, capability, allocation, context)
+                    chunk, next_check = await _next_with_owner(iterator, engine, capability, allocation, context, next_check)
+                    yield chunk
                 except StopAsyncIteration:
                     break
     finally:
