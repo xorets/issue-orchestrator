@@ -321,9 +321,13 @@ def test_facade_rechecks_shutdown_after_acquiring_shared_state_custody(sample_or
     actual_lock = orchestrator.state_lock
 
     class ShutdownAtLockAcquisition:
+        shutdown_committed = False
+
         def __enter__(self):
             actual_lock.acquire()
-            orchestrator.shutdown_requested = True
+            if not self.shutdown_committed:
+                self.shutdown_committed = True
+                orchestrator.shutdown_requested = True
 
         def __exit__(self, *_):
             actual_lock.release()
