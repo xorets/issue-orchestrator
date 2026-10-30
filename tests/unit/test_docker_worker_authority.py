@@ -627,6 +627,7 @@ def test_authenticated_docker_command_runner_and_status_handoff(model_authority,
     targets = [workspace / name for name in ('.codex', '.agents', '.issue-orchestrator')]
     for target in targets:
         target.mkdir(mode=0o555)
+        target.chmod(0o555)
     packet['mounts'].extend({'source': source, 'target': str(target), 'read_only': True} for target in targets)
     grant_path = files[packet['admission_proofs']['authorization']]
     grant = json.loads(grant_path.read_bytes())
@@ -699,6 +700,7 @@ def test_worker_overlay_checks_visible_targets_and_effective_mounts(tmp_path, mo
     targets = [workspace / name for name in ('.codex', '.agents', '.issue-orchestrator')]
     for target in targets:
         target.mkdir(mode=0o555)
+        target.chmod(0o555)
     mounts = [{'source':empty, 'target':str(target), 'read_only':True} for target in targets]
     packet = {'builder_run_id':'run-' + 'a' * 32, 'working_dir':str(workspace), 'mounts':mounts}
     rows = [f'{i} 1 0:1 / {target} ro - ext4 /dev/test ro' for i, target in enumerate(targets, 10)]
