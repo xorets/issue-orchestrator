@@ -73,7 +73,8 @@ has an exact same-path writable mount, then allocates an exclusive engine-run
 slot there. The provider runner reauthenticates the delivery and writes only its
 runtime files and status to that slot; controller run metadata remains read-only
 to the worker. After the original exec settles, the terminal adapter validates a
-bounded regular single-link status and its exit code before copying the diagnostic
+bounded regular single-link status, its exit code, and the exact provider lane and
+quota recovery flag in the sealed launch command before copying the diagnostic
 classification into the controller run directory. Worker-written status is not
 admission or release evidence; a missing or invalid status never prevents the
 terminal adapter from stopping the owned worker.

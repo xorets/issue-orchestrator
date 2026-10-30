@@ -1090,7 +1090,7 @@ def test_terminal_provider_handoff_stops_worker_even_on_invalid_status(launch, t
     (slot / 'provider-status.json').write_text('{}' if invalid else json.dumps(status))
     fd = os.open(slot, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     exec_id = '3'*64
-    runner._provider_slot = (slot, fd)  # noqa: SLF001
+    runner._provider_slot = (slot, fd, 'codex', False)  # noqa: SLF001
     runner._packet = packet  # noqa: SLF001
     runner._record = {  # noqa: SLF001
         'issue_number':42, 'session_name':'issue-42', 'daemon_id':packet['daemon_id'],

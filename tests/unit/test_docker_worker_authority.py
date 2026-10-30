@@ -619,33 +619,40 @@ def test_authenticated_docker_command_runner_and_status_handoff(model_authority,
     from issue_orchestrator.infra.config_models import ProviderShortRetryConfig
     from issue_orchestrator.infra.provider_resilience import read_provider_status
 
-    packet, _, _, _, _, seal = model_authority
+    packet, outer_path, outer, files, _, seal = model_authority
     scratch = tmp_path / 'scratch'; scratch.mkdir(mode=0o700)
     controller = tmp_path / (packet['run_id'] + '__coding-1'); controller.mkdir(mode=0o700)
     packet['engine_run_dir'] = str(controller)
     packet['mounts'].append({'source':str(scratch), 'target':str(scratch), 'read_only':False})
     path = Path(packet['worker_authority']['engine_contract_path'])
-    inner = json.loads(path.read_bytes()); inner['capabilities']['scratch'] = str(scratch)
+    inner = json.loads(path.read_bytes()); inner['capabilities']['scratch'] = str(scratch); inner['execution']['provider'] = 'codex'
     path.chmod(0o600); path.write_bytes(canonical(inner)); path.chmod(0o400)
     seal()
-    slot, descriptor = allocate(packet, tmp_path)
-    monkeypatch.setenv('ISSUE_ORCHESTRATOR_CALLBACK_SCOPE', 'docker')
-    monkeypatch.setenv('ISSUE_ORCHESTRATOR_DOCKER_PROVIDER_DIR', str(slot))
-    monkeypatch.setenv('XORETS_DOCKER_LAUNCH_JSON', canonical(packet).decode())
-    with pytest.raises(ValueError): worker_slot(str(tmp_path / 'foreign'), controller)
-    with pytest.raises(ValueError): worker_slot(str(slot), tmp_path / 'foreign-run')
+    outer['subject']['execution'].pop('provider')
+    grant_path = files[packet['admission_proofs']['authorization']]
+    grant = json.loads(grant_path.read_bytes())
+    grant['delivery_sha256'] = sha256(canonical(outer['subject'])).hexdigest()
+    grant_path.chmod(0o600); grant_path.write_bytes(canonical(grant)); grant_path.chmod(0o444)
+    outer['authorization']['sha256'] = sha256(grant_path.read_bytes()).hexdigest()
+    outer_path.chmod(0o600); outer_path.write_bytes(canonical(outer)); outer_path.chmod(0o400)
     marker = tmp_path / 'provider-started'
     agent = AgentConfig(prompt_path=tmp_path / 'prompt', provider='codex', provider_args={'execution_mode':'exec'})
     wrapper = ProviderCommandWrapper(ProviderShortRetryConfig(max_attempts=1, initial_backoff_seconds=1,
         max_backoff_seconds=1, jitter=False))
     command = wrapper.wrap(f'printf started > {shlex.quote(str(marker))}', agent, controller)
+    slot, descriptor, lane, heals = allocate(packet, tmp_path, command)
+    monkeypatch.setenv('ISSUE_ORCHESTRATOR_CALLBACK_SCOPE', 'docker')
+    monkeypatch.setenv('ISSUE_ORCHESTRATOR_DOCKER_PROVIDER_DIR', str(slot))
+    monkeypatch.setenv('XORETS_DOCKER_LAUNCH_JSON', canonical(packet).decode())
+    with pytest.raises(ValueError): worker_slot(str(tmp_path / 'foreign'), controller)
+    with pytest.raises(ValueError): worker_slot(str(slot), tmp_path / 'foreign-run')
     argv = shlex.split(command)
     try:
         controller.chmod(0o500)  # Worker sees controller metadata read-only.
         assert main(argv[3:]) == 0
         assert marker.read_text() == 'started'
         controller.chmod(0o700)  # Controller retains write custody.
-        settle(slot, descriptor, packet, 0)
+        settle(slot, descriptor, lane, heals, packet, 0)
     finally:
         controller.chmod(0o700)
         os.close(descriptor)

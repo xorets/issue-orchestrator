@@ -27,7 +27,7 @@ def test_actual_runner_status_survives_handoff(tmp_path, message, kind):
     env = {**os.environ, 'PYTHONPATH':str(Path(__file__).resolve().parents[2] / 'src')}
     result = subprocess.run(argv, cwd=tmp_path, env=env, capture_output=True, timeout=10)
     try:
-        settle(slot, descriptor, {'engine_run_dir':str(target)}, result.returncode)
+        settle(slot, descriptor, 'codex', False, {'engine_run_dir':str(target)}, result.returncode)
     finally:
         os.close(descriptor)
     status = read_provider_status(target)
@@ -35,7 +35,7 @@ def test_actual_runner_status_survives_handoff(tmp_path, message, kind):
     assert (status.error_type.value if status.error_type else None) == kind
 
 
-@pytest.mark.parametrize('attack', ['missing', 'symlink', 'hardlink', 'oversized', 'malformed', 'extra', 'exit', 'bool-attempt', 'slot-symlink'])
+@pytest.mark.parametrize('attack', ['missing', 'symlink', 'hardlink', 'oversized', 'malformed', 'extra', 'exit', 'bool-attempt', 'foreign-provider', 'foreign-lane', 'heals', 'slot-symlink'])
 def test_refuses_untrusted_provider_status(tmp_path, attack):
     slot = tmp_path / 'slot'; slot.mkdir(mode=0o700)
     target = tmp_path / 'controller'; target.mkdir(mode=0o700)
@@ -46,6 +46,9 @@ def test_refuses_untrusted_provider_status(tmp_path, attack):
     if attack == 'extra': status['extra'] = True
     if attack == 'exit': status['exit_code'] = 1
     if attack == 'bool-attempt': status['attempts'] = True
+    if attack == 'foreign-provider': status['provider'] = 'other'
+    if attack == 'foreign-lane': status['provider'] = 'codex:foreign'
+    if attack == 'heals': status['quota_heals_on_timer'] = True
     path.write_text(json.dumps(status))
     if attack == 'missing': path.unlink()
     if attack == 'symlink': path.unlink(); path.symlink_to(target)
@@ -55,13 +58,13 @@ def test_refuses_untrusted_provider_status(tmp_path, attack):
     if attack == 'slot-symlink':
         moved = tmp_path / 'moved'; slot.rename(moved); slot.symlink_to(moved)
     try:
-        with pytest.raises((ValueError, OSError)): settle(slot, descriptor, {'engine_run_dir':str(target)}, 0)
+        with pytest.raises((ValueError, OSError)): settle(slot, descriptor, 'codex', False, {'engine_run_dir':str(target)}, 0)
     finally:
         os.close(descriptor)
     assert not (target / 'provider-status.json').exists()
 
 
-@pytest.mark.parametrize('attack', ['outside', 'symlink', 'missing-mount', 'overlap'])
+@pytest.mark.parametrize('attack', ['outside', 'symlink', 'missing-mount', 'overlap', 'foreign-provider'])
 def test_scratch_allocation_requires_exact_selected_mount(tmp_path, attack):
     from hashlib import sha256
     from issue_orchestrator.execution.docker_launch_input import canonical
@@ -74,11 +77,13 @@ def test_scratch_allocation_requires_exact_selected_mount(tmp_path, attack):
     if attack == 'outside': selected.mkdir(mode=0o700)
     if attack == 'symlink':
         moved = root / 'moved'; scratch.rename(moved); scratch.symlink_to(moved)
-    inner = {'run_id':run, 'capabilities':{'scratch':str(selected)}}
+    inner = {'run_id':run, 'capabilities':{'scratch':str(selected)}, 'execution':{'provider':'codex'}}
     raw = canonical(inner); path.write_bytes(raw); path.chmod(0o400)
     mount = {'source':str(selected), 'target':str(selected), 'read_only':False}
     packet = {'builder_run_id':run, 'run_id':'20261017-100000Z-' + 'a'*32,
         'contract_sha256':sha256(raw).hexdigest(), 'worker_authority':{'engine_contract_path':str(path)},
         'mounts':[] if attack == 'missing-mount' else [mount]}
     if attack == 'overlap': packet['mounts'].append({'source':str(root), 'target':str(root), 'read_only':False})
-    with pytest.raises((OSError, ValueError)): allocate(packet, root)
+    provider = "other" if attack == "foreign-provider" else "codex"
+    with pytest.raises((OSError, ValueError)):
+        allocate(packet, root, "python -m issue_orchestrator.entrypoints.cli_tools.provider_runner --provider " + provider)

@@ -132,7 +132,7 @@ class DockerPlugin:
         self._lock = threading.RLock()
         self._watcher: threading.Thread | None = None
         self._watched_record: dict | None = None
-        self._provider_slot: tuple[Path, int] | None = None
+        self._provider_slot: tuple[Path, int, str, bool] | None = None
 
     def select_run(self, run_id: str) -> None:
         if self.template_path is None or not re.fullmatch(r"[0-9]{8}-[0-9]{6}Z-[0-9a-f]{32}", run_id):
@@ -384,10 +384,10 @@ class DockerPlugin:
             require_selected_bridge(self.engine, packet, controller)
         return actual
 
-    def _prepare_provider_dir(self, packet: dict, environment: dict[str, str]) -> None:
+    def _prepare_provider_dir(self, packet: dict, environment: dict[str, str], command: str) -> None:
         if "XORETS_DOCKER_LAUNCH_JSON" in environment:
             root = Path("/srv/builder/tasks") / packet["builder_run_id"]
-            self._provider_slot = allocate_provider_dir(packet, root)
+            self._provider_slot = allocate_provider_dir(packet, root, command)
             environment[PROVIDER_DIR_ENV] = str(self._provider_slot[0])
 
     def _close_provider_dir(self) -> None:
@@ -408,7 +408,7 @@ class DockerPlugin:
             environment_values = worker_environment(packet, secret_env or {},
                 self._callback_token or os.environ.get("ISSUE_ORCHESTRATOR_AGENT_CALLBACK_TOKEN"))
             reserve_startup(packet, self.template_path)
-            self._prepare_provider_dir(packet, environment_values)
+            self._prepare_provider_dir(packet, environment_values, command)
             launch_digest = sha256(canonical(packet)).hexdigest()
             with self._lock:
                 descriptor = os.open(self.receipt_path(), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -570,14 +570,15 @@ class DockerPlugin:
                     raise ValueError("Docker launch deadline exhausted")
                 self.engine.start_exec(record["provider_exec_id"], consume, remaining)
             provider = self.engine.request("GET", f"/exec/{record['provider_exec_id']}/json")
+            exit_code = provider.get("ExitCode")
             if (provider.get("ID") != record["provider_exec_id"] or
                     provider.get("ContainerID") != record["container_id"] or provider.get("Running") is not False or
-                    type(provider.get("ExitCode")) is not int):
+                    type(exit_code) is not int):
                 raise ValueError("Docker provider did not settle")
-            record["provider_exit_code"] = provider.get("ExitCode")
+            record["provider_exit_code"] = exit_code
             if self._provider_slot is not None:
                 try:
-                    settle_provider_status(*self._provider_slot, packet, record["provider_exit_code"])
+                    settle_provider_status(*self._provider_slot, packet, exit_code)
                 except (OSError, ValueError, TypeError, KeyError):
                     logger.exception("Docker provider status refused")
                     record["error"] = record["error"] or "provider-status-invalid"

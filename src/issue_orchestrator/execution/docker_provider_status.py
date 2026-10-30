@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import stat
 
 from ..infra.provider_resilience import ProviderStatus, write_provider_status
@@ -14,8 +15,21 @@ from .docker_launch_input import sealed_bytes
 ENV = 'ISSUE_ORCHESTRATOR_DOCKER_PROVIDER_DIR'
 
 
-def allocate(packet: dict, root: Path) -> tuple[Path, int]:
+def allocate(packet: dict, root: Path, command: str) -> tuple[Path, int, str, bool]:
     inner = json.loads(sealed_bytes(Path(packet['worker_authority']['engine_contract_path']), expected=packet['contract_sha256']))
+    words = shlex.split(command)
+    module = 'issue_orchestrator.entrypoints.cli_tools.provider_runner'
+    if words.count(module) != 1:
+        raise ValueError('Docker provider command identity differs')
+    args = words[words.index(module) + 1:]
+    if args.count('--provider') != 1 or args.count('--quota-heals-on-timer') > 1:
+        raise ValueError('Docker provider command lane differs')
+    position = args.index('--provider')
+    lane = args[position + 1] if position + 1 < len(args) else ''
+    if (not re.fullmatch(r'[A-Za-z0-9_.-]+(?::[A-Za-z0-9_.-]+)?', lane) or
+            lane.partition(':')[0] != inner['execution']['provider']):
+        raise ValueError('Docker provider command belongs to another provider')
+    heals = '--quota-heals-on-timer' in args
     scratch = Path(inner['capabilities']['scratch'])
     if (inner['run_id'] != packet['builder_run_id'] or not scratch.is_absolute() or
             scratch == root or not scratch.is_relative_to(root) or scratch.resolve(strict=True) != scratch or
@@ -34,7 +48,7 @@ def allocate(packet: dict, root: Path) -> tuple[Path, int]:
     slot = scratch / ('provider-' + packet['run_id'])
     slot.mkdir(mode=0o700)
     descriptor = os.open(slot, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    return slot, descriptor
+    return slot, descriptor, lane, heals
 
 
 def worker_slot(value: str, run_dir: Path) -> Path:
@@ -105,7 +119,7 @@ def _read_status(directory: int, exit_code: int) -> ProviderStatus:
     return ProviderStatus.from_dict(data)
 
 
-def settle(slot: Path, descriptor: int, packet: dict, exit_code: int) -> None:
+def settle(slot: Path, descriptor: int, lane: str, heals: bool, packet: dict, exit_code: int) -> None:
     info = os.fstat(descriptor)
     current = slot.lstat()
     if (slot.resolve(strict=True) != slot or not stat.S_ISDIR(current.st_mode) or
@@ -113,4 +127,6 @@ def settle(slot: Path, descriptor: int, packet: dict, exit_code: int) -> None:
             current.st_uid != os.getuid() or stat.S_IMODE(current.st_mode) != 0o700):
         raise ValueError('Docker provider slot custody changed')
     status = _read_status(descriptor, exit_code)
+    if status.provider != lane or status.quota_heals_on_timer is not heals:
+        raise ValueError('Docker provider status belongs to another lane')
     write_provider_status(Path(packet['engine_run_dir']), status)
