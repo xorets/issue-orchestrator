@@ -18,10 +18,10 @@ def delivery(tmp_path):
     contracts = root / 'engine-contracts-docker-v1'; contracts.mkdir(mode=0o700)
     run = 'run-' + 'a' * 32
     template = templates / 'template.json'
-    inner = {'bounds': {'transient_launch_max_attempts': 2},
+    inner = {'run_id': run, 'bounds': {'transient_launch_max_attempts': 2},
         'execution': {'docker_launch': {'template_path': str(template)}}}
     path = contracts / (run + '.json'); path.write_bytes(canonical(inner)); path.chmod(0o400)
-    return {'builder_run_id':run, 'contract_sha256':sha256(canonical(inner)).hexdigest(),
+    return {'builder_run_id':run, 'run_id':'20261017-100000Z-' + 'a'*32, 'contract_sha256':sha256(canonical(inner)).hexdigest(),
         'worker_authority':{'engine_contract_path':str(path)}, 'mounts':[]}, template
 
 
@@ -35,17 +35,36 @@ def _attempt(packet, template, queue):
 
 def test_distinct_delivery_has_new_allowance(delivery):
     packet, template = delivery
-    reserve_startup(packet, template); reserve_startup(packet, template)
-    with pytest.raises(ValueError): reserve_startup(packet, template)
-    packet = {**packet, 'builder_run_id':'run-' + 'b' * 32}
     reserve_startup(packet, template)
+    record = json.loads((template.parent / ('startup-' + packet['builder_run_id']) / '00000001.json').read_bytes())
+    assert record['engine_run_id'] == packet['run_id']
+    assert record['launch_sha256'] == sha256(canonical(packet)).hexdigest()
+    with pytest.raises(ValueError): reserve_startup(packet, template)
+    second = {**packet, 'run_id':'20261017-100000Z-' + 'b'*32}
+    reserve_startup(second, template)
+    with pytest.raises(ValueError): reserve_startup({**packet, 'run_id':'20261017-100000Z-' + 'c'*32}, template)
+    run = 'run-' + 'b'*32
+    path = Path(packet['worker_authority']['engine_contract_path']).with_name(run + '.json')
+    inner = {'run_id':run, 'bounds':{'transient_launch_max_attempts':2},
+        'execution':{'docker_launch':{'template_path':str(template)}}}
+    path.write_bytes(canonical(inner)); path.chmod(0o400)
+    fresh = {**packet, 'builder_run_id':run, 'contract_sha256':sha256(canonical(inner)).hexdigest(),
+        'worker_authority':{'engine_contract_path':str(path)}}
+    reserve_startup(fresh, template)
+
+
+@pytest.mark.parametrize('builder', ['run-' + 'b'*32, '../escape', 'run-' + 'a'*31])
+def test_changed_builder_identity_refused_before_namespace(delivery, builder):
+    packet, template = delivery
+    with pytest.raises(ValueError): reserve_startup({**packet, 'builder_run_id':builder}, template)
+    assert list(template.parent.iterdir()) == []
 
 
 def test_concurrent_processes_do_not_exceed_limit(delivery):
     packet, template = delivery
     context = multiprocessing.get_context('fork')
     queue = context.Queue()
-    processes = [context.Process(target=_attempt, args=(packet, template, queue)) for _ in range(8)]
+    processes = [context.Process(target=_attempt, args=({**packet, 'run_id':'20261017-100000Z-' + format(index, '032x')}, template, queue)) for index in range(8)]
     for process in processes: process.start()
     results = [queue.get(timeout=10) for _ in processes]
     for process in processes:
@@ -53,7 +72,7 @@ def test_concurrent_processes_do_not_exceed_limit(delivery):
         assert process.exitcode == 0
     assert 1 <= sum(results) <= 2
     while sum(results) < 2:
-        reserve_startup(packet, template); results.append(True)
+        reserve_startup({**packet, 'run_id':'20261017-100000Z-' + 'f'*32}, template); results.append(True)
     with pytest.raises(ValueError): reserve_startup(packet, template)
 
 
@@ -106,8 +125,10 @@ def test_interrupted_record_write_is_never_refunded(delivery):
     # The complete visible marker counts as spent; an incomplete marker fails closed.
     namespace = template.parent / ('startup-' + packet['builder_run_id'])
     assert (namespace / '00000001.json').exists()
+    with pytest.raises(ValueError): reserve_startup(packet, template)
+    next_run = {**packet, 'run_id':'20261017-100000Z-' + 'b'*32}
     try:
-        reserve_startup(packet, template)
+        reserve_startup(next_run, template)
     except ValueError:
         pass
-    with pytest.raises(ValueError): reserve_startup(packet, template)
+    with pytest.raises(ValueError): reserve_startup({**packet, 'run_id':'20261017-100000Z-' + 'c'*32}, template)
