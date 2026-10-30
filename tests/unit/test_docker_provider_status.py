@@ -87,3 +87,36 @@ def test_scratch_allocation_requires_exact_selected_mount(tmp_path, attack):
     provider = "other" if attack == "foreign-provider" else "codex"
     with pytest.raises((OSError, ValueError)):
         allocate(packet, root, "python -m issue_orchestrator.entrypoints.cli_tools.provider_runner --provider " + provider)
+
+
+@pytest.mark.parametrize('worker_time', ['2099-01-01T00:00:00+00:00', '2001-01-01T00:00:00+00:00'])
+def test_worker_timestamp_cannot_set_circuit_chronology(tmp_path, worker_time, monkeypatch):
+    from datetime import datetime, timezone
+    from issue_orchestrator.control.provider_circuit_effects import record_provider_resilience_effects
+    from issue_orchestrator.control.provider_resilience import ProviderResilienceManager
+    from issue_orchestrator.control.session_decision import SessionDecision, provider_success_from_status
+    from issue_orchestrator.domain.models import SessionStatus
+    from issue_orchestrator.infra.config import ProviderResilienceConfig
+    from issue_orchestrator.ports import InMemoryProviderCircuitStore, NullEventSink
+
+    slot = tmp_path / 'slot'; slot.mkdir(mode=0o700)
+    target = tmp_path / 'controller'; target.mkdir(mode=0o700)
+    value = {'provider':'codex', 'error_type':None, 'attempts':1, 'succeeded':True, 'exit_code':0,
+        'timed_out':False, 'last_error_summary':None, 'last_attempt_at':worker_time, 'quota_heals_on_timer':False}
+    (slot / 'provider-status.json').write_text(json.dumps(value))
+    descriptor = os.open(slot, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    observed = datetime(2026, 10, 30, 15, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr('issue_orchestrator.execution.docker_provider_status.now_iso', lambda: observed.isoformat())
+    try:
+        settle(slot, descriptor, 'codex', False, {'engine_run_dir':str(target)}, 0)
+    finally:
+        os.close(descriptor)
+    status = read_provider_status(target)
+    assert status is not None
+    store = InMemoryProviderCircuitStore()
+    manager = ProviderResilienceManager(ProviderResilienceConfig(), store=store, events=NullEventSink())
+    decision = SessionDecision(status=SessionStatus.COMPLETED, provider_success=provider_success_from_status(status))
+    record_provider_resilience_effects(decision, manager)
+    evidence = store.get_evidence('codex')
+    assert evidence is not None
+    assert evidence.success_observed_at == observed

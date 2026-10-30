@@ -1,4 +1,5 @@
 """Bounded provider status handoff from the selected Docker worker scratch."""
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -6,7 +7,7 @@ import re
 import shlex
 import stat
 
-from ..infra.provider_resilience import ProviderStatus, write_provider_status
+from ..infra.provider_resilience import ProviderStatus, now_iso, write_provider_status
 from .docker_launch_input import sealed_bytes
 
 
@@ -104,5 +105,7 @@ def settle(slot: Path, descriptor: int, lane: str, heals: bool, packet: dict, ex
             (info.st_dev, info.st_ino) != (current.st_dev, current.st_ino) or
             current.st_uid != os.getuid() or stat.S_IMODE(current.st_mode) != 0o700):
         raise ValueError('Docker provider slot custody changed')
+    # Circuit chronology belongs to the controller, not the worker.
+    observed_at = now_iso()
     status = _read_status(descriptor, exit_code, lane, heals)
-    write_provider_status(Path(packet['engine_run_dir']), status)
+    write_provider_status(Path(packet['engine_run_dir']), replace(status, last_attempt_at=observed_at))
