@@ -354,3 +354,120 @@ def test_model_gateway_requires_live_original_and_rechecks_custody(first_model_o
     assert adapter.model_gateway_snapshot.call_count==2
     adapter.model_gateway_snapshot.side_effect=[gateway,{}]
     with pytest.raises(ValueError): owner.model_gateway_context(session.run_assets)
+
+
+def test_read_only_review_history_proves_selected_renewals(reviewer_owner, claim_http):
+    """Real claim adapter/history with only GitHub storage substituted."""
+    from hashlib import sha256
+    import json
+    from issue_orchestrator.adapters.github.claim_parser import format_claim_comment
+    from issue_orchestrator.adapters.github.ref_claim_adapter import CLAIM_REF_PREFIX
+    from issue_orchestrator.control.original_delivery_history import prove_history
+    owner, _, _, _, parent, anchor = reviewer_owner
+    selected = anchor
+    claim_http.seed_record(CLAIM_REF_PREFIX+'/issue-42', format_claim_comment(selected))
+    selected, selected_fence = owner.claims.original_claim(42)
+    assert owner.claims.renew_claim(42, selected.lease_id)
+    current, current_fence = owner.claims.original_claim(42)
+    assert current_fence != selected_fence
+    request = {'issue_number':42, 'parent':{'fence':selected_fence,
+        'original_inner_sha256':selected.original.contract_sha256, 'engine_run_id':selected.original.run_id,
+        'head_sha':parent['head_sha']}, 'expected_current_fence':current_fence,
+        'receipts':[{'claim_ref_sha':selected_fence,
+                     'reserved_unix_ns':__import__('time').time_ns()}]}
+    digest = sha256((json.dumps(request, sort_keys=True, indent=2)+'\n').encode()).hexdigest()
+    assert prove_history(owner.claims, owner.config.repo, request) == {
+        'status':'PASS', 'current_fence':current_fence, 'subject_sha256':digest}
+    bad = {**request, 'receipts':[{'claim_ref_sha':selected_fence,
+        'reserved_unix_ns':int(selected.expires_at.timestamp()*1_000_000_000)}]}
+    with pytest.raises(ValueError, match='chronology'):
+        prove_history(owner.claims, owner.config.repo, bad)
+    with pytest.raises(ValueError, match='current fence'):
+        prove_history(owner.claims, owner.config.repo, {**request, 'expected_current_fence':'f'*40})
+
+
+@pytest.mark.parametrize('fault', ['lease', 'owner', 'custody', 'head', 'missing', 'backwards', 'current-drift'])
+def test_read_only_review_history_refuses_foreign_or_drifting_claims(reviewer_owner, claim_http, fault):
+    """Use actual immutable Git-ref reader; only the GitHub transport is fake."""
+    from datetime import timedelta
+    from issue_orchestrator.adapters.github.claim_parser import format_claim_comment
+    from issue_orchestrator.adapters.github.ref_claim_adapter import CLAIM_REF_PREFIX
+    from issue_orchestrator.control.original_delivery_history import prove_history
+    owner, _, _, _, parent, anchor = reviewer_owner
+    selected = replace(anchor, original=replace(anchor.original, head_sha=parent['head_sha']))
+    claim_http.seed_record(CLAIM_REF_PREFIX+'/issue-42', format_claim_comment(selected))
+    selected, fence = owner.claims.original_claim(42)
+    request = {'issue_number':42, 'parent':{'fence':fence,
+        'original_inner_sha256':selected.original.contract_sha256, 'engine_run_id':selected.original.run_id,
+        'head_sha':selected.original.head_sha}, 'expected_current_fence':fence, 'receipts':[]}
+    if fault == 'missing':
+        request['parent']['fence'] = 'f'*40
+    elif fault == 'current-drift':
+        request['expected_current_fence'] = 'f'*40
+    else:
+        altered = selected
+        if fault == 'lease': altered = replace(selected, lease_id='foreign')
+        if fault == 'owner': altered = replace(selected, original=replace(selected.original, engine_pid=selected.original.engine_pid+1))
+        if fault == 'custody': altered = replace(selected, original=replace(selected.original, docker_custody=()))
+        if fault == 'head': altered = replace(selected, original=replace(selected.original, head_sha='3'*40))
+        if fault == 'backwards': altered = replace(selected, expires_at=selected.expires_at-timedelta(seconds=1))
+        claim_http.seed_record(CLAIM_REF_PREFIX+'/issue-42', format_claim_comment(altered))
+        _, request['expected_current_fence'] = owner.claims.original_claim(42)
+    from issue_orchestrator.domain.claim import ClaimFetchError
+    with pytest.raises((ValueError, ClaimFetchError)):
+        prove_history(owner.claims, owner.config.repo, request)
+
+
+@pytest.mark.asyncio
+async def test_history_mcp_returns_only_digest_and_current_fence(reviewer_owner, claim_http, monkeypatch):
+    from contextlib import contextmanager
+    from issue_orchestrator.adapters.github.claim_parser import format_claim_comment
+    from issue_orchestrator.adapters.github.ref_claim_adapter import CLAIM_REF_PREFIX
+    from issue_orchestrator.contracts.original_delivery_history import HistoryRequest
+    from issue_orchestrator.entrypoints import mcp_original_delivery
+    owner, _, _, _, parent, anchor = reviewer_owner
+    selected = replace(anchor, original=replace(anchor.original, head_sha=parent['head_sha']))
+    claim_http.seed_record(CLAIM_REF_PREFIX+'/issue-42', format_claim_comment(selected))
+    selected, fence = owner.claims.original_claim(42)
+    request = HistoryRequest(issue_number=42, parent={'fence':fence,
+        'original_inner_sha256':selected.original.contract_sha256, 'engine_run_id':selected.original.run_id,
+        'head_sha':selected.original.head_sha}, expected_current_fence=fence, receipts=[])
+    @contextmanager
+    def offline(_config):
+        yield owner
+    monkeypatch.setattr(mcp_original_delivery, 'build_offline_original_delivery_owner', offline)
+    monkeypatch.setattr(mcp_original_delivery.Config, 'load', lambda _: owner.config)
+    response = await mcp_original_delivery.original_delivery_history_result(Path('/fixture'), request)
+    assert not response.isError
+    assert set(response.structuredContent) == {'status', 'current_fence', 'subject_sha256'}
+    assert response.structuredContent['status'] == 'PASS'
+    assert response.structuredContent['current_fence'] == fence
+    assert selected.lease_id not in str(response.structuredContent)
+
+
+def test_read_only_history_refuses_current_ref_change_after_history_read(reviewer_owner, claim_http):
+    from issue_orchestrator.adapters.github.claim_parser import format_claim_comment
+    from issue_orchestrator.adapters.github.ref_claim_adapter import CLAIM_REF_PREFIX
+    from issue_orchestrator.control.original_delivery_history import prove_history
+    owner, _, _, _, parent, anchor = reviewer_owner
+    claim_http.seed_record(CLAIM_REF_PREFIX+'/issue-42', format_claim_comment(anchor))
+    selected, fence = owner.claims.original_claim(42)
+    request = {'issue_number':42, 'parent':{'fence':fence,
+        'original_inner_sha256':selected.original.contract_sha256, 'engine_run_id':selected.original.run_id,
+        'head_sha':parent['head_sha']}, 'expected_current_fence':fence, 'receipts':[]}
+    from unittest.mock import patch
+    with patch.object(owner.claims, 'original_claim', side_effect=[(selected, fence), (selected, 'f'*40)]):
+        with pytest.raises(ValueError, match='current fence changed'):
+            prove_history(owner.claims, owner.config.repo, request)
+
+
+def test_history_request_rejects_overflow_and_malformed_fence():
+    from pydantic import ValidationError
+    from issue_orchestrator.contracts.original_delivery_history import HistoryRequest
+    data = {'issue_number':42, 'parent':{'fence':'a'*40, 'original_inner_sha256':'b'*64,
+        'engine_run_id':'20261022-211413Z-'+'c'*32, 'head_sha':'d'*40},
+        'expected_current_fence':'e'*40, 'receipts':[]}
+    with pytest.raises(ValidationError):
+        HistoryRequest.model_validate({**data, 'receipts':[{'claim_ref_sha':'a'*40, 'reserved_unix_ns':1}]*257})
+    with pytest.raises(ValidationError):
+        HistoryRequest.model_validate({**data, 'expected_current_fence':'bad'})

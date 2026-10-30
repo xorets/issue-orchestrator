@@ -590,3 +590,18 @@ def test_builder_generated_overlay_fixture(monkeypatch):
     overlay['read_only'] = False
     with pytest.raises(ValueError):
         require_container_only_mounts(packet)
+
+
+def test_review_request_bound_matches_history_proof_capacity():
+    import time
+    from issue_orchestrator.execution.docker_worker_authority import require_current_model_grant
+    now = time.time_ns()
+    bounds = {'deadline_unix_ns':now + 60_000_000_000}
+    inner = {'role':'standard-review', 'bounds':bounds, 'capabilities':{'model':'fixture'}}
+    grant = {'schema_version':2, 'kind':'builder-docker-container-model-authorization',
+        'role':'standard-review', 'model':'fixture', 'bounds':bounds, 'max_model_requests':256,
+        'expires_unix_ns':now + 120_000_000_000}
+    packet = {'deadline_unix_ns':bounds['deadline_unix_ns']}
+    require_current_model_grant(packet, inner, grant)
+    with pytest.raises(ValueError, match='history proof bound'):
+        require_current_model_grant(packet, inner, {**grant, 'max_model_requests':257})

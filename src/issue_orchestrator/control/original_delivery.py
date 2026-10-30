@@ -19,6 +19,7 @@ from ..domain.session_run import SessionRunAssets
 from uuid import uuid4
 import re
 import time
+from .original_delivery_history import require_expiry_only
 from .issue_termination import IssueTerminationOutcome
 from .pause_facade import require_model_preflight_barrier, require_operator_barrier
 
@@ -205,8 +206,7 @@ class OriginalDeliveryOwner:
         except ClaimFetchError as error:
             raise ValueError('Docker REVIEW selection anchor is unavailable') from error
         claim, fence = self.claims.original_claim(session.issue.number)
-        if replace(claim, expires_at=anchor.expires_at) != anchor or claim.expires_at < anchor.expires_at:
-            raise ValueError('Docker REVIEW permits only the selected lease expiry renewal')
+        require_expiry_only(anchor, claim)
         owner = claim.original
         if (owner is None or owner.execution_backend != 'docker' or owner.repository != self.config.repo or
                 owner.contract_sha256 != parent['original_inner_sha256'] or owner.run_id != parent['engine_run_id'] or

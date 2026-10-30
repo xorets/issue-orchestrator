@@ -196,6 +196,8 @@ def require_current_model_grant(packet: dict, inner: dict, grant: dict) -> None:
             not re.fullmatch(r'[0-9a-f]{64}', grant['fixture_capability_sha256']) or
             grant['fixture_capability_sha256'] != inner.get('capabilities', {}).get('capability_bundle_sha256')):
         raise ValueError('Docker synthetic authorization differs from selected fixture')
+    if container and inner.get('role') == 'standard-review' and grant['max_model_requests'] > 256:
+        raise ValueError('Docker review model request allowance exceeds history proof bound')
     if (not (legacy or container) or grant.get('role') != inner.get('role') or
             not isinstance(inner.get('capabilities', {}).get('model'), str) or not inner['capabilities']['model'] or
             grant.get('model') != inner['capabilities']['model'] or grant.get('bounds') != bounds or
