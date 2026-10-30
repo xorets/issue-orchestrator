@@ -1,5 +1,4 @@
 """Durable delivery-scoped reservations before Docker startup."""
-import fcntl
 from hashlib import sha256
 import json
 import os
@@ -38,6 +37,7 @@ def reserve_startup(packet: dict, template: Path | None) -> None:
         return
     if template is None:
         raise ValueError('Docker delivery template is unavailable')
+    import fcntl
     inner_path = Path(packet['worker_authority']['engine_contract_path'])
     inner = json.loads(sealed_bytes(inner_path, expected=packet['contract_sha256']))
     builder = packet.get('builder_run_id')

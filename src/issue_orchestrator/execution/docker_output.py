@@ -1,6 +1,5 @@
 """Controller-only Docker output custody and bounded per-run allocation."""
 from contextlib import contextmanager
-import fcntl
 from hashlib import sha256
 import os
 from pathlib import Path
@@ -60,6 +59,7 @@ def first_model_evidence_size(directory: Path) -> int:
 @contextmanager
 def bounded_output(root: Path, size: int, limit: int, deadline_unix_ns: int):
     """Serialize actual output allocation across live and observer instances."""
+    import fcntl
     descriptor = os.open(private_directory(root), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)

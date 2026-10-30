@@ -132,3 +132,20 @@ def test_interrupted_record_write_is_never_refunded(delivery):
     except ValueError:
         pass
     with pytest.raises(ValueError): reserve_startup({**packet, 'run_id':'20261017-100000Z-' + 'c'*32}, template)
+
+
+def test_plugin_import_does_not_require_fcntl():
+    import subprocess
+    import sys
+    script = '''
+import builtins
+original = builtins.__import__
+def block(name, *args, **kwargs):
+    if name == "fcntl":
+        raise ImportError("fcntl unavailable")
+    return original(name, *args, **kwargs)
+builtins.__import__ = block
+import issue_orchestrator.execution.terminal_docker
+import issue_orchestrator.execution.docker_startup_allowance
+'''
+    subprocess.run([sys.executable, '-c', script], check=True, timeout=10)
