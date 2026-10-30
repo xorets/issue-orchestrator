@@ -1,11 +1,17 @@
 """Backend custody used by the existing original owner, including offline recovery."""
-from typing import Any, Protocol
+from typing import Any, Protocol, TypedDict
 from ..domain.models import Session
 from ..domain.original_delivery import DockerCustody, OriginalDelivery
 
 
+class DockerPrestartSnapshot(TypedDict):
+    contract_sha256: str
+    launch_sha256: str
+    custody: DockerCustody
+
+
 class OriginalDockerCustody(Protocol):
-    def prestart_snapshot(self, session: Session) -> dict: ...
+    def prestart_snapshot(self, session: Session) -> DockerPrestartSnapshot: ...
     def model_gateway_snapshot(self, session: Session) -> dict[str, Any]: ...
     def first_model_snapshot(self, session: Session, contract_sha256: str, launch_sha256: str) -> dict[str, Any]: ...
     def verify_review_parent(self, owner: OriginalDelivery, context: dict[str, Any]) -> None: ...

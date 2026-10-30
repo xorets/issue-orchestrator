@@ -27,6 +27,8 @@ def require_never_started(engine, launch_path: Path | None, record: dict, actual
         raise ValueError('Docker daemon changed before settlement')
     if actual is None:
         actual = engine.request('GET', f"/exec/{record['provider_exec_id']}/json")
+    if not isinstance(actual, dict):
+        raise ValueError('Docker provider observation is unknown')
     process = actual.get('ProcessConfig')
     if type(process) is not dict or type(process.get('arguments')) is not list:
         raise ValueError('Docker provider process identity is unknown')

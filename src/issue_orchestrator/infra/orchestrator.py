@@ -38,6 +38,7 @@ from ..control.orchestrator_support import (
     init_orchestrator_components,
 )
 from ..control.original_delivery_facade import original_delivery as _original_delivery, docker_first_model as _docker_first_model
+from .original_delivery_activation import launch_issue as _launch_issue_with_original
 from .docker_model_gateway_mixin import DockerModelGatewayMixin
 from ..control.session_launch_types import LaunchStep
 from ..control.github_workflow import GitHubWorkflow, launch_issue_by_number as _gw_launch_issue_by_number, get_issue_machine as _gw_get_issue_machine
@@ -98,7 +99,6 @@ from ..control.session_routing import (
     create_session as _create_session,
     session_exists as _session_exists,
     kill_session as _kill_session,
-    orchestrator_launch_session as _launch_session,
     get_session_machine as _sl_get_session_machine,
 )
 from ..control.cleanup_manager import CleanupManager, build_cleanup_manager
@@ -529,19 +529,7 @@ class Orchestrator(DockerModelGatewayMixin):
         return self.launch_session_step(issue, tech_lead_scope=tech_lead_scope).session
 
     def launch_session_step(self, issue: Issue, *, tech_lead_scope: "TechLeadLaunchScope | None" = None) -> LaunchStep:
-        with self.state_lock:
-            return _launch_session(issue, self.state, self.session_launcher, self.deps.session_restorer,
-                tech_lead_scope=tech_lead_scope, activate_original=self._activate_docker_original)
-
-    def _activate_docker_original(self, session: Session) -> None:
-        owner = self.deps.original_delivery_owner
-        if self.shutdown_requested or self.state.paused or owner is None or not self.deps.health_gate.check(paused=False).can_proceed:
-            raise ValueError('Docker pre-start owner or engine health unavailable')
-        fence = owner.register_prestart(session)
-        if self.shutdown_requested or self.state.paused or not self.deps.health_gate.check(paused=False).can_proceed:
-            raise ValueError('Docker pre-start engine health changed')
-        owner.require_prestart_current(session, fence)
-        self.deps.runner.activate_session(session.run_assets, session.terminal_id, fence)
+        return _launch_issue_with_original(self, issue, tech_lead_scope=tech_lead_scope)
 
     def handle_session_completion(self, session: Session, status: SessionStatus, *, provider_error_type: "ProviderErrorType | None" = None) -> None:
         _handle_session_completion(

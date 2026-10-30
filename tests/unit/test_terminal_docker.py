@@ -18,6 +18,8 @@ class Engine:
         self.packet = packet
         self.running = True
         self.starts = 0
+        self.started_execs = set()
+        self.completed_execs = set()
         self.started = threading.Event()
         self.created_exec = None
         self.record_path = None
@@ -57,7 +59,7 @@ class Engine:
             payload = self.exec_payloads[exec_id]
             command = payload.get('Cmd', ['/bin/sh', '-c', ''])
             return {"ID": exec_id, "ContainerID": "2" * 64, "Running": False,
-                "Pid":0, "ExitCode":0 if self.starts else None,
+                "Pid":0, "ExitCode":0 if exec_id in self.completed_execs else None,
                 "ProcessConfig":{"entrypoint":command[0], 'arguments':command[1:],
                     'user':payload.get('User', '1000:1000'), 'privileged':False, 'tty':False}}
         raise AssertionError((method, route))
@@ -65,14 +67,21 @@ class Engine:
     def start_exec(self, exec_id, consume, timeout):
         record = json.loads(self.record_path.read_text())
         assert record["provider_exec_id"] == exec_id or exec_id in {row["exec_id"] for row in record["hook_execs"]}
-        self.starts += 1
+        if exec_id not in self.started_execs:
+            self.started_execs.add(exec_id)
+            self.starts += 1
         self.started.set()
         consume(b"known-output\n")
+        self.completed_execs.add(exec_id)
 
     def open_exec(self, exec_id, timeout):
         engine = self
+        engine.started_execs.add(exec_id)
+        engine.starts += 1
         class Stream:
-            def consume(self, consume): engine.start_exec(exec_id, consume, timeout)
+            def consume(self, consume):
+                engine.start_exec(exec_id, consume, timeout)
+                engine.completed_execs.add(exec_id)
             def close(self): pass
         return Stream()
 
@@ -216,7 +225,6 @@ def test_live_provider_survives_real_orchestrator_discovery(launch, monkeypatch,
     plugin, engine, packet, calls = launch
     entered, release = threading.Event(), threading.Event()
     def provider(exec_id, consume, timeout):
-        engine.starts += 1
         entered.set()
         wait_for_event(release, 5, label="provider release")
         consume(b"known-output\n")
@@ -248,7 +256,6 @@ def test_discovery_without_matching_watcher_stops_worker_without_second_provider
     plugin, engine, packet, calls = launch
     entered, release = threading.Event(), threading.Event()
     def provider(exec_id, consume, timeout):
-        engine.starts += 1
         entered.set()
         wait_for_event(release, 5, label="provider release")
     monkeypatch.setattr(engine, "start_exec", provider)
@@ -275,9 +282,16 @@ def test_discovery_without_matching_watcher_stops_worker_without_second_provider
         plugin.on_orchestrator_shutdown()
 
 
+def wait_for_provider_completion(runner):
+    from tests.unit.threading_helpers import join_or_fail
+    assert runner._watcher is not None
+    join_or_fail(runner._watcher, 5, label="provider watcher")
+
+
 def test_finished_watcher_cannot_protect_a_running_worker(launch):
     plugin, engine, packet, calls = launch
     assert plugin.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
+    wait_for_provider_completion(plugin)
     plugin.on_orchestrator_shutdown()
     completed = json.loads(plugin.receipt_path().read_bytes())
     assert plugin.discover_running_sessions() == []
@@ -355,6 +369,7 @@ def bridge_launch(launch):
 def test_selected_bridge_launch_preserves_verified_endpoints(bridge_launch):
     runner, engine, packet, _ = bridge_launch
     assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
+    wait_for_provider_completion(runner)
     runner.on_orchestrator_shutdown()
     assert engine.starts == 1
     assert runner.public_receipt("issue-42")["container_id"] == "2" * 64
@@ -461,6 +476,7 @@ def test_output_overflow_retains_unknown_result_and_stops(launch):
     runner.launch_path.write_text(json.dumps(packet))
     runner.launch_path.chmod(0o400)
     assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
+    wait_for_provider_completion(runner)
     runner.on_orchestrator_shutdown()
     record = json.loads(runner.receipt_path().read_text())
     assert record["overflow"] and record["provider_exit_code"] is None and not engine.running
@@ -596,6 +612,7 @@ def test_cli_timeout_kills_descendants_after_the_cli_leader_exits(tmp_path):
 def test_ordinary_output_and_cli_scratch_stay_outside_settlement(launch):
     runner, engine, packet, calls = launch
     assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
+    wait_for_provider_completion(runner)
     runner.on_orchestrator_shutdown()
     ordinary = Path(packet["output_root"]) / packet["run_id"]
     assert calls[0][1]["environment"]["HOME"] == str(ordinary / "home")
@@ -668,6 +685,7 @@ def test_ordinary_output_enospc_still_stops_worker_and_persists_receipt(launch, 
 def test_restarted_runner_reads_same_ordinary_output_without_replay(launch):
     runner, engine, packet, calls = launch
     assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
+    wait_for_provider_completion(runner)
     runner.on_orchestrator_shutdown()
     restored = DockerPlugin(launch_path=runner.launch_path, engine=engine)
     assert restored.get_session_output(42, 10, "issue-42") == "known-output"
@@ -685,7 +703,7 @@ def test_run_output_directory_substitution_still_stops_worker(launch, monkeypatc
         ordinary.symlink_to(ordinary.with_name("original"), target_is_directory=True)
         return json.dumps({"containerId": "2" * 64}).encode()
     monkeypatch.setattr("issue_orchestrator.execution.terminal_docker.run_cli", replace_output)
-    assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
+    assert not runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
     runner.on_orchestrator_shutdown()
     record = json.loads(runner.receipt_path().read_bytes())
     assert record["state"] == "stopped" and not engine.running
@@ -734,6 +752,7 @@ def test_sealed_control_manifest_seeds_actual_cli_cache_without_renewing_fetch_t
     runner.launch_path.write_bytes(canonical(packet))
     runner.launch_path.chmod(0o400)
     assert runner.create_session(42, "echo safe", packet["working_dir"], None, "issue-42", secret_env=None)
+    wait_for_provider_completion(runner)
     runner.on_orchestrator_shutdown()
     cache = Path(calls[0][1]["environment"]["TMPDIR"]) / ("devcontainercli-" + pwd.getpwuid(os.geteuid()).pw_name) / "control-manifest.json"
     assert cache.read_bytes() == canonical(packet["control_manifest"]["manifest"])

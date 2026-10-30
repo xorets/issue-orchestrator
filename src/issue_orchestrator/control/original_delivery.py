@@ -402,7 +402,7 @@ class OriginalDeliveryOwner:
         command = OriginalDeliveryCommand('register', claim.lease_id, fence, snapshot['contract_sha256'],
             run.run_id, 'docker-prestart-' + uuid4().hex, session_name=session.terminal_id, started_at=run.started_at)
         self._register_bound(session.issue.number, command, claim)
-        fresh, fence = self.claims.original_claim(session.issue.number)
+        _, fence = self.claims.original_claim(session.issue.number)
         self.require_prestart_current(session, fence)
         return fence
 

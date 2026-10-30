@@ -10,6 +10,19 @@ from .pause_controller import PauseController
 
 if TYPE_CHECKING:
     from .orchestrator_deps import OrchestratorDeps
+    from ..domain.models import Session
+
+
+def activate_docker_original(deps: OrchestratorDeps, session: Session, *, unavailable: Callable[[], bool]) -> None:
+    """Register and recheck original custody before starting a prepared worker."""
+    owner = deps.original_delivery_owner
+    if unavailable() or owner is None or not deps.health_gate.check(paused=False).can_proceed:
+        raise ValueError('Docker pre-start owner or engine health unavailable')
+    fence = owner.register_prestart(session)
+    if unavailable() or not deps.health_gate.check(paused=False).can_proceed:
+        raise ValueError('Docker pre-start engine health changed')
+    owner.require_prestart_current(session, fence)
+    deps.runner.activate_session(session.run_assets, session.terminal_id, fence)
 
 
 def original_delivery(owner: OriginalDeliveryOwner | None, issue_number: int,

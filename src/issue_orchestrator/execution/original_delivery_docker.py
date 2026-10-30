@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from ..domain.models import Session
 from ..domain.original_delivery import DockerCustody, OriginalDelivery
+from ..ports.original_docker_custody import DockerPrestartSnapshot
 from .terminal_docker import DockerPlugin, canonical, sealed_bytes
 from .original_delivery_session import require_native_session_assets
 from hashlib import sha256
@@ -24,7 +25,7 @@ class DockerOriginalCustody:
             raise ValueError("Docker first-model provider differs from allocated session")
         return self.runner.first_model_snapshot(session.run_assets, session.terminal_id, contract_sha256, launch_sha256)
 
-    def prestart_snapshot(self, session: Session) -> dict:
+    def prestart_snapshot(self, session: Session) -> DockerPrestartSnapshot:
         self.verify_session(session)
         return self.runner.prestart_snapshot(session.run_assets, session.terminal_id)
 
@@ -230,7 +231,7 @@ class DockerOriginalCustody:
                     type(proof.get('before')) is not dict or proof['before'].get('running') is not False or
                     type(proof['before'].get('pid')) is not int or proof['before'].get('pid') != 0 or
                     proof['before'].get('exit_code', False) is not None or
-                    not (after == missing and type(after.get('status')) is int or
+                    not (after == missing and isinstance(after, dict) and type(after.get('status')) is int or
                          type(after) is dict and set(after) == set(observation) and after.get('running') is False and
                          type(after.get('pid')) is int and after['pid'] == 0 and after.get('exit_code', False) is None)):
                 return None

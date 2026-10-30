@@ -14,24 +14,12 @@ import sys
 from pathlib import Path
 
 from issue_orchestrator.execution.subprocess_runner import SubprocessAgentRunner
-from issue_orchestrator.execution.agent_runner_types import AgentResult, AgentSpec, RetryPolicy
-from issue_orchestrator.execution.agent_runner_errors import classify_provider_error
+from issue_orchestrator.execution.agent_runner_types import AgentSpec, RetryPolicy
+from issue_orchestrator.execution.docker_codex_runner import DockerCodexRunner
 from issue_orchestrator.infra.env import ENV_PREFIX
 from issue_orchestrator.infra.provider_resilience import ProviderStatus, now_iso, write_provider_status
 from issue_orchestrator.ports.provider_resilience import ProviderErrorType
 from issue_orchestrator.ports.session_log import detect_ai_system_from_command
-
-
-class _DockerCodexRunner(SubprocessAgentRunner):
-    def _classify_result(self, result: AgentResult) -> ProviderErrorType | None:
-        from issue_orchestrator.execution.docker_provider_status import _child_marker
-
-        if (result.exit_code == 78 and not result.timed_out and
-                _child_marker(result.stderr.removesuffix("\n"), "run", "launch") is not None):
-            # Marker fields are worker-reported metadata, not provider error text.
-            return classify_provider_error(stdout=result.stdout, stderr="",
-                exit_code=result.exit_code, timed_out=result.timed_out)
-        return super()._classify_result(result)
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -104,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
         jitter=args.jitter,
     )
 
-    runner = (_DockerCodexRunner() if os.environ.get("ISSUE_ORCHESTRATOR_CALLBACK_SCOPE") == "docker"
+    runner = (DockerCodexRunner() if os.environ.get("ISSUE_ORCHESTRATOR_CALLBACK_SCOPE") == "docker"
               and provider == "codex" else SubprocessAgentRunner())
     result = runner.run(AgentSpec(
         command=_build_command(args.command),

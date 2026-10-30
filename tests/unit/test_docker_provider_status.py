@@ -238,9 +238,9 @@ def test_present_unsafe_child_companion_cannot_use_marker_fallback(tmp_path, att
 
 def test_marker_metadata_does_not_open_a_provider_circuit(tmp_path, monkeypatch):
     from issue_orchestrator.execution.agent_runner_types import AgentSpec, RetryPolicy
-    from issue_orchestrator.entrypoints.cli_tools.provider_runner import _DockerCodexRunner
+    from issue_orchestrator.execution.docker_codex_runner import DockerCodexRunner
     monkeypatch.setenv('ISSUE_ORCHESTRATOR_CALLBACK_SCOPE', 'docker')
-    runner = _DockerCodexRunner()
+    runner = DockerCodexRunner()
     marker = 'ACPCHILD1|timeout|n|TimeoutExpired|401|429|1|0'
     result = runner.run(AgentSpec(command=['/bin/sh', '-c', 'printf %s ' + __import__('shlex').quote(marker) + ' >&2; exit 78'],
         working_dir=tmp_path, timeout_seconds=5, output_dir=tmp_path / 'output', retry_policy=RetryPolicy(max_attempts=1)))
@@ -281,7 +281,7 @@ def test_docker_runner_does_not_normalize_ambiguous_marker(tmp_path, monkeypatch
 ])
 def test_marker_classification_is_narrow(tmp_path, message, exact):
     import shlex
-    from issue_orchestrator.entrypoints.cli_tools.provider_runner import _DockerCodexRunner
+    from issue_orchestrator.execution.docker_codex_runner import DockerCodexRunner
     from issue_orchestrator.execution.agent_runner_errors import classify_provider_error
     from issue_orchestrator.execution.agent_runner_types import AgentSpec, RetryPolicy
     from issue_orchestrator.execution.subprocess_runner import SubprocessAgentRunner
@@ -289,7 +289,7 @@ def test_marker_classification_is_narrow(tmp_path, message, exact):
     command = ['/bin/sh', '-c', 'printf %s ' + shlex.quote(message) + ' >&2; exit 78']
     spec = AgentSpec(command=command, working_dir=tmp_path, timeout_seconds=5,
         output_dir=tmp_path / 'output', retry_policy=RetryPolicy(max_attempts=1))
-    actual = _DockerCodexRunner().run(spec)
+    actual = DockerCodexRunner().run(spec)
     ordinary = SubprocessAgentRunner().run(spec)
     expected = classify_provider_error(stdout='', stderr=message, exit_code=78, timed_out=False)
     assert ordinary.provider_error_type == expected

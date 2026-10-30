@@ -87,7 +87,7 @@ from ..ports.coder_prompt import (
     NO_CODER_PROMPT_ADDENDUM,
 )
 from ..ports.session_output import SessionOutput
-from ..ports.event_sink import SessionStartedEventPayload, make_session_started_event
+from ..ports.event_sink import make_session_started_event
 from ..ports.worktree_manager import WorktreeManager, WorktreeReuseOptions
 from ..ports.event_sink import make_run_scoped_event, make_trace_event
 from .provider_availability import ProviderAvailabilityPolicy
@@ -99,14 +99,15 @@ from .needs_human_block import (
     SharedNeedsHumanBlock,
 )
 from .tech_lead_needs_human_reconcile import TechLeadNeedsHumanLifecycle, discover_tech_lead_needs_human_issue_numbers
-from .session_manager import SessionManager, SessionRef
-from .active_sessions import append_unique_active_sessions
+from .session_manager import SessionManager
 from .tech_lead_run_inputs import preserved_source_run, transfer_launch_authority
 from .launch_transaction import (
     NO_LAUNCH_WORK_CLAIM,
     LaunchWorkClaim,
     SpawnGuard,
     abandon_claim_unless_spawned,
+    activate_prepared_original,
+    publish_issue_launch,
 )
 from .recovery_review_hold import NO_RECOVERY_HOLDS, RecoveryHolds
 from .session_launch_types import (
@@ -1109,17 +1110,9 @@ class SessionLauncher:
                 tech_lead_scope=tech_lead_scope,
             )
 
-            if self._session_preparation is not None and self._session_preparation.activation_pending(session_name) is True:
-                if append_unique_active_sessions(active_sessions, [session]) != [session]:
-                    raise ValueError('Docker prepared session is not unique')
-                try:
-                    if activate_original is None:
-                        raise ValueError('Docker original activation is unavailable')
-                    activate_original(session)
-                except Exception:
-                    logger.exception('Docker prepared original retained without activation')
-                    return LaunchResult(None, False, 'Docker original activation unavailable')
-                self.session_manager.mark_launched(SessionRef.for_issue(issue.number), worktree_path)
+            if not activate_prepared_original(self._session_preparation, session, active_sessions,
+                                              self.session_manager, activate_original):
+                return LaunchResult(None, False, 'Docker original activation unavailable')
 
             total_time = time.time() - launch_start
             logger.info(
@@ -1127,24 +1120,7 @@ class SessionLauncher:
                 kind.value, issue.agent_type, total_time
             )
 
-            full_completion_path = (worktree_path / completion_path).resolve()
-            session_started_payload: SessionStartedEventPayload = {
-                "issue_number": issue.number,
-                "session_id": session_name,
-                "agent": issue.agent_type,
-                "task": kind.value,
-                "worktree_path": str(worktree_path),
-                "branch_name": branch_name,
-                "reset_from_scratch": from_scratch_pending,
-                "run_id": run.run_id,
-                "run_dir": str(run.run_dir),
-                "completion_path": completion_path,
-                "completion_path_absolute": str(full_completion_path),
-                "session_prompt_path": prompt_path,
-            }
-            if from_scratch_pending:
-                session_started_payload["review_cache_boundary_started_at"] = run.started_at
-            self.events.publish(make_session_started_event(session_started_payload))
+            publish_issue_launch(self.events, session, issue.agent_type, prompt_path, from_scratch=from_scratch_pending)
 
             # State machine transitions
             self._trigger_issue_session_state_transitions(issue, session_name, agent_config.timeout_minutes)

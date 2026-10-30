@@ -20,6 +20,7 @@ import time
 from ..domain.original_delivery import DockerCustody
 from ..domain.docker_execution import DockerSessionState
 from ..domain.session_run import SessionRunAssets
+from ..ports.original_docker_custody import DockerPrestartSnapshot
 from ..infra.hooks.hookspec import hookimpl
 from .docker_startup_allowance import reserve_startup, seed_control_manifest
 from .docker_provider_status import (ENV as PROVIDER_DIR_ENV, ProviderStatusWriteError,
@@ -35,7 +36,6 @@ from .docker_worker_state import (
     require_worker_identity, validate_created_worker, verify_stopped_parent, require_prestart_liveness, require_first_model_liveness as require_first_model_liveness,
     require_selected_bridge, require_worker_network as require_worker_network,
     require_bridge_endpoint as require_bridge_endpoint, worker_network_endpoint as worker_network_endpoint,
-    require_stopped_parent_state, require_stopped_worker_network,
 )
 from .docker_launch_input import canonical as canonical, sealed_bytes as sealed_bytes, network_arguments as network_arguments, control_manifest_bytes, require_create_intent
 from .docker_worker_authority import (worker_environment, model_projection_snapshot, model_review_parent,
@@ -555,7 +555,7 @@ class DockerPlugin:
             raise ValueError("Docker provider custody changed")
         return DockerCustody(**{key: record[key] for key in DockerCustody.__dataclass_fields__})
 
-    def prestart_snapshot(self, run: SessionRunAssets, session_name: str) -> dict:
+    def prestart_snapshot(self, run: SessionRunAssets, session_name: str) -> DockerPrestartSnapshot:
         """Authenticate the exact allocated implementation before its first start."""
         if self.template_path is not None:
             self.select_run(run.run_id)
