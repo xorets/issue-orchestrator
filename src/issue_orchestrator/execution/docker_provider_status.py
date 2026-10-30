@@ -64,7 +64,7 @@ def worker_slot(value: str, run_dir: Path) -> Path:
     if not 0 < len(raw.encode()) <= 65536:
         raise ValueError('Docker provider launch authority is unavailable')
     packet = json.loads(raw)
-    environment = _authority_environment(packet)
+    environment = _authority_environment(packet, worker=True)
     if not environment:
         raise ValueError('Docker provider launch authority is unavailable')
     outer, inner = _model_authority(packet, environment)

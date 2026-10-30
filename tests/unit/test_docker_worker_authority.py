@@ -620,6 +620,26 @@ def test_authenticated_docker_command_runner_and_status_handoff(model_authority,
     from issue_orchestrator.infra.provider_resilience import read_provider_status
 
     packet, outer_path, outer, files, _, seal = model_authority
+    # Simulate the worker namespace: alias source is absent, targets are real directories.
+    workspace = tmp_path / 'workspace'; workspace.mkdir()
+    packet['working_dir'] = str(workspace)
+    source = '/srv/builder/tasks/' + packet['builder_run_id'] + '/readonly-empty'
+    targets = [workspace / name for name in ('.codex', '.agents', '.issue-orchestrator')]
+    for target in targets:
+        target.mkdir(mode=0o555)
+    packet['mounts'].extend({'source': source, 'target': str(target), 'read_only': True} for target in targets)
+    grant_path = files[packet['admission_proofs']['authorization']]
+    grant = json.loads(grant_path.read_bytes())
+    grant.update(schema_version=2, kind='builder-docker-container-model-authorization', max_model_requests=3)
+    grant_path.chmod(0o600); grant_path.write_bytes(canonical(grant)); grant_path.chmod(0o444)
+    outer['authorization']['sha256'] = sha256(grant_path.read_bytes()).hexdigest()
+    inner_path = Path(packet['worker_authority']['engine_contract_path'])
+    inner = json.loads(inner_path.read_bytes()); inner['execution']['workspace'] = str(workspace)
+    inner_path.chmod(0o600); inner_path.write_bytes(canonical(inner)); inner_path.chmod(0o400)
+    original_read_text = Path.read_text
+    mountinfo = ''.join(f'{i} 1 0:1 / {target} ro - ext4 /dev/test ro\n' for i, target in enumerate(targets, 10))
+    monkeypatch.setattr(Path, 'read_text', lambda path, *args, **kwargs:
+        mountinfo if str(path) == '/proc/self/mountinfo' else original_read_text(path, *args, **kwargs))
     scratch = tmp_path / 'scratch'; scratch.mkdir(mode=0o700)
     controller = tmp_path / (packet['run_id'] + '__coding-1'); controller.mkdir(mode=0o700)
     packet['engine_run_dir'] = str(controller)
@@ -635,6 +655,10 @@ def test_authenticated_docker_command_runner_and_status_handoff(model_authority,
     grant_path.chmod(0o600); grant_path.write_bytes(canonical(grant)); grant_path.chmod(0o444)
     outer['authorization']['sha256'] = sha256(grant_path.read_bytes()).hexdigest()
     outer_path.chmod(0o600); outer_path.write_bytes(canonical(outer)); outer_path.chmod(0o400)
+    # Controller-side first-model projection must still inspect the source.
+    from issue_orchestrator.execution.docker_worker_authority import model_projection_snapshot
+    with pytest.raises(FileNotFoundError):
+        model_projection_snapshot(packet)
     marker = tmp_path / 'provider-started'
     agent = AgentConfig(prompt_path=tmp_path / 'prompt', provider='codex', provider_args={'execution_mode':'exec'})
     wrapper = ProviderCommandWrapper(ProviderShortRetryConfig(max_attempts=1, initial_backoff_seconds=1,
@@ -663,3 +687,44 @@ def test_authenticated_docker_command_runner_and_status_handoff(model_authority,
         os.close(descriptor)
     status = read_provider_status(controller)
     assert status is not None and status.succeeded
+
+
+def test_worker_overlay_checks_visible_targets_and_effective_mounts(tmp_path, monkeypatch):
+    """The filesystem is real; mountinfo is a synthetic Docker readback."""
+    import os
+    from issue_orchestrator.execution.docker_worker_authority import require_container_only_mounts
+
+    workspace = tmp_path / 'workspace'; workspace.mkdir()
+    empty = '/srv/builder/tasks/run-' + 'a' * 32 + '/readonly-empty'
+    targets = [workspace / name for name in ('.codex', '.agents', '.issue-orchestrator')]
+    for target in targets:
+        target.mkdir(mode=0o555)
+    mounts = [{'source':empty, 'target':str(target), 'read_only':True} for target in targets]
+    packet = {'builder_run_id':'run-' + 'a' * 32, 'working_dir':str(workspace), 'mounts':mounts}
+    rows = [f'{i} 1 0:1 / {target} ro - ext4 /dev/test ro' for i, target in enumerate(targets, 10)]
+    original_read_text = Path.read_text
+    monkeypatch.setattr(Path, 'read_text', lambda path, *args, **kwargs:
+        '\n'.join(rows) if str(path) == '/proc/self/mountinfo' else original_read_text(path, *args, **kwargs))
+    require_container_only_mounts(packet, worker=True)
+    with pytest.raises(FileNotFoundError):
+        require_container_only_mounts(packet)  # Controller must still inspect its source.
+    target = targets[0]
+    target.chmod(0o755)
+    with pytest.raises(ValueError): require_container_only_mounts(packet, worker=True)
+    target.chmod(0o555)
+    target.chmod(0o755); (target / 'unexpected').touch(); target.chmod(0o555)
+    with pytest.raises(ValueError): require_container_only_mounts(packet, worker=True)
+    target.chmod(0o755); (target / 'unexpected').unlink(); target.chmod(0o555)
+    with monkeypatch.context() as patch:
+        uid = os.getuid()
+        patch.setattr(os, 'getuid', lambda: uid + 1)
+        with pytest.raises(ValueError): require_container_only_mounts(packet, worker=True)
+    original = rows[0]
+    rows[0] = original.replace(' ro - ', ' rw - ')
+    with pytest.raises(ValueError): require_container_only_mounts(packet, worker=True)
+    rows[0] = original
+    rows.append(f'99 1 0:2 / {target}/nested rw - ext4 /dev/test rw')
+    with pytest.raises(ValueError): require_container_only_mounts(packet, worker=True)
+    rows.pop()
+    mounts.append({'source':empty, 'target':str(workspace / 'foreign'), 'read_only':True})
+    with pytest.raises(ValueError): require_container_only_mounts(packet, worker=True)

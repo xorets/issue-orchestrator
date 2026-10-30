@@ -99,8 +99,8 @@ def _check_container_mount(item: object, protected: set[Path], empty: Path, foun
     return False
 
 
-def require_container_only_mounts(packet: dict) -> None:
-    """Enforce the selected workspace overlays before any container is created."""
+def require_container_only_mounts(packet: dict, *, worker: bool = False) -> None:
+    """Enforce selected overlays in the controller or worker namespace."""
     mounts = packet.get("mounts")
     workspace = Path(packet["working_dir"])
     empty = Path("/srv/builder/tasks") / packet["builder_run_id"] / "readonly-empty"
@@ -113,20 +113,42 @@ def require_container_only_mounts(packet: dict) -> None:
         alias_used = _check_container_mount(item, protected, empty, found) or alias_used
     if found != protected:
         raise ValueError("Docker protected workspace overlay is incomplete")
-    if alias_used:
-        info = empty.lstat()
+    if worker:
+        _require_worker_mounts(protected)
+        paths = [Path(item['target']) for item in mounts if item['source'] == str(empty)]
+    else:
+        paths = [empty] if alias_used else []
+    for path in paths:
+        info = path.lstat()
         if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or
-                stat.S_IMODE(info.st_mode) != 0o555 or empty.resolve(strict=True) != empty or
-                any(empty.iterdir())):
-            raise ValueError("Docker readonly-empty source differs")
+                stat.S_IMODE(info.st_mode) != 0o555 or path.resolve(strict=True) != path or
+                any(path.iterdir())):
+            raise ValueError("Docker readonly-empty source or target differs")
 
 
-def _require_selected_mounts(packet: dict, authorization: dict) -> None:
+
+def _require_worker_mounts(protected: set[Path]) -> None:
+    # The source is not mounted at its controller path inside the worker.
+    rows = Path('/proc/self/mountinfo').read_text().splitlines()
+    actual = []
+    for row in rows:
+        fields = row.split()
+        if len(fields) < 10 or '-' not in fields:
+            raise ValueError("Docker worker mount table is invalid")
+        target = Path(re.sub(r'\\([0-7]{3})', lambda m: chr(int(m.group(1), 8)), fields[4]))
+        actual.append((target, fields[5].split(',')))
+    for target in protected:
+        matching = [options for path, options in actual if path == target]
+        if len(matching) != 1 or 'ro' not in matching[0] or any(
+                path != target and path.is_relative_to(target) for path, _ in actual):
+            raise ValueError("Docker protected worker mount differs")
+
+def _require_selected_mounts(packet: dict, authorization: dict, *, worker: bool) -> None:
     if authorization.get("kind") in CONTAINER_GRANT_KINDS:
-        require_container_only_mounts(packet)
+        require_container_only_mounts(packet, worker=worker)
 
 
-def _require_admission(packet: dict, outer: dict, inner: dict) -> None:
+def _require_admission(packet: dict, outer: dict, inner: dict, *, worker: bool) -> None:
     if type(outer.get("schema_version")) is not int:
         raise ValueError("Docker worker admission version is invalid")
     if outer.get("schema_version") == 1:
@@ -156,7 +178,7 @@ def _require_admission(packet: dict, outer: dict, inner: dict) -> None:
             authorization.get("acceptance_sha256") != acceptance["sha256"]):
         raise ValueError("Docker root authorization belongs to another delivery subject")
     require_current_model_grant(packet, inner, authorization)
-    _require_selected_mounts(packet, authorization)
+    _require_selected_mounts(packet, authorization, worker=worker)
     _require_model_controls(packet)
 
 
@@ -206,7 +228,7 @@ def require_current_model_grant(packet: dict, inner: dict, grant: dict) -> None:
         raise ValueError('Docker current finite model authorization differs from selected execution')
 
 
-def _authority_environment(packet: dict) -> dict[str, str]:
+def _authority_environment(packet: dict, *, worker: bool = False) -> dict[str, str]:
     descriptor = packet.get("worker_authority")
     if descriptor is None:
         if "admission_proofs" in packet:
@@ -226,7 +248,7 @@ def _authority_environment(packet: dict) -> dict[str, str]:
     if canonical(outer) != outer_raw or canonical(inner) != inner_raw:
         raise ValueError("Docker worker authority encoding changed")
     _require_subject(packet, outer, inner, inner_path)
-    _require_admission(packet, outer, inner)
+    _require_admission(packet, outer, inner, worker=worker)
     return {"XORETS_EXECUTION_CONTRACT": str(outer_path), "XORETS_EXECUTION_DIGEST": sha256(outer_raw).hexdigest()}
 
 
