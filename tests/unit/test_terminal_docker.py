@@ -1111,11 +1111,16 @@ def test_terminal_provider_handoff_stops_worker_even_on_invalid_status(launch, t
          (True, True, False, ''), (False, True, True, ''), (False, True, False, 'malformed'),
          (False, True, False, 'foreign')]] + [('cancel', False, False, False, ''), ('cancel', True, False, False, ''),
             ('cancel', True, True, False, ''), ('active', False, False, False, ''),
-            ('active_status', False, False, False, ''), ('deadline', False, False, False, '')])
+            ('active_status', False, False, False, ''), ('deadline', False, False, False, ''), ('child', False, False, False, ''), ('child', False, True, False, ''),
+            ('child_file', False, False, False, ''), ('child_file', True, False, False, ''),
+            ('child_file', False, True, False, ''), ('producer_file', False, False, False, ''),
+            ('producer_marker', False, False, False, ''), ('producer_timeout', False, False, False, ''),
+            ('producer_interrupted', False, False, False, ''), ('producer_spawn', False, False, False, ''), ('producer_combined', False, False, False, '')])
 def test_real_provider_failure_survives_stop_failure(launch, tmp_path, monkeypatch, status_recording_fails, receipt_recording_fails, transport_fails, corrupt_status, outcome):
     """Actual provider status must survive the later Docker stop error."""
     import shlex
     import subprocess
+    import sys
     from issue_orchestrator.control.provider_command_wrapper import ProviderCommandWrapper
     from issue_orchestrator.domain.models import AgentConfig
     from issue_orchestrator.infra.config_models import ProviderShortRetryConfig
@@ -1126,7 +1131,9 @@ def test_real_provider_failure_survives_stop_failure(launch, tmp_path, monkeypat
     run = sessions / (packet['run_id'] + '__coding-1'); run.mkdir(mode=0o700)
     packet['engine_run_dir'] = str(run)
     packet['mounts'].append({'source':str(protected), 'target':str(protected), 'read_only':True})
-    inner = tmp_path / 'inner.json'; inner.write_bytes(canonical({'execution':{'provider':'codex'}})); inner.chmod(0o400)
+    scratch = tmp_path / 'scratch'; scratch.mkdir(mode=0o700)
+    packet['mounts'].append({'source':str(scratch), 'target':str(scratch), 'read_only':False})
+    inner = tmp_path / 'inner.json'; inner.write_bytes(canonical({'execution':{'provider':'codex'}, 'capabilities':{'scratch':str(scratch)}})); inner.chmod(0o400)
     packet['contract_sha256'] = sha256(inner.read_bytes()).hexdigest()
     packet['worker_authority'] = {'engine_contract_path':str(inner)}
     launch_dir = tmp_path / 'control' / packet['run_id']; launch_dir.mkdir(mode=0o700)
@@ -1135,17 +1142,72 @@ def test_real_provider_failure_survives_stop_failure(launch, tmp_path, monkeypat
     engine.record_path = runner.receipt_path()
     monkeypatch.setattr(DockerPlugin, '_output_root', lambda self, packet: Path(packet['output_root']))
     ordinary = Path(packet['output_root']) / packet['run_id']; ordinary.mkdir(mode=0o700)
-    slot = tmp_path / 'worker-slot'; slot.mkdir(mode=0o700)
+    slot = scratch / ('provider-' + packet['run_id']); slot.mkdir(mode=0o700)
     agent = AgentConfig(prompt_path=tmp_path / 'prompt', provider='codex', provider_args={'execution_mode':'exec'})
     wrapper = ProviderCommandWrapper(ProviderShortRetryConfig(max_attempts=1, initial_backoff_seconds=1,
         max_backoff_seconds=1, jitter=False))
-    command = wrapper.wrap("/usr/bin/python3 -c 'import select; select.select([], [], [])'" if outcome == 'timeout' else 'printf "connection refused\\n" >&2; exit 1', agent, slot)
+    child_command = "printf 'ACPCHILD1|nonzero|2|n|10|20|0|0' >&2; exit 78"
+    builder_source = os.environ.get('BUILDER_CHILD_PRODUCER_SOURCE')
+    if outcome.startswith('producer_'):
+        if not builder_source:
+            pytest.skip('explicit Builder child producer source not supplied')
+        import shlex
+        producer_packet = tmp_path / 'producer-packet.json'; producer_packet.write_bytes(canonical(packet))
+        producer = tmp_path / 'producer.py'
+        producer.write_text('''import json,os,sys
+from pathlib import Path
+sys.path.insert(0,sys.argv[1])
+import capabilities
+p=json.loads(Path(sys.argv[2]).read_bytes())
+scratch=Path(sys.argv[3])
+os.environ['ISSUE_ORCHESTRATOR_DOCKER_PROVIDER_DIR']=str(scratch / ('provider-' + p['run_id']))
+try:
+ scenario=sys.argv[5]
+ commands={'nonzero':[sys.executable,'-c','import sys;sys.stderr.write("bad");sys.exit(2)'],
+  'timeout':[sys.executable,'-c','import time;time.sleep(10)'],
+  'interrupted':[sys.executable,'-c','import os,signal,time;os.kill(os.getppid(),signal.SIGTERM);time.sleep(10)'],
+  'spawn':[str(scratch / 'missing-child')],
+  'combined':[sys.executable,'-c','import time;time.sleep(10)']}
+ if scenario == 'combined':
+  real_kill=os.killpg
+  def fail_after_kill(pid,sig):
+   real_kill(pid,sig)
+   raise OSError('cleanup-secret')
+  os.killpg=fail_after_kill
+ capabilities._container_child(commands[scenario],{},str(scratch),.1 if scenario in ('timeout','combined') else 5,65536)
+except capabilities.CodexChildFailure as error:
+ if sys.argv[4] == 'marker': os.environ['ISSUE_ORCHESTRATOR_DOCKER_PROVIDER_DIR']='foreign'
+ capabilities._record_container_child_failure(scratch,p,error)
+ if error.marker: print(error.marker,file=sys.stderr)
+ sys.exit(78)
+''')
+        child_command = ' '.join(map(shlex.quote, [sys.executable,str(producer),str(Path(builder_source) / 'tools/orchestration'),
+            str(producer_packet),str(scratch),'marker' if outcome in ('producer_marker','producer_combined') else 'slot',
+            outcome.removeprefix('producer_') if outcome in ('producer_timeout','producer_interrupted','producer_spawn','producer_combined') else 'nonzero']))
+    command = wrapper.wrap(child_command, agent, slot) if outcome in ('child', 'child_file') or outcome.startswith('producer_') else wrapper.wrap("/usr/bin/python3 -c 'import select; select.select([], [], [])'" if outcome == 'timeout' else 'printf "connection refused\\n" >&2; exit 1', agent, slot)
     env = {**os.environ, 'PYTHONPATH':str(Path(__file__).resolve().parents[2] / 'src')}
     if outcome not in ('cancel', 'active', 'deadline'):
         argv = shlex.split(command)
         if outcome == 'timeout': argv[argv.index('--timeout-seconds') + 1] = '1'
+        if outcome == 'producer_combined':
+            # Exercise the Docker entrypoint while substituting the physical mount guard.
+            module = 'issue_orchestrator.entrypoints.cli_tools.provider_runner'
+            args = argv[argv.index(module) + 1:]
+            shim = ('from pathlib import Path; from issue_orchestrator.execution import docker_provider_status as s; '
+                    's.worker_slot=lambda value, run_dir: Path(value); '
+                    'from issue_orchestrator.entrypoints.cli_tools.provider_runner import main; '
+                    'import sys; sys.exit(main(sys.argv[1:]))')
+            argv = [sys.executable, '-c', shim, *args]
+            env['ISSUE_ORCHESTRATOR_CALLBACK_SCOPE'] = 'docker'
+            env['ISSUE_ORCHESTRATOR_DOCKER_PROVIDER_DIR'] = str(slot)
         child = subprocess.run(argv, cwd=tmp_path, env=env, capture_output=True, timeout=15)
-        assert child.returncode == (124 if outcome == 'timeout' else 1)
+        assert child.returncode == (124 if outcome == 'timeout' else 78 if outcome in ('child', 'child_file') or outcome.startswith('producer_') else 1)
+    if outcome == 'child_file':
+        value = {'schema_version':1, 'kind':'builder-codex-child-diagnostic', 'run_id':packet['run_id'],
+            'launch_sha256':sha256(canonical(packet)).hexdigest(), 'phase':'codex-child', 'reason':'nonzero',
+            'exit_code':2, 'exception_type':None, 'stderr_bytes':3, 'stderr_sha256':sha256(b'bad').hexdigest(),
+            'stderr_truncated':False, 'elapsed_ms':10, 'remaining_ms':20, 'own_timer_fired':False, 'secondary':[]}
+        (slot / 'child-diagnostic.json').write_text(json.dumps(value)); (slot / 'child-diagnostic.json').chmod(0o600)
     descriptor = os.open(slot, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     exec_id = '3'*64
     runner._provider_slot = (slot, descriptor, 'codex', False)  # noqa: SLF001
@@ -1159,7 +1221,7 @@ def test_real_provider_failure_survives_stop_failure(launch, tmp_path, monkeypat
     def request(method, route, payload=None):
         result = original_request(method, route, payload)
         if route == '/exec/' + exec_id + '/json':
-            result['ExitCode'] = 124 if outcome == 'timeout' else 1
+            result['ExitCode'] = 124 if outcome == 'timeout' else 78 if outcome in ('child', 'child_file') or outcome.startswith('producer_') else 1
             if outcome == 'cancel': result['Running'] = cancel_child.poll() is None
             if outcome in ('active', 'active_status'): result['Running'] = True
         return result
@@ -1252,11 +1314,39 @@ def test_real_provider_failure_survives_stop_failure(launch, tmp_path, monkeypat
     if outcome in ('active', 'active_status') or receipt_recording_fails and (transport_fails or status_recording_fails or corrupt_status):
         assert diagnostic is None
     else:
-        assert diagnostic['primary'] == {'phase':'provider', 'reason':{'failure':'provider_transient', 'timeout':'provider_timeout', 'cancel':'provider_cancelled', 'deadline':'controller_deadline'}[outcome]}
+        assert diagnostic['primary'] == {'phase':'provider', 'reason':{'failure':'provider_transient', 'timeout':'provider_timeout', 'cancel':'provider_cancelled', 'deadline':'controller_deadline', 'child':'provider_nonzero', 'child_file':'provider_nonzero', 'producer_file':'provider_nonzero', 'producer_marker':'provider_nonzero', 'producer_timeout':'provider_nonzero', 'producer_interrupted':'provider_nonzero', 'producer_spawn':'provider_nonzero', 'producer_combined':'provider_nonzero'}[outcome]}
         expected = ([] if receipt_recording_fails else
             ([{'phase':'record', 'reason':'record_failed'}] if status_recording_fails else []) +
             [{'phase':'stop', 'reason':'stop_unverified'}])
         assert diagnostic['secondary'] == expected
+        if outcome not in ('child', 'child_file') and not outcome.startswith('producer_'):
+            assert 'child' not in diagnostic
+        if outcome in ('child', 'child_file') or outcome.startswith('producer_'):
+            expected_reason = {'producer_timeout':'timeout', 'producer_interrupted':'interrupted', 'producer_spawn':'spawn_failed', 'producer_combined':'timeout'}.get(outcome, 'nonzero')
+            assert diagnostic['child']['reason'] == expected_reason
+            if expected_reason == 'nonzero': assert diagnostic['child']['exit_code'] == 2
+            assert diagnostic['child']['source'] == ('marker' if outcome in ('child', 'producer_marker', 'producer_combined') else 'slot')
+            assert diagnostic['child']['secondary'] == (['record_failed', 'cleanup_failed'] if outcome == 'producer_combined' else ['record_failed'] if outcome in ('child', 'producer_marker') else [])
+            if outcome.startswith('producer_'):
+                sys.path.insert(0, str(Path(builder_source) / 'tools/orchestration'))
+                import qualification_runner
+                current = {'observation':{'original_delivery':result.structuredContent},
+                    'owner':result.structuredContent['owner'], 'receipts':[{'run_id':packet['run_id'], 'launch_sha256':digest}]}
+                with pytest.raises(qualification_runner.ProviderDiagnosticError) as caught:
+                    qualification_runner.raise_provider_diagnostic(current)
+                assert caught.value.diagnostic['child'] == diagnostic['child']
+                import time
+                operations = {name:lambda _:True for name in qualification_runner.PHASES}
+                operations['observation'] = lambda _:qualification_runner.raise_provider_diagnostic(current)
+                def fail_stop(_): raise OSError('stop-secret')
+                operations['owner_stop'] = fail_stop
+                def fail_record(event):
+                    if event.get('state') == 'failed': raise OSError('record-secret')
+                plan = qualification_runner.Plan('a'*64, ('fixture',), time.time()+8, 2, .1, (2,)*7)
+                final = qualification_runner.run(plan, operations, {}, fail_record)
+                assert final['failure_detail']['provider_diagnostic']['child'] == diagnostic['child']
+                assert final['recording_failed'] and final['cleanup_failures'][0]['phase'] == 'owner_stop'
+                assert 'stop-secret' not in json.dumps(final) and 'record-secret' not in json.dumps(final)
     assert 'connection refused' not in json.dumps(result.structuredContent)
     assert 'sensitive-stop-detail' not in json.dumps(result.structuredContent)
 

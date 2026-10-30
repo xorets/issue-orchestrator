@@ -1524,6 +1524,147 @@
           }
         }
       },
+      "ChildProviderDiagnosticPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "kind",
+          "run_id",
+          "launch_sha256",
+          "phase",
+          "reason",
+          "exit_code",
+          "exception_type",
+          "stderr_bytes",
+          "stderr_sha256",
+          "stderr_truncated",
+          "elapsed_ms",
+          "remaining_ms",
+          "own_timer_fired",
+          "secondary",
+          "source"
+        ],
+        "properties": {
+          "schema_version": {
+            "type": "integer",
+            "enum": [
+              1
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "builder-codex-child-diagnostic"
+            ]
+          },
+          "run_id": {
+            "type": "string",
+            "pattern": "^[0-9]{8}-[0-9]{6}Z-[0-9a-f]{32}$"
+          },
+          "launch_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "codex-child"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "nonzero",
+              "timeout",
+              "interrupted",
+              "spawn_failed"
+            ]
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": -255,
+                "maximum": 255
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "exception_type": {
+            "anyOf": [
+              {"type": "string", "enum": ["TimeoutExpired", "KeyboardInterrupt", "InterruptedError", "FileNotFoundError", "PermissionError", "OSError", "SubprocessError"]},
+              {"type": "null"}
+            ]
+          },
+          "stderr_bytes": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 32768
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "stderr_sha256": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "stderr_truncated": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "elapsed_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400000
+          },
+          "remaining_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400000
+          },
+          "own_timer_fired": {
+            "type": "boolean"
+          },
+          "secondary": {
+            "type": "array",
+            "maxItems": 2,
+            "items": {
+              "type": "string",
+              "enum": [
+                "record_failed",
+                "cleanup_failed"
+              ]
+            }
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "slot",
+              "marker"
+            ]
+          }
+        }
+      },
       "ProviderDiagnosticPayload": {
         "type": "object",
         "additionalProperties": false,
@@ -1558,6 +1699,9 @@
             "items": {
               "$ref": "#/components/schemas/ProviderSecondaryDiagnosticPayload"
             }
+          },
+          "child": {
+            "$ref": "#/components/schemas/ChildProviderDiagnosticPayload"
           }
         }
       },

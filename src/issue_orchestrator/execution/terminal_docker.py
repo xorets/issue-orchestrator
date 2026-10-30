@@ -24,7 +24,7 @@ from ..domain.session_run import SessionRunAssets
 from ..infra.hooks.hookspec import hookimpl
 from .docker_startup_allowance import reserve_startup
 from .docker_provider_status import (ENV as PROVIDER_DIR_ENV, ProviderStatusWriteError,
-    allocate as allocate_provider_dir, settle as settle_provider_status, record_diagnostic)
+    allocate as allocate_provider_dir, settle as settle_provider_status, record_diagnostic, read_child_diagnostic)
 from .docker_engine import DockerEngine
 from .docker_output import (
     run_cli_capture as run_cli_capture, bounded_output, private_directory as private_directory,
@@ -540,8 +540,12 @@ class DockerPlugin:
                 try:
                     status = settle_provider_status(*self._provider_slot, packet, exit_code)
                     record_diagnostic(self._lock, record, status.diagnostic())
+                    child = read_child_diagnostic(self._provider_slot[1], record['run_id'], record['launch_sha256'], status, exit_code)
+                    record_diagnostic(self._lock, record, child=child)
                 except ProviderStatusWriteError as error:
                     record_diagnostic(self._lock, record, error.value.diagnostic(), {'phase':'record', 'reason':'record_failed'})
+                    child = read_child_diagnostic(self._provider_slot[1], record['run_id'], record['launch_sha256'], error.value, exit_code)
+                    record_diagnostic(self._lock, record, child=child)
                     record['error'] = record['error'] or 'provider-status-invalid'
                 except (OSError, ValueError, TypeError, KeyError):
                     logger.exception("Docker provider status refused")

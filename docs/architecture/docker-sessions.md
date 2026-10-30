@@ -79,6 +79,16 @@ classification into the controller run directory. Worker-written status is not
 admission or release evidence; a missing or invalid status never prevents the
 terminal adapter from stopping the owned worker.
 
+A selected worker may also report a bounded, versioned child diagnostic in that
+slot. The controller accepts it only alongside a validated settled provider
+status, and exposes it through the existing original-owner diagnostic. Its child
+exit and stderr-prefix hash are worker-reported observations, not independently
+verified child custody or release authority. If the companion is absent, an
+exact bounded fallback marker can report the cause and recording failure; an
+invalid present companion does not permit that fallback. Missing or ambiguous
+reports leave the child cause unknown. Provider status and its circuit semantics
+remain unchanged.
+
 CLI **worker-side** user/session scratch lives under bounded `/tmp`; system patch markers stay
 on the immutable root at `/var/devcontainer`. The selected CLI skips system
 environment/profile patching when it cannot create those markers. A writable

@@ -123,12 +123,108 @@ def settle(slot: Path, descriptor: int, lane: str, heals: bool, packet: dict, ex
     return status
 
 
-def record_diagnostic(lock, record: dict, primary: dict | None = None, secondary: dict | None = None) -> None:
+def record_diagnostic(lock, record: dict, primary: dict | None = None, secondary: dict | None = None, *, child: dict | None = None) -> None:
     """Keep the first observed origin and a bounded list of subsequent failures."""
     with lock:
         diagnostic = record.setdefault('diagnostic', {'run_id':record['run_id'],
             'launch_sha256':record['launch_sha256'], 'primary':None, 'secondary':[]})
+        if child is not None:
+            diagnostic['child'] = child
         if primary is not None and diagnostic['primary'] is None:
             diagnostic['primary'] = primary
         if secondary is not None and secondary not in diagnostic['secondary'] and len(diagnostic['secondary']) < 4:
             diagnostic['secondary'].append(secondary)
+
+
+def _child_value(value: object, run_id: str, launch_sha: str) -> bool:
+    fields = {'schema_version', 'kind', 'run_id', 'launch_sha256', 'phase', 'reason', 'exit_code',
+        'stderr_bytes', 'stderr_sha256', 'stderr_truncated', 'exception_type', 'elapsed_ms', 'remaining_ms', 'own_timer_fired', 'secondary'}
+    if type(value) is not dict or set(value) != fields:
+        return False
+    reason, code = value['reason'], value['exit_code']
+    count, digest, truncated = value['stderr_bytes'], value['stderr_sha256'], value['stderr_truncated']
+    return (type(value['schema_version']) is int and value['schema_version'] == 1 and
+        value['kind'] == 'builder-codex-child-diagnostic' and value['run_id'] == run_id and
+        value['launch_sha256'] == launch_sha and value['phase'] == 'codex-child' and
+        reason in {'nonzero', 'timeout', 'interrupted', 'spawn_failed'} and
+        (code is None or type(code) is int and -255 <= code <= 255) and
+        (reason != 'nonzero' or type(code) is int and code != 0) and
+        (reason != 'spawn_failed' or code is None) and
+        (value['exception_type'] is None or value['exception_type'] in {'TimeoutExpired', 'KeyboardInterrupt', 'InterruptedError', 'FileNotFoundError', 'PermissionError', 'OSError', 'SubprocessError'}) and
+        (reason != 'nonzero' or value['exception_type'] is None) and
+        ((count is None and digest is None and truncated is None) or
+         (type(count) is int and 0 <= count <= 32768 and isinstance(digest, str) and
+          re.fullmatch('[0-9a-f]{64}', digest) is not None and type(truncated) is bool)) and
+        all(type(value[k]) is int and 0 <= value[k] <= 86400000 for k in ('elapsed_ms', 'remaining_ms')) and
+        type(value['own_timer_fired']) is bool and value['own_timer_fired'] == (reason == 'timeout') and
+        type(value['secondary']) is list and len(value['secondary']) <= 2 and
+        all(item in {'record_failed', 'cleanup_failed'} for item in value['secondary']) and
+        len(set(value['secondary'])) == len(value['secondary']))
+
+
+def _unique_object(pairs: list[tuple[str, object]]) -> dict:
+    value = dict(pairs)
+    if len(value) != len(pairs):
+        raise ValueError('duplicate child diagnostic field')
+    return value
+
+
+def _child_marker(summary: str | None, run_id: str, launch_sha: str) -> dict | None:
+    if not isinstance(summary, str):
+        return None
+    match = re.fullmatch(r'ACPCHILD1\|(nonzero|timeout|interrupted|spawn_failed)\|(n|0|-?[1-9][0-9]{0,2})\|(n|TimeoutExpired|KeyboardInterrupt|InterruptedError|FileNotFoundError|PermissionError|OSError|SubprocessError)\|(0|[1-9][0-9]{0,7})\|(0|[1-9][0-9]{0,7})\|([01])\|([01])', summary)
+    if not match:
+        return None
+    reason, raw_exit, exception, elapsed, remaining, timer, cleanup = match.groups()
+    value = {'schema_version':1, 'kind':'builder-codex-child-diagnostic', 'run_id':run_id,
+        'launch_sha256':launch_sha, 'phase':'codex-child', 'reason':reason,
+        'exit_code':None if raw_exit == 'n' else int(raw_exit), 'stderr_bytes':None,
+        'stderr_sha256':None, 'stderr_truncated':None, 'exception_type':None if exception == 'n' else exception, 'elapsed_ms':int(elapsed),
+        'remaining_ms':int(remaining), 'own_timer_fired':timer == '1',
+        'secondary':['record_failed', *(['cleanup_failed'] if cleanup == '1' else [])]}
+    return {**value, 'source':'marker'} if _child_value(value, run_id, launch_sha) else None
+
+
+def read_child_diagnostic(directory: int, run_id: str, launch_sha: str,
+                          status: ProviderStatus, exit_code: int) -> dict | None:
+    """Read an untrusted observation only after the wrapper result is validated."""
+    if exit_code != 78 or status.succeeded or status.exit_code != exit_code:
+        return None
+    try:
+        fd = os.open('child-diagnostic.json', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+    except FileNotFoundError:
+        return _child_marker(status.last_error_summary, run_id, launch_sha)
+    except OSError:
+        return None
+    try:
+        before = os.fstat(fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_nlink != 1 or
+                stat.S_IMODE(before.st_mode) != 0o600 or not 0 < before.st_size <= 4096):
+            return None
+        raw = os.read(fd, 4097)
+        after = os.fstat(fd)
+        named = os.stat('child-diagnostic.json', dir_fd=directory, follow_symlinks=False)
+        fields = ('st_dev', 'st_ino', 'st_uid', 'st_nlink', 'st_mode', 'st_size', 'st_mtime_ns', 'st_ctime_ns')
+        if ((named.st_dev, named.st_ino) != (before.st_dev, before.st_ino) or len(raw) != before.st_size or
+                any(getattr(before, key) != getattr(after, key) for key in fields)):
+            return None
+        value = json.loads(raw, object_pairs_hook=_unique_object)
+        return {**value, 'source':'slot'} if _child_value(value, run_id, launch_sha) else None
+    except (OSError, ValueError, TypeError):
+        return None
+    finally:
+        os.close(fd)
+
+
+def valid_child_diagnostic(value: object, run_id: str, launch_sha: str) -> bool:
+    if type(value) is not dict or type(value.get('source')) is not str or value['source'] not in {'slot', 'marker'}:
+        return False
+    inner = {key: item for key, item in value.items() if key != 'source'}
+    try:
+        if not _child_value(inner, run_id, launch_sha):
+            return False
+    except (TypeError, ValueError):
+        return False
+    if value['source'] == 'marker':
+        return (inner['stderr_bytes'] is None and 'record_failed' in inner['secondary'])
+    return True

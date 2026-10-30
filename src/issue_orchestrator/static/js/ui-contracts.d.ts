@@ -111,6 +111,25 @@ export interface CapturedOutputAvailabilityPayload {
   stdout_available: boolean;
 }
 
+export interface ChildProviderDiagnosticPayload {
+  elapsed_ms: number;
+  exception_type: "TimeoutExpired" | "KeyboardInterrupt" | "InterruptedError" | "FileNotFoundError" | "PermissionError" | "OSError" | "SubprocessError" | null;
+  exit_code: number | null;
+  kind: "builder-codex-child-diagnostic";
+  launch_sha256: string;
+  own_timer_fired: boolean;
+  phase: "codex-child";
+  reason: "nonzero" | "timeout" | "interrupted" | "spawn_failed";
+  remaining_ms: number;
+  run_id: string;
+  schema_version: 1;
+  secondary: ("record_failed" | "cleanup_failed")[];
+  source: "slot" | "marker";
+  stderr_bytes: number | null;
+  stderr_sha256: string | null;
+  stderr_truncated: boolean | null;
+}
+
 export interface ClientCapabilitiesPayload {
   focus_session: boolean;
   host_platform: string;
@@ -1158,6 +1177,7 @@ export interface ProviderCircuitStatusPayload {
 }
 
 export interface ProviderDiagnosticPayload {
+  child?: ChildProviderDiagnosticPayload;
   launch_sha256: string;
   primary: ProviderPrimaryDiagnosticPayload | null;
   run_id: string;

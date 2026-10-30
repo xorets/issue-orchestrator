@@ -87,7 +87,11 @@ class DockerOriginalCustody:
                 and diagnostic is None)
             if (record.get('run_id') == owner.run_id and record.get('launch_sha256') == row.launch_sha256 and
                     diagnostic is not None):
-                value = ProviderDiagnosticPayload.model_validate(diagnostic).model_dump(mode='json')
+                from .docker_provider_status import valid_child_diagnostic
+                child = diagnostic.get('child') if type(diagnostic) is dict else None
+                if child is not None and not valid_child_diagnostic(child, owner.run_id, row.launch_sha256):
+                    diagnostic = {key: item for key, item in diagnostic.items() if key != 'child'}
+                value = ProviderDiagnosticPayload.model_validate(diagnostic).model_dump(mode='json', exclude_unset=True)
                 pairs = {('status', 'status_unavailable'), ('record', 'record_failed'),
                     ('record', 'record_unavailable'), ('stop', 'stop_unverified'),
                     ('output', 'output_failed'), ('transport', 'transport_failed')}
@@ -146,6 +150,7 @@ class DockerOriginalCustody:
             result['secondary'].append({'phase':'status', 'reason':'status_unavailable'})
             return result
         result['primary'] = status.diagnostic()
+        result.update(_fallback_child(inner, packet, owner, row, status, exit_code))
         return result
 
     def verify_session(self, session: Session) -> None:
@@ -203,6 +208,39 @@ class DockerOriginalCustody:
         if owner.docker_custody and any(row.run_id == owner.run_id and row.launch_sha256 != sha256(canonical(packet)).hexdigest() for row in owner.docker_custody):
             raise ValueError("Docker original launch material changed")
 
+
+
+def _fallback_child(inner, packet, owner, row, status, exit_code):
+    from .docker_provider_status import read_child_diagnostic
+    try:
+        scratch = Path(inner['capabilities']['scratch'])
+        slot = scratch / ('provider-' + owner.run_id)
+        if (not scratch.is_absolute() or scratch.resolve(strict=True) != scratch or
+                slot.resolve(strict=True) != slot or
+                {'source':str(scratch), 'target':str(scratch), 'read_only':False} not in packet['mounts']):
+            return {}
+        parent = os.open(scratch, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            parent_info = os.fstat(parent)
+            named_parent = scratch.lstat()
+            if ((parent_info.st_dev, parent_info.st_ino) != (named_parent.st_dev, named_parent.st_ino) or
+                    parent_info.st_uid != os.getuid() or stat.S_IMODE(parent_info.st_mode) != 0o700):
+                return {}
+            fd = os.open(slot.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+            try:
+                current = os.fstat(fd)
+                named = os.stat(slot.name, dir_fd=parent, follow_symlinks=False)
+                if ((current.st_dev, current.st_ino) != (named.st_dev, named.st_ino) or
+                        current.st_uid != os.getuid() or stat.S_IMODE(current.st_mode) != 0o700):
+                    return {}
+                child = read_child_diagnostic(fd, owner.run_id, row.launch_sha256, status, exit_code)
+                return {'child': child} if child is not None else {}
+            finally:
+                os.close(fd)
+        finally:
+            os.close(parent)
+    except (OSError, ValueError, TypeError, KeyError):
+        return {}
 
 def _private_diagnostic_bytes(path: Path, limit: int) -> bytes:
     if path.resolve(strict=True) != path:
