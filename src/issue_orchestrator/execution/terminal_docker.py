@@ -23,6 +23,7 @@ from ..domain.original_delivery import DockerCustody
 from ..domain.docker_execution import DockerSessionState
 from ..domain.session_run import SessionRunAssets
 from ..infra.hooks.hookspec import hookimpl
+from .docker_startup_allowance import reserve_startup
 from .docker_engine import DockerEngine
 from .docker_output import (
     bounded_output, private_directory as private_directory,
@@ -393,6 +394,7 @@ class DockerPlugin:
                 raise ValueError("Docker launch command/session/worktree changed")
             environment_values = worker_environment(packet, secret_env or {},
                 self._callback_token or os.environ.get("ISSUE_ORCHESTRATOR_AGENT_CALLBACK_TOKEN"))
+            reserve_startup(packet, self.template_path)
             launch_digest = sha256(canonical(packet)).hexdigest()
             with self._lock:
                 descriptor = os.open(self.receipt_path(), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)

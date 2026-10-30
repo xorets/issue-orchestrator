@@ -1030,3 +1030,48 @@ def test_stopped_review_parent_accepts_only_lifecycle_cleared_selected_bridge(br
     else:
         with pytest.raises(ValueError):runner.verify_stopped_parent(packet,custody)
     assert not calls and engine.starts==0
+
+
+def test_builder_delivery_startup_allowance_survives_fresh_engine_run(bridge_launch, tmp_path, monkeypatch):
+    runner, engine, packet, calls = bridge_launch
+    root = tmp_path / 'authority'; root.mkdir(mode=0o700)
+    template_dir = root / 'launch-templates-docker-v1'; template_dir.mkdir(mode=0o700)
+    template = template_dir / 'template.json'
+    run = packet['builder_run_id']
+    outer = root / 'execution-contracts-docker-v1' / (run + '.json')
+    inner_path = root / 'engine-contracts-docker-v1' / (run + '.json')
+    outer.parent.mkdir(mode=0o700); inner_path.parent.mkdir(mode=0o700)
+    packet['worker_authority'] = {'contract_path': str(outer), 'engine_contract_path': str(inner_path)}
+    packet['mounts'] += [{'source': str(p), 'target': str(p), 'read_only': True} for p in (outer, inner_path)]
+    config = Path(packet['devcontainer_config']); data = json.loads(config.read_bytes())
+    for mount in packet['mounts']:
+        data['runArgs'].extend(['--mount', 'type=bind,source=' + mount['source'] + ',target=' + mount['target'] + ',readonly'])
+    config.chmod(0o600); config.write_bytes(canonical(data)); config.chmod(0o400)
+    packet['devcontainer_config_sha256'] = sha256(config.read_bytes()).hexdigest()
+    intent = {k:v for k,v in packet.items() if k not in {'contract_sha256','run_id','engine_run_dir','command_sha256'}}
+    subject = {'run_id':run, 'repository':{'name':packet['repository']}, 'issue':{'number':42}, 'branch':{},
+        'role':'standard-implementation', 'bounds':{'transient_launch_max_attempts':1}, 'capabilities':{}, 'supervised':{},
+        'execution':{'workspace':packet['working_dir'], 'session_name':packet['session_name'], 'agent_label':'coding-1',
+        'logical_child':'original', 'backend':'docker', 'callback':{'scope':'docker'},
+        'docker_launch':{'template_path':str(template), 'intent_sha256':sha256(canonical(intent)).hexdigest()}}}
+    inner = {'schema_version':4, 'controller_compatibility':'supervised-v4', **subject}
+    inner_path.write_bytes(canonical(inner)); inner_path.chmod(0o400)
+    packet['contract_sha256'] = sha256(canonical(inner)).hexdigest()
+    outer.write_bytes(canonical({'schema_version':1,'kind':'builder-docker-delivery','model_admission':False,
+        'run_id':run,'subject':subject,'engine_contract':{'path':str(inner_path),'sha256':packet['contract_sha256']},
+        'worker':{'image_id':packet['image_id'],'manifest_sha256':'c'*64},'installed_acceptance':None})); outer.chmod(0o400)
+    template.write_bytes(canonical({**packet, 'run_id':'', 'engine_run_dir':'', 'command_sha256':'0'*64})); template.chmod(0o400)
+    runner.template_path = template
+    monkeypatch.setattr(DockerPlugin, '_output_root', lambda self, packet: Path(packet['output_root']))
+    def fail(*args, **kwargs):
+        calls.append(1)
+        raise ValueError('external CLI failed')
+    monkeypatch.setattr('issue_orchestrator.execution.terminal_docker.run_cli', fail)
+    monkeypatch.setenv('ISSUE_ORCHESTRATOR_AGENT_CALLBACK_TOKEN', 'd'*64)
+    secret = {'ISSUE_ORCHESTRATOR_COMPLETION_CAPABILITY':'e'*64}
+    for char in ('e', 'f'):
+        packet['run_id'] = '20261017-100000Z-' + char*32
+        path = template_dir / packet['run_id']; path.mkdir(mode=0o700)
+        runner.launch_path = path / 'launch.json'; runner.launch_path.write_bytes(canonical(packet)); runner.launch_path.chmod(0o400)
+        assert not runner.create_session(42, 'echo safe', packet['working_dir'], None, 'issue-42', secret)
+    assert len(calls) == 1
