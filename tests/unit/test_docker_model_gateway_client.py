@@ -101,15 +101,32 @@ async def test_slow_body_expires_and_releases_allocation(monkeypatch):
     from fastapi import HTTPException
     from issue_orchestrator.entrypoints import control_api, docker_model_gateway_routes as route
     monkeypatch.setattr(control_api,'verify_docker_callback_authorization',lambda _:True)
-    deadline=time.time_ns()+80_000_000
-    engine=SimpleNamespace(docker_model_gateway_context=lambda _: {'deadline_unix_ns':deadline})
+    timeouts = []
+    def controlled_timeout(_):
+        timeout = asyncio.timeout(None)
+        timeouts.append(timeout)
+        return timeout
+    monkeypatch.setattr(route, 'asyncio', SimpleNamespace(**{
+        **vars(asyncio), 'timeout':controlled_timeout}))
+    monkeypatch.setattr(route, 'time', SimpleNamespace(time_ns=lambda:0))
+    engine=SimpleNamespace(docker_model_gateway_context=lambda _: {'deadline_unix_ns':10**12})
+    body_started = asyncio.Event()
+    body_closed = asyncio.Event()
     class Slow:
         async def stream(self):
-            await asyncio.sleep(1)
-            yield b'{}'
+            body_started.set()
+            assert len(timeouts) == 2
+            timeouts[-1].reschedule(asyncio.get_running_loop().time())
+            try:
+                await asyncio.Event().wait()
+                yield b'{}'
+            finally:
+                body_closed.set()
     with pytest.raises(HTTPException) as raised:
         await route.model_gateway(Slow(),SimpleNamespace(get_orchestrator=lambda:engine),authorization='x',x_completion_capability='slow-cap')
     assert raised.value.status_code==408
+    assert raised.value.detail == 'Docker model gateway deadline exhausted'
+    assert body_started.is_set() and body_closed.is_set()
     assert not route._active  # noqa: SLF001 - verify release of the allocation guard
 
 
@@ -119,7 +136,7 @@ async def test_changed_live_authority_refuses_before_credential_lookup(monkeypat
     from fastapi import HTTPException
     from issue_orchestrator.entrypoints import control_api, docker_model_gateway_routes as route
     monkeypatch.setattr(control_api,'verify_docker_callback_authorization',lambda _:True)
-    
+
     states=iter([{'grant_kind':'builder-docker-container-model-authorization','deadline_unix_ns':time.time_ns()+1_000_000_000,'claim_ref_sha':'a'},
                  {'deadline_unix_ns':time.time_ns()+1_000_000_000,'engine_run_id':'foreign','claim_ref_sha':'b'}])
     from issue_orchestrator.control.original_delivery import OriginalDeliveryOwner
@@ -139,9 +156,18 @@ async def test_idle_stream_stops_when_owner_is_cancelled(monkeypatch):
     from types import SimpleNamespace
     from issue_orchestrator.entrypoints import control_api, docker_model_gateway_routes as route
     monkeypatch.setattr(control_api,'verify_docker_callback_authorization',lambda _:True)
-    
+
     monkeypatch.setenv('ISSUE_ORCHESTRATOR_MODEL_GATEWAY_TOKEN','a'*64)
-    context={'grant_kind':'builder-docker-container-model-authorization','deadline_unix_ns':time.time_ns()+5_000_000_000,'controller_home':'/unused','max_output_bytes':100}
+    clock = [0.0]
+    entered = asyncio.Event()
+    async def advance_to_poll(tasks, *, timeout):
+        await entered.wait()
+        clock[0] += timeout
+        return set(), tasks
+    monkeypatch.setattr(route, 'time', SimpleNamespace(time_ns=lambda:0, monotonic=lambda:clock[0]))
+    monkeypatch.setattr(route, 'asyncio', SimpleNamespace(**{
+        **vars(asyncio), 'wait':advance_to_poll, 'timeout':lambda _:asyncio.timeout(None)}))
+    context={'grant_kind':'builder-docker-container-model-authorization','deadline_unix_ns':10**12,'controller_home':'/unused','max_output_bytes':100}
     calls=[];closed=[]
     def current(_, previous=None):
         calls.append(True)
@@ -149,7 +175,8 @@ async def test_idle_stream_stops_when_owner_is_cancelled(monkeypatch):
         return context
     async def idle(**kwargs):
         try:
-            await asyncio.sleep(10)
+            entered.set()
+            await asyncio.Event().wait()
             yield b'never'
         finally: closed.append(True)
     monkeypatch.setattr(route,'forward_model_request',idle)
@@ -157,7 +184,9 @@ async def test_idle_stream_stops_when_owner_is_cancelled(monkeypatch):
         async def stream(self): yield b'{}'
     response=await route.model_gateway(Body(),SimpleNamespace(get_orchestrator=lambda:SimpleNamespace(docker_model_gateway_context=current, docker_model_gateway_credentials=lambda:{'XORETS_DOCKER_MODEL_AUTH_JSON':'DUMMY'})),authorization='x',x_completion_capability='pending-cap')
     with pytest.raises(ValueError,match='cancelled'):
-        await asyncio.wait_for(anext(response.body_iterator),timeout=2)
+        await anext(response.body_iterator)
+    assert entered.is_set() and clock[0] == 0.5
+    assert len(calls) == 3
     assert closed==[True]
     assert not route._active  # noqa: SLF001 - verify release of the allocation guard
 
@@ -169,7 +198,7 @@ async def test_oversized_body_refuses_before_credential_lookup(monkeypatch):
     from issue_orchestrator.entrypoints import control_api, docker_model_gateway_routes as route
     monkeypatch.setattr(control_api,'verify_docker_callback_authorization',lambda _:True)
     monkeypatch.setattr(route,'_MAX_REQUEST',4)
-    
+
     engine=SimpleNamespace(docker_model_gateway_context=lambda _:{'deadline_unix_ns':time.time_ns()+1_000_000_000})
     class Body:
         async def stream(self): yield b'12345'
@@ -182,10 +211,12 @@ async def test_oversized_body_refuses_before_credential_lookup(monkeypatch):
 @pytest.mark.asyncio
 async def test_wrong_peer_receives_no_auth_or_request(gateway_dir, monkeypatch):
     seen = []
+    received = asyncio.Event()
     async def serve(reader, writer):
         seen.append(await reader.read())
         writer.close()
         await writer.wait_closed()
+        received.set()
     path = gateway_dir / 'model-gateway.sock'
     server = await asyncio.start_unix_server(serve, path=str(path))
     os.chmod(path, 0o600)
@@ -195,7 +226,7 @@ async def test_wrong_peer_receives_no_auth_or_request(gateway_dir, monkeypatch):
             _ = [chunk async for chunk in forward_model_request(controller_home=str(gateway_dir),
                 instance_token='a' * 64, context={'deadline_unix_ns':time.time_ns()+1_000_000_000,
                 'max_output_bytes':100}, request={}, provider_auth='PRIVATE')]
-        await asyncio.sleep(0.01)
+        await received.wait()
         assert seen == [b'']
     finally:
         server.close()
@@ -227,11 +258,11 @@ async def test_synthetic_route_uses_fixed_dummy_without_keyring(monkeypatch):
     def current(_, previous=None):
         return context
     engine = SimpleNamespace(docker_model_gateway_context=current, docker_model_gateway_credentials=lambda: KeyringProviderCredentials().session_env('codex', docker=True))
-    response = await asyncio.wait_for(route.model_gateway(Body(), SimpleNamespace(get_orchestrator=lambda: engine),
-                                         authorization='x', x_completion_capability='synthetic-cap'), timeout=1)
+    response = await route.model_gateway(Body(), SimpleNamespace(get_orchestrator=lambda: engine),
+                                         authorization='x', x_completion_capability='synthetic-cap')
     async def collect():
         return [part async for part in response.body_iterator]
-    assert await asyncio.wait_for(collect(), timeout=1) == [b'data: fixture\n\n']
+    assert await collect() == [b'data: fixture\n\n']
     assert received == [SYNTHETIC_AUTH]
 
 

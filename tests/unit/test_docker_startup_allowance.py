@@ -3,6 +3,7 @@ from hashlib import sha256
 import json
 import multiprocessing
 import os
+import signal
 from pathlib import Path
 
 import pytest
@@ -26,11 +27,29 @@ def delivery(tmp_path):
 
 
 def _attempt(packet, template, queue):
+    os.setsid()
+    signal.alarm(15)
     try:
         reserve_startup(packet, template)
         queue.put(True)
     except (ValueError, OSError):
         queue.put(False)
+
+
+def _reap(processes):
+    # These multiprocessing children spawn no descendants; retain bounded ownership.
+    for process in processes:
+        if process.pid is not None and process.is_alive():
+            process.terminate()
+    for process in processes:
+        if process.pid is None:
+            continue
+        process.join(2)
+        if process.is_alive():
+            process.kill()
+            process.join(5)
+        assert not process.is_alive(), 'reservation child survived SIGKILL'
+        process.close()
 
 
 def test_distinct_delivery_has_new_allowance(delivery):
@@ -65,15 +84,23 @@ def test_concurrent_processes_do_not_exceed_limit(delivery):
     context = multiprocessing.get_context('fork')
     queue = context.Queue()
     processes = [context.Process(target=_attempt, args=({**packet, 'run_id':'20261017-100000Z-' + format(index, '032x')}, template, queue)) for index in range(8)]
-    for process in processes: process.start()
-    results = [queue.get(timeout=10) for _ in processes]
-    for process in processes:
-        process.join(10)
-        assert process.exitcode == 0
-    assert 1 <= sum(results) <= 2
-    while sum(results) < 2:
-        reserve_startup({**packet, 'run_id':'20261017-100000Z-' + 'f'*32}, template); results.append(True)
-    with pytest.raises(ValueError): reserve_startup(packet, template)
+    try:
+        for process in processes: process.start()
+        results = [queue.get(timeout=10) for _ in processes]
+        for process in processes:
+            process.join(10)
+            assert process.exitcode == 0
+        assert 1 <= sum(results) <= 2
+        while sum(results) < 2:
+            reserve_startup({**packet, 'run_id':'20261017-100000Z-' + 'f'*32}, template); results.append(True)
+        with pytest.raises(ValueError): reserve_startup(packet, template)
+    finally:
+        try:
+            _reap(processes)
+        finally:
+            queue.close()
+            queue.join_thread()
+
 
 
 @pytest.mark.parametrize('change', ['empty', 'foreign', 'hardlink', 'symlink', 'mode', 'writable-source', 'writable-target'])
@@ -105,6 +132,8 @@ def test_torn_record_never_replays(delivery):
 
 
 def _interrupt_before_record_fsync(packet, template):
+    os.setsid()
+    signal.alarm(15)
     real_fsync = os.fsync
     def interrupt(fd):
         if os.path.basename(os.readlink('/proc/self/fd/' + str(fd))) == '00000001.json':
@@ -117,11 +146,12 @@ def _interrupt_before_record_fsync(packet, template):
 def test_interrupted_record_write_is_never_refunded(delivery):
     packet, template = delivery
     process = multiprocessing.get_context('fork').Process(target=_interrupt_before_record_fsync, args=(packet, template))
-    process.start(); process.join(10)
-    if process.is_alive():
-        process.terminate(); process.join()
-        pytest.fail('reservation process did not settle')
-    assert process.exitcode == 73
+    try:
+        process.start()
+        process.join(10)
+        assert process.exitcode == 73
+    finally:
+        _reap([process])
     # The complete visible marker counts as spent; an incomplete marker fails closed.
     namespace = template.parent / ('startup-' + packet['builder_run_id'])
     assert (namespace / '00000001.json').exists()

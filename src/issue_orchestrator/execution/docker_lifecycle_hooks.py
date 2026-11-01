@@ -44,4 +44,3 @@ def run_hooks(engine, packet, record, output_directory, save, consume_output, de
                 raise ValueError("Docker lifecycle failed or did not settle")
             row["exit_code"] = 0
             save()
-

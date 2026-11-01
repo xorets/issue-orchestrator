@@ -477,36 +477,16 @@ class DockerPlugin:
             output = self._output_directory(packet) / "docker-output.log"
             with output.open("xb") as destination:
                 def consume(chunk: bytes) -> None:
+                    nonlocal stage
+                    stage = "output"
                     self._consume_output(packet, record, destination, chunk)
+                    stage = "transport"
                 stage = "transport"
                 stream = prepared_stream if prepared_stream is not None else self._open_provider(record, packet)
                 try:
                     stream.consume(consume)
                 finally:
                     stream.close()
-            provider = self.engine.request("GET", f"/exec/{record['provider_exec_id']}/json")
-            exit_code = provider.get("ExitCode")
-            if (provider.get("ID") != record["provider_exec_id"] or
-                    provider.get("ContainerID") != record["container_id"] or provider.get("Running") is not False or
-                    type(exit_code) is not int):
-                raise ValueError("Docker provider did not settle")
-            record["provider_exit_code"] = exit_code
-            if self._provider_slot is not None:
-                try:
-                    status = settle_provider_status(*self._provider_slot, packet, exit_code)
-                    record_diagnostic(self._lock, record, status.diagnostic())
-                    child = read_child_diagnostic(self._provider_slot[1], record['run_id'], record['launch_sha256'], status, exit_code)
-                    record_diagnostic(self._lock, record, child=child)
-                except ProviderStatusWriteError as error:
-                    record_diagnostic(self._lock, record, error.value.diagnostic(), {'phase':'record', 'reason':'record_failed'})
-                    child = read_child_diagnostic(self._provider_slot[1], record['run_id'], record['launch_sha256'], error.value, exit_code)
-                    record_diagnostic(self._lock, record, child=child)
-                    record['error'] = record['error'] or 'provider-status-invalid'
-                except (OSError, ValueError, TypeError, KeyError):
-                    logger.exception("Docker provider status refused")
-                    record_diagnostic(self._lock, record, {'phase':'provider', 'reason':'provider_nonzero'} if exit_code else None,
-                        {'phase':'status', 'reason':'status_unavailable'})
-                    record["error"] = record["error"] or "provider-status-invalid"
         except Exception as error:
             logger.exception("Docker provider result retained as unknown")
             phase = "output" if record.get("overflow") else "record" if isinstance(error, ProviderIntentError) else stage
@@ -519,6 +499,12 @@ class DockerPlugin:
                 with suppress(OSError):
                     prepared_stream.close()
             try:
+                self._settle_provider(record, packet)
+            except Exception:
+                logger.exception("Docker terminal provider evidence unavailable")
+                record_diagnostic(self._lock, record, secondary={"phase":"status", "reason":"status_unavailable"})
+                record["error"] = record["error"] or "provider-unsettled-or-bound-exhausted"
+            try:
                 self._close_provider_dir()
             except OSError:
                 logger.exception("Docker provider slot descriptor close failed")
@@ -529,6 +515,32 @@ class DockerPlugin:
                 record["error"] = "container-stop-unproven"
                 record["state"] = DockerSessionState.RETAINED
                 self._save()
+
+    def _settle_provider(self, record: dict, packet: dict) -> None:
+        """Collect authenticated terminal evidence independently of output transport."""
+        provider = self.engine.request("GET", f"/exec/{record['provider_exec_id']}/json")
+        exit_code = provider.get("ExitCode")
+        if (provider.get("ID") != record["provider_exec_id"] or
+                provider.get("ContainerID") != record["container_id"] or provider.get("Running") is not False or
+                type(exit_code) is not int):
+            raise ValueError("Docker provider did not settle")
+        record["provider_exit_code"] = exit_code
+        if self._provider_slot is not None:
+            try:
+                status = settle_provider_status(*self._provider_slot, packet, exit_code)
+                record_diagnostic(self._lock, record, status.diagnostic())
+                child = read_child_diagnostic(self._provider_slot[1], record['run_id'], record['launch_sha256'], status, exit_code)
+                record_diagnostic(self._lock, record, child=child)
+            except ProviderStatusWriteError as error:
+                record_diagnostic(self._lock, record, error.value.diagnostic(), {'phase':'record', 'reason':'record_failed'})
+                child = read_child_diagnostic(self._provider_slot[1], record['run_id'], record['launch_sha256'], error.value, exit_code)
+                record_diagnostic(self._lock, record, child=child)
+                record['error'] = record['error'] or 'provider-status-invalid'
+            except (OSError, ValueError, TypeError, KeyError):
+                logger.exception("Docker provider status refused")
+                record_diagnostic(self._lock, record, {'phase':'provider', 'reason':'provider_nonzero'} if exit_code else None,
+                    {'phase':'status', 'reason':'status_unavailable'})
+                record["error"] = record["error"] or "provider-status-invalid"
 
     def _open_provider(self, record: dict, packet: dict):
         with self._lock:

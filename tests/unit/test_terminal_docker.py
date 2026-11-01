@@ -1121,7 +1121,8 @@ def test_builder_delivery_startup_allowance_survives_fresh_engine_run(bridge_lau
 
 
 @pytest.mark.parametrize('invalid', [False, True])
-def test_terminal_provider_handoff_stops_worker_even_on_invalid_status(launch, tmp_path, invalid):
+@pytest.mark.parametrize('terminal_evidence', ['exact', 'foreign-exec', 'foreign-container', 'running', 'missing-exit'])
+def test_terminal_provider_handoff_stops_worker_even_on_invalid_status(launch, tmp_path, invalid, terminal_evidence):
     from issue_orchestrator.infra.provider_resilience import read_provider_status
     runner, engine, packet, _ = launch
     run = tmp_path / 'controller-run'; run.mkdir(mode=0o700)
@@ -1140,16 +1141,33 @@ def test_terminal_provider_handoff_stops_worker_even_on_invalid_status(launch, t
         'container_id':'2'*64, 'provider_exec_id':exec_id, 'launch_sha256':sha256(canonical(packet)).hexdigest(),
         'state':'exec-created', 'output_bytes':0, 'overflow':False, 'provider_exit_code':None, 'error':''}
     engine.exec_payloads[exec_id] = {}
-    runner._run_provider()  # noqa: SLF001
+    original_request = engine.request
+    def inspect(method, route, payload=None):
+        result = original_request(method, route, payload)
+        if route == '/exec/' + exec_id + '/json' and terminal_evidence != 'exact':
+            result.update({'foreign-exec':{'ID':'f'*64}, 'foreign-container':{'ContainerID':'f'*64},
+                'running':{'Running':True}, 'missing-exit':{'ExitCode':None}}[terminal_evidence])
+        return result
+    engine.request = inspect
+    class DisconnectedStream:
+        def consume(self, callback): raise OSError('stream disconnected')
+        def close(self): pass
+    runner._run_provider(DisconnectedStream() if terminal_evidence != 'exact' else None)  # noqa: SLF001
     assert not engine.running
-    assert runner._record['provider_exit_code'] == 0  # noqa: SLF001
-    assert runner._record['error'] == ('provider-status-invalid' if invalid else '')  # noqa: SLF001
-    assert (read_provider_status(run) is None) == invalid
+    if terminal_evidence == 'exact':
+        assert runner._record['provider_exit_code'] == 0  # noqa: SLF001
+        assert runner._record['error'] == ('provider-status-invalid' if invalid else '')  # noqa: SLF001
+        assert (read_provider_status(run) is None) == invalid
+    else:
+        assert runner._record['provider_exit_code'] is None  # noqa: SLF001
+        assert read_provider_status(run) is None
+        assert runner._record['diagnostic']['secondary'] == [  # noqa: SLF001
+            {'phase':'transport', 'reason':'transport_failed'}, {'phase':'status', 'reason':'status_unavailable'}]
     assert runner._record['diagnostic']['primary'] is None  # noqa: SLF001
 
 
-@pytest.mark.parametrize(('outcome', 'status_recording_fails', 'receipt_recording_fails', 'transport_fails', 'corrupt_status'),
-    [(outcome, *case) for outcome in ('failure', 'timeout') for case in
+@pytest.mark.parametrize(('outcome', 'status_recording_fails', 'receipt_recording_fails', 'transport_fails', 'corrupt_status', 'stream_failure'),
+    [(*row, '') for row in [(outcome, *case) for outcome in ('failure', 'timeout') for case in
         [(False, False, False, ''), (True, False, False, ''), (False, True, False, ''),
          (True, True, False, ''), (False, True, True, ''), (False, True, False, 'malformed'),
          (False, True, False, 'foreign')]] + [('cancel', False, False, False, ''), ('cancel', True, False, False, ''),
@@ -1158,8 +1176,8 @@ def test_terminal_provider_handoff_stops_worker_even_on_invalid_status(launch, t
             ('child_file', False, False, False, ''), ('child_file', True, False, False, ''),
             ('child_file', False, True, False, ''), ('producer_file', False, False, False, ''),
             ('producer_marker', False, False, False, ''), ('producer_timeout', False, False, False, ''),
-            ('producer_interrupted', False, False, False, ''), ('producer_spawn', False, False, False, ''), ('producer_combined', False, False, False, '')])
-def test_real_provider_failure_survives_stop_failure(launch, tmp_path, monkeypatch, status_recording_fails, receipt_recording_fails, transport_fails, corrupt_status, outcome):
+            ('producer_interrupted', False, False, False, ''), ('producer_spawn', False, False, False, ''), ('producer_combined', False, False, False, '')]] + [(outcome, False, False, False, '', failure) for outcome in ('child', 'producer_timeout') for failure in ('transport', 'output')])
+def test_real_provider_failure_survives_stop_failure(launch, tmp_path, monkeypatch, status_recording_fails, receipt_recording_fails, transport_fails, corrupt_status, outcome, stream_failure):
     """Actual provider status must survive the later Docker stop error."""
     import shlex
     import subprocess
@@ -1278,6 +1296,12 @@ except capabilities.CodexChildFailure as error:
     engine.request = request
     engine.stop = stop
     if status_recording_fails: run.chmod(0o500)
+    class DisconnectedStream:
+        def consume(self, callback):
+            raise OSError('sensitive-stream-detail')
+        def close(self): pass
+    prepared_stream = DisconnectedStream() if stream_failure == 'transport' else None
+    if stream_failure == 'output': ordinary.chmod(0o500)
     try:
         if outcome in ('active', 'active_status'):
             os.close(descriptor); runner._provider_slot = None  # noqa: SLF001
@@ -1306,9 +1330,9 @@ except capabilities.CodexChildFailure as error:
         elif receipt_recording_fails:
             with pytest.raises(OSError): runner._run_provider()  # noqa: SLF001
         else:
-            runner._run_provider()  # noqa: SLF001
+            runner._run_provider(prepared_stream)  # noqa: SLF001
     finally:
-        run.chmod(0o700); launch_dir.chmod(0o700)
+        run.chmod(0o700); launch_dir.chmod(0o700); ordinary.chmod(0o700)
         if cancel_child is not None:
             if cancel_child.poll() is None: cancel_child.kill(); cancel_child.wait(timeout=5)
             if cancel_child.stdin: cancel_child.stdin.close()
@@ -1359,6 +1383,7 @@ except capabilities.CodexChildFailure as error:
     else:
         assert diagnostic['primary'] == {'phase':'provider', 'reason':{'failure':'provider_transient', 'timeout':'provider_timeout', 'cancel':'provider_cancelled', 'deadline':'controller_deadline', 'child':'provider_nonzero', 'child_file':'provider_nonzero', 'producer_file':'provider_nonzero', 'producer_marker':'provider_nonzero', 'producer_timeout':'provider_nonzero', 'producer_interrupted':'provider_nonzero', 'producer_spawn':'provider_nonzero', 'producer_combined':'provider_nonzero'}[outcome]}
         expected = ([] if receipt_recording_fails else
+            ([{'phase':stream_failure, 'reason':stream_failure + '_failed'}] if stream_failure else []) +
             ([{'phase':'record', 'reason':'record_failed'}] if status_recording_fails else []) +
             [{'phase':'stop', 'reason':'stop_unverified'}])
         assert diagnostic['secondary'] == expected
@@ -1392,6 +1417,7 @@ except capabilities.CodexChildFailure as error:
                 assert 'stop-secret' not in json.dumps(final) and 'record-secret' not in json.dumps(final)
     assert 'connection refused' not in json.dumps(result.structuredContent)
     assert 'sensitive-stop-detail' not in json.dumps(result.structuredContent)
+    assert 'sensitive-stream-detail' not in json.dumps(result.structuredContent)
 
 
 @pytest.mark.parametrize('prior', [None, {'phase':'provider', 'reason':'provider_auth'}])
