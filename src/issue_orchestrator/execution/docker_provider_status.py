@@ -1,6 +1,7 @@
 """Bounded provider status handoff from the selected Docker worker scratch."""
 from dataclasses import replace
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -10,6 +11,8 @@ import stat
 from ..infra.provider_resilience import ProviderStatus, now_iso, write_provider_status
 from .docker_launch_input import sealed_bytes
 
+
+logger = logging.getLogger(__name__)
 
 ENV = 'ISSUE_ORCHESTRATOR_DOCKER_PROVIDER_DIR'
 
@@ -228,3 +231,30 @@ def valid_child_diagnostic(value: object, run_id: str, launch_sha: str) -> bool:
     if value['source'] == 'marker':
         return (inner['stderr_bytes'] is None and 'record_failed' in inner['secondary'])
     return True
+
+
+def collect_terminal_status(engine, lock, record: dict, slot: tuple[Path, int, str, bool] | None, packet: dict) -> None:
+    """Collect authenticated terminal evidence independently of output transport."""
+    provider = engine.request("GET", f"/exec/{record['provider_exec_id']}/json")
+    exit_code = provider.get("ExitCode")
+    if (provider.get("ID") != record["provider_exec_id"] or
+            provider.get("ContainerID") != record["container_id"] or provider.get("Running") is not False or
+            type(exit_code) is not int):
+        raise ValueError("Docker provider did not settle")
+    record["provider_exit_code"] = exit_code
+    if slot is not None:
+        try:
+            status = settle(*slot, packet, exit_code)
+            record_diagnostic(lock, record, status.diagnostic())
+            child = read_child_diagnostic(slot[1], record['run_id'], record['launch_sha256'], status, exit_code)
+            record_diagnostic(lock, record, child=child)
+        except ProviderStatusWriteError as error:
+            record_diagnostic(lock, record, error.value.diagnostic(), {'phase':'record', 'reason':'record_failed'})
+            child = read_child_diagnostic(slot[1], record['run_id'], record['launch_sha256'], error.value, exit_code)
+            record_diagnostic(lock, record, child=child)
+            record['error'] = record['error'] or 'provider-status-invalid'
+        except (OSError, ValueError, TypeError, KeyError):
+            logger.exception("Docker provider status refused")
+            record_diagnostic(lock, record, {'phase':'provider', 'reason':'provider_nonzero'} if exit_code else None,
+                {'phase':'status', 'reason':'status_unavailable'})
+            record["error"] = record["error"] or "provider-status-invalid"
