@@ -473,6 +473,7 @@ class DockerPlugin:
         deadline.daemon = True
         deadline.start()
         stage = "output"
+        stream = prepared_stream
         try:
             output = self._output_directory(packet) / "docker-output.log"
             with output.open("xb") as destination:
@@ -482,11 +483,9 @@ class DockerPlugin:
                     self._consume_output(packet, record, destination, chunk)
                     stage = "transport"
                 stage = "transport"
-                stream = prepared_stream if prepared_stream is not None else self._open_provider(record, packet)
-                try:
-                    stream.consume(consume)
-                finally:
-                    stream.close()
+                stream = stream if stream is not None else self._open_provider(record, packet)
+                stream.consume(consume)
+                stage = "output"
         except Exception as error:
             logger.exception("Docker provider result retained as unknown")
             phase = "output" if record.get("overflow") else "record" if isinstance(error, ProviderIntentError) else stage
@@ -494,10 +493,13 @@ class DockerPlugin:
                 "output":"output_failed", "record":"record_failed", "transport":"transport_failed"}[phase]})
             record["error"] = "provider-unsettled-or-bound-exhausted"
         finally:
+            if stream is not None:
+                try:
+                    stream.close()
+                except Exception:
+                    record_diagnostic(self._lock, record, secondary={"phase":"transport", "reason":"transport_failed"})
+                    record["error"] = record["error"] or "provider-unsettled-or-bound-exhausted"
             deadline.cancel()
-            if prepared_stream is not None:
-                with suppress(OSError):
-                    prepared_stream.close()
             try:
                 collect_terminal_status(self.engine, self._lock, record, self._provider_slot, packet)
             except Exception:

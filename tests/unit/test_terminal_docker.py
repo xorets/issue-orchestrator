@@ -1176,7 +1176,7 @@ def test_terminal_provider_handoff_stops_worker_even_on_invalid_status(launch, t
             ('child_file', False, False, False, ''), ('child_file', True, False, False, ''),
             ('child_file', False, True, False, ''), ('producer_file', False, False, False, ''),
             ('producer_marker', False, False, False, ''), ('producer_timeout', False, False, False, ''),
-            ('producer_interrupted', False, False, False, ''), ('producer_spawn', False, False, False, ''), ('producer_combined', False, False, False, '')]] + [(outcome, False, False, False, '', failure) for outcome in ('child', 'producer_timeout') for failure in ('transport', 'output')])
+            ('producer_interrupted', False, False, False, ''), ('producer_spawn', False, False, False, ''), ('producer_combined', False, False, False, '')]] + [(outcome, False, False, False, '', failure) for outcome in ('child', 'producer_timeout') for failure in ('transport', 'output', 'output_close')])
 def test_real_provider_failure_survives_stop_failure(launch, tmp_path, monkeypatch, status_recording_fails, receipt_recording_fails, transport_fails, corrupt_status, outcome, stream_failure):
     """Actual provider status must survive the later Docker stop error."""
     import shlex
@@ -1298,9 +1298,17 @@ except capabilities.CodexChildFailure as error:
     if status_recording_fails: run.chmod(0o500)
     class DisconnectedStream:
         def consume(self, callback):
-            raise OSError('sensitive-stream-detail')
-        def close(self): pass
-    prepared_stream = DisconnectedStream() if stream_failure == 'transport' else None
+            if stream_failure == 'output_close':
+                callback(b'fixture output')
+            else:
+                raise OSError('sensitive-stream-detail')
+        def close(self):
+            if stream_failure == 'output_close':
+                raise OSError('sensitive-close-detail')
+    prepared_stream = DisconnectedStream() if stream_failure in ('transport', 'output_close') else None
+    if stream_failure == 'output_close':
+        def fail_output(*args): raise OSError('sensitive-output-detail')
+        monkeypatch.setattr(runner, '_consume_output', fail_output)
     if stream_failure == 'output': ordinary.chmod(0o500)
     try:
         if outcome in ('active', 'active_status'):
@@ -1383,7 +1391,8 @@ except capabilities.CodexChildFailure as error:
     else:
         assert diagnostic['primary'] == {'phase':'provider', 'reason':{'failure':'provider_transient', 'timeout':'provider_timeout', 'cancel':'provider_cancelled', 'deadline':'controller_deadline', 'child':'provider_nonzero', 'child_file':'provider_nonzero', 'producer_file':'provider_nonzero', 'producer_marker':'provider_nonzero', 'producer_timeout':'provider_nonzero', 'producer_interrupted':'provider_nonzero', 'producer_spawn':'provider_nonzero', 'producer_combined':'provider_nonzero'}[outcome]}
         expected = ([] if receipt_recording_fails else
-            ([{'phase':stream_failure, 'reason':stream_failure + '_failed'}] if stream_failure else []) +
+            ([{'phase':'output', 'reason':'output_failed'}, {'phase':'transport', 'reason':'transport_failed'}] if stream_failure == 'output_close' else
+             [{'phase':stream_failure, 'reason':stream_failure + '_failed'}] if stream_failure else []) +
             ([{'phase':'record', 'reason':'record_failed'}] if status_recording_fails else []) +
             [{'phase':'stop', 'reason':'stop_unverified'}])
         assert diagnostic['secondary'] == expected
@@ -1418,6 +1427,8 @@ except capabilities.CodexChildFailure as error:
     assert 'connection refused' not in json.dumps(result.structuredContent)
     assert 'sensitive-stop-detail' not in json.dumps(result.structuredContent)
     assert 'sensitive-stream-detail' not in json.dumps(result.structuredContent)
+    assert 'sensitive-close-detail' not in json.dumps(result.structuredContent)
+    assert 'sensitive-output-detail' not in json.dumps(result.structuredContent)
 
 
 @pytest.mark.parametrize('prior', [None, {'phase':'provider', 'reason':'provider_auth'}])

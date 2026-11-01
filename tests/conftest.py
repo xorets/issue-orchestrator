@@ -1835,3 +1835,16 @@ def attach_real_pause_controller(mock_orchestrator):
     mock_orchestrator.pause.side_effect = lambda **kw: controller.pause(**kw)
     mock_orchestrator.resume.side_effect = lambda **kw: controller.resume(**kw)
     return mock_orchestrator
+
+
+@pytest.fixture
+def builder_source() -> Path:
+    """An explicitly selected cross-repository source check needs its real producer."""
+    value = os.environ.get("BUILDER_SOURCE")
+    if not value:
+        pytest.fail("BUILDER_SOURCE must name the Builder checkout for make test-builder-source", pytrace=False)
+    source = Path(value) / "tools" / "orchestration"
+    for name in ("docker_model_gateway.py", "rehearsal_seed.py"):
+        if not (source / name).is_file():
+            pytest.fail(f"BUILDER_SOURCE lacks tools/orchestration/{name}", pytrace=False)
+    return source

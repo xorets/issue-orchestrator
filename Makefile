@@ -1,4 +1,4 @@
-.PHONY: test-agent-live agent-test-status agent-test-check help venv venv-fast semgrep-venv worktree-create worktree-setup install upgrade-deps deps-batch release release-pr prepare-release preview-readme typecheck lint-arch lint-complexity quality-guardrails quality-guardrails-stale lane-preflight sync-deps test test-unit test-unit-cov test-unit-cov-html test-integration test-integration-core test-integration-core-local test-integration-core-live-codex test-integration-agent test-simulated test-simulated-core test-simulated-agent test-e2e test-e2e-heavy test-tech-lead-exam test-e2e-onboarding-live test-e2e-one test-e2e-live test-real-claude-dev test-real-claude-review test-real-gh-labels test-real-gh test-real-gh-plus-e2e test-real-gh-plus-e2e-subprocess test-web test-web-headed test-vscode install-vscode-extensions playwright-install validate validate-raw validate-pr validate-pr-raw validate-quick validate-full verify-hooks-all _validate-impl _validate-static-impl _validate-core-tests-impl _validate-pr-impl _validate-agent-impl _validate-full-impl _validate-pr-flat-impl FORCE ensure-uv test-integration-agent-claude test-integration-agent-codex test-integration-agent-chain clean demo issues-validate issues-fix issues-fix-dry-run issues-create
+.PHONY: test-builder-source test-agent-live agent-test-status agent-test-check help venv venv-fast semgrep-venv worktree-create worktree-setup install upgrade-deps deps-batch release release-pr prepare-release preview-readme typecheck lint-arch lint-complexity quality-guardrails quality-guardrails-stale lane-preflight sync-deps test test-unit test-unit-cov test-unit-cov-html test-integration test-integration-core test-integration-core-local test-integration-core-live-codex test-integration-agent test-simulated test-simulated-core test-simulated-agent test-e2e test-e2e-heavy test-tech-lead-exam test-e2e-onboarding-live test-e2e-one test-e2e-live test-real-claude-dev test-real-claude-review test-real-gh-labels test-real-gh test-real-gh-plus-e2e test-real-gh-plus-e2e-subprocess test-web test-web-headed test-vscode install-vscode-extensions playwright-install validate validate-raw validate-pr validate-pr-raw validate-quick validate-full verify-hooks-all _validate-impl _validate-static-impl _validate-core-tests-impl _validate-pr-impl _validate-agent-impl _validate-full-impl _validate-pr-flat-impl FORCE ensure-uv test-integration-agent-claude test-integration-agent-codex test-integration-agent-chain clean demo issues-validate issues-fix issues-fix-dry-run issues-create
 
 # GNU make detection - required for parallel validation with grouped output
 # On macOS: brew install make (provides gmake)
@@ -31,6 +31,7 @@ help:
 	@echo "  lint-complexity     Check cyclomatic complexity (C901) and branch count (PLR0912)"
 	@echo "  quality-guardrails  Run ratcheted control-quality guardrails"
 	@echo "  quality-guardrails-stale  Check for stale ratchet-baseline entries"
+	@echo "  test-builder-source Run Builder/Engine source checks (requires BUILDER_SOURCE checkout)"
 	@echo "  test-unit           Run unit tests"
 	@echo "  test-simulated      Run all simulated scenario tests"
 	@echo "  test-simulated-core Run fast simulated scenario slice used by local validate"
@@ -563,6 +564,10 @@ sync-deps:
 		echo ""; \
 	fi
 
+# Explicitly selected cross-repository checks; selected prerequisites fail in builder_source.
+test-builder-source: sync-deps
+	$(PYTEST) tests/unit/test_docker_model_gateway_client.py tests/unit/test_docker_worker_authority.py -m builder_source -q --tb=short
+
 test-unit: sync-deps
 ifeq ($(LANE_EXECUTOR),condor)
 	$(call TIMED_RUN,test-unit,\
@@ -571,10 +576,10 @@ ifeq ($(LANE_EXECUTOR),condor)
 			$(GMAKE) test-unit LANE_EXECUTOR=direct UNIT_PARALLEL=$(UNIT_PARALLEL))
 else ifeq ($(UNIT_PARALLEL),0)
 	$(call TIMED_RUN,test-unit,\
-		$(PYTEST) tests/unit packages/agent_runner/tests -m "not live_agent and not live_codex and not live_deepseek" -x -q --tb=short $(PYTEST_TIMINGS))
+		$(PYTEST) tests/unit packages/agent_runner/tests -m "not live_agent and not live_codex and not live_deepseek and not builder_source" -x -q --tb=short $(PYTEST_TIMINGS))
 else
 	$(call TIMED_RUN,test-unit,\
-		$(PYTEST) tests/unit packages/agent_runner/tests -m "not live_agent and not live_codex and not live_deepseek" -x -q --tb=short -n $(UNIT_PARALLEL) --dist=loadgroup $(PYTEST_TIMINGS))
+		$(PYTEST) tests/unit packages/agent_runner/tests -m "not live_agent and not live_codex and not live_deepseek and not builder_source" -x -q --tb=short -n $(UNIT_PARALLEL) --dist=loadgroup $(PYTEST_TIMINGS))
 endif
 
 test-simulated: sync-deps
@@ -616,10 +621,10 @@ else
 endif
 
 test-unit-cov: sync-deps
-	$(PYTEST) tests/unit packages/agent_runner/tests --cov=src/issue_orchestrator --cov=packages/agent_runner/src --cov-report=term-missing -x -q --tb=short $(PYTEST_TIMINGS)
+	$(PYTEST) tests/unit packages/agent_runner/tests -m "not builder_source" --cov=src/issue_orchestrator --cov=packages/agent_runner/src --cov-report=term-missing -x -q --tb=short $(PYTEST_TIMINGS)
 
 test-unit-cov-html: sync-deps
-	$(PYTEST) tests/unit packages/agent_runner/tests --cov=src/issue_orchestrator --cov=packages/agent_runner/src --cov-report=html -x -q --tb=short $(PYTEST_TIMINGS)
+	$(PYTEST) tests/unit packages/agent_runner/tests -m "not builder_source" --cov=src/issue_orchestrator --cov=packages/agent_runner/src --cov-report=html -x -q --tb=short $(PYTEST_TIMINGS)
 	@echo "Coverage report: open htmlcov/index.html"
 
 test-integration: sync-deps

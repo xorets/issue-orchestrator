@@ -576,15 +576,18 @@ def test_synthetic_grant_requires_exact_subject_and_capability():
         require_current_model_grant(packet, {**inner, 'repository': {'name': 'other/repo'}}, grant)
 
 
-def test_builder_generated_overlay_fixture(monkeypatch):
-    """Consume the actual Builder producer output when explicitly supplied."""
-    import json
-    import os
+@pytest.mark.builder_source
+def test_builder_generated_overlay_fixture(monkeypatch, tmp_path, builder_source):
+    """Feed actual Builder workspace overlays to the Engine mount validator."""
     from issue_orchestrator.execution.docker_worker_authority import require_container_only_mounts
-    path = os.environ.get('BUILDER_OVERLAY_FIXTURE')
-    if not path:
-        pytest.skip('Builder overlay fixture not supplied')
-    packet = json.loads(Path(path).read_bytes())
+    monkeypatch.syspath_prepend(str(builder_source))
+    from rehearsal_seed import workspace_overlays
+    workspace = tmp_path / 'workspace'; workspace.mkdir()
+    for name in ('.codex', '.agents', '.issue-orchestrator'):
+        (workspace / name).mkdir()
+    empty = tmp_path / 'readonly-empty'; empty.mkdir(mode=0o555); empty.chmod(0o555)
+    packet = {'working_dir':str(workspace), 'builder_run_id':'run-' + 'a'*32,
+        'mounts':workspace_overlays(workspace, empty)}
     require_container_only_mounts(packet)
     overlay = next(item for item in packet['mounts'] if item['target'] == packet['working_dir'] + '/.codex')
     overlay['read_only'] = False

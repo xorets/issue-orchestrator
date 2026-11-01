@@ -337,3 +337,15 @@ The existing Codex parser produces readiness; the probe has finite output and
 time bounds and removes the private auth in `finally`. Failure to authenticate
 the selected context is nonlaunchable. Native and nonmodel v1 use their existing
 readiness path. No host auth file is mounted or copied.
+
+
+## Builder source composition checks
+
+Run `BUILDER_SOURCE=/path/to/builder make test-builder-source` to exercise the
+actual Builder listener and workspace-overlay producer with Engine consumers.
+The selected target fails clearly if its Builder checkout is missing or invalid;
+it generates its overlay fixture locally rather than requiring a retained packet.
+These checks use local sockets with substituted admission/upstream behavior and
+make no model or operational Docker calls. The ordinary `make validate-pr` unit
+slice excludes the registered `builder_source` marker; run this separate target
+when validating the cross-repository source composition.

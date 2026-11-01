@@ -266,17 +266,12 @@ async def test_synthetic_route_uses_fixed_dummy_without_keyring(monkeypatch):
     assert received == [SYNTHETIC_AUTH]
 
 
+@pytest.mark.builder_source
 @pytest.mark.asyncio
-async def test_actual_builder_listener_with_engine_client(gateway_dir, monkeypatch):
+async def test_actual_builder_listener_with_engine_client(gateway_dir, monkeypatch, builder_source):
     """Actual listener and client; admission and upstream are explicitly substituted."""
-    import sys
-    from pathlib import Path
     from unittest.mock import patch
-    builder_path = os.environ.get('BUILDER_GATEWAY_SOURCE')
-    if not builder_path:
-        pytest.skip('Builder gateway source not supplied')
-    builder = Path(builder_path)
-    monkeypatch.syspath_prepend(str(builder))
+    monkeypatch.syspath_prepend(str(builder_source))
     import docker_model_gateway as gateway
     seen = []
     server = gateway.ModelGatewayServer(gateway_dir / 'model-gateway.sock', gateway_dir, gateway_dir, 'a' * 64,
@@ -286,7 +281,7 @@ async def test_actual_builder_listener_with_engine_client(gateway_dir, monkeypat
         return object(), 1, object()
     try:
         with patch.object(gateway, 'prepare_request', side_effect=prepare), \
-             patch.object(gateway, 'stream_request', side_effect=lambda *args: args[-1](b'event: response.completed\n\n')):
+             patch.object(gateway, 'stream_request', side_effect=lambda *args, **kwargs: args[-1](b'event: response.completed\n\n')):
             context = {'builder_run_id': 'run-fixture', 'grant_kind':'builder-docker-container-synthetic-authorization',
                        'deadline_unix_ns':time.time_ns()+5_000_000_000, 'max_output_bytes':1000}
             chunks = [part async for part in forward_model_request(controller_home=str(gateway_dir), instance_token='a'*64,
