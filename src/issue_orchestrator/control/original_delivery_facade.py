@@ -10,6 +10,19 @@ from .pause_controller import PauseController
 
 if TYPE_CHECKING:
     from .orchestrator_deps import OrchestratorDeps
+    from ..domain.models import Session
+
+
+def activate_docker_original(deps: OrchestratorDeps, session: Session, *, unavailable: Callable[[], bool]) -> None:
+    """Register and recheck original custody before starting a prepared worker."""
+    owner = deps.original_delivery_owner
+    if unavailable() or owner is None or not deps.health_gate.check(paused=False).can_proceed:
+        raise ValueError('Docker pre-start owner or engine health unavailable')
+    fence = owner.register_prestart(session)
+    if unavailable() or not deps.health_gate.check(paused=False).can_proceed:
+        raise ValueError('Docker pre-start engine health changed')
+    owner.require_prestart_current(session, fence)
+    deps.runner.activate_session(session.run_assets, session.terminal_id, fence)
 
 
 def original_delivery(owner: OriginalDeliveryOwner | None, issue_number: int,
@@ -38,3 +51,13 @@ def docker_first_model(deps: OrchestratorDeps, controller: PauseController, capa
             controller.pause(reason=PauseReason.OPERATOR, actor=PauseActor.CONTROL_API,
                 detail="Authenticated Docker model preflight for " + run.run_id)
         return owner.first_model(run, command)
+
+
+def docker_model_gateway_context(deps: OrchestratorDeps, capability: str, previous: dict[str, object] | None = None, *, shutdown_requested: Callable[[], bool], state_lock: threading.RLock) -> dict[str, object]:
+    """Resolve live ownership under the state lock; never hold it during forwarding."""
+    with state_lock:
+        run = deps.issue_run_ledger.run_for_capability(capability)
+        owner = deps.original_delivery_owner
+        if shutdown_requested() or owner is None or not deps.health_gate.check(paused=False).can_proceed:
+            raise ValueError("Docker model gateway owner or engine health unavailable")
+        return owner.model_gateway_context(run, previous)

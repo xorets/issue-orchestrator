@@ -44,6 +44,7 @@ def test_docker_quiescence_requires_worker_and_prior_controller_to_be_inactive()
     class Engine:
         worker_running = True
         controller_running = True
+        provider_running = False
         daemon = "daemon"
         def request(self, method, route, payload=None):
             if route == "/info":
@@ -53,14 +54,21 @@ def test_docker_quiescence_requires_worker_and_prior_controller_to_be_inactive()
             if route == "/containers/" + "1" * 64 + "/json":
                 return {"Id": "1" * 64, "State": {"Running": self.controller_running}}
             if route == "/exec/" + "3" * 64 + "/json":
-                return {"ID": "3" * 64, "ContainerID": "2" * 64}
+                return {"ID": "3" * 64, "ContainerID": "2" * 64,
+                        "Running": self.provider_running, "ExitCode": 0}
             raise AssertionError(route)
+        def inspect_exec(self, exec_id):
+            return {"status": 200, "value": self.request("GET", "/exec/" + exec_id + "/json")}
     engine = Engine()
     adapter = DockerOriginalCustody(DockerPlugin(engine=engine))
     owner = replace(custody(), execution_backend="docker", docker_custody=(docker_custody(),))
     with pytest.raises(ValueError, match="worker remains"):
         adapter.quiescent(owner, offline=False)
     engine.worker_running = False
+    engine.provider_running = True
+    with pytest.raises(ValueError, match="provider settlement is unknown"):
+        adapter.quiescent(owner, offline=False)
+    engine.provider_running = False
     adapter.quiescent(owner, offline=False)
     with pytest.raises(ValueError, match="controller"):
         adapter.quiescent(owner, offline=True)

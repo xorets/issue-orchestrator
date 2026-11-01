@@ -296,3 +296,11 @@ class TestCodexBaseCommand:
         assert provider.runs_interactively(execution_mode="exec") is False
         assert provider.needs_fresh_prompt_process() is True
         assert provider.needs_fresh_prompt_process(execution_mode="exec") is False
+
+
+def test_sealed_container_mode_emits_explicit_full_access_not_yolo(monkeypatch):
+    monkeypatch.setattr('issue_orchestrator.execution.docker_worker_authority.docker_container_only_requested', lambda: True)
+    cmd = _cmd(execution_mode='exec', sandbox='danger-full-access', approval_mode='full-auto')
+    assert ['--ask-for-approval', 'never'] == cmd[cmd.index('--ask-for-approval'):cmd.index('--ask-for-approval')+2]
+    assert ['--sandbox', 'danger-full-access'] == cmd[cmd.index('--sandbox'):cmd.index('--sandbox')+2]
+    assert '--dangerously-bypass-approvals-and-sandbox' not in cmd

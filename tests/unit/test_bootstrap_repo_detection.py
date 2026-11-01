@@ -706,7 +706,7 @@ class TestBuildOrchestratorForTesting:
                 planner=None,
             )
 
-            assert orch._session_launcher._dependency_evaluator is orch.scheduler.dependency_evaluator  # noqa: SLF001
+            assert orch.session_launcher._dependency_evaluator is orch.scheduler.dependency_evaluator  # noqa: SLF001
 
     def test_create_planner_wires_dependency_evaluator_to_scheduler(
         self, minimal_config: Config, mock_github: MagicMock
@@ -961,6 +961,10 @@ class TestBuildOrchestratorForTesting:
 
 class TestBuildOrchestrator:
     """Tests for build_orchestrator function (main composition root)."""
+
+    @pytest.fixture(autouse=True)
+    def fake_github_token(self, monkeypatch):
+        monkeypatch.setenv("ISSUE_ORCH_GITHUB_TOKEN", "test-only-bootstrap-token")
 
     @pytest.fixture
     def minimal_config(self, tmp_path) -> Config:

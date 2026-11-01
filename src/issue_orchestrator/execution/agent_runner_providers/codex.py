@@ -63,12 +63,24 @@ def _validate_orchestrated_safety(
             "it would expose the isolated hook runtime to agent writes"
         )
     if sandbox_scope is None and sandbox_mode == "danger-full-access":
+        from ..docker_worker_authority import docker_container_only_requested
+        if docker_container_only_requested():
+            return
         raise ValueError(
             "Orchestrated Codex sessions without an enforcing sandbox scope "
             "cannot use sandbox=danger-full-access; it would expose the "
             "isolated hook runtime to agent writes"
         )
 
+
+
+def _selected_container_options(sandbox_scope, kwargs):
+    from ..docker_worker_authority import docker_container_only_requested
+    if not docker_container_only_requested():
+        return sandbox_scope, kwargs
+    if kwargs.get("approval_mode") == "yolo":
+        raise ValueError("Docker container mode does not accept yolo")
+    return None, {**kwargs, "sandbox": "danger-full-access", "approval_mode": "full-auto"}
 
 class CodexProvider(CLIProvider):
     """Provider for OpenAI's Codex CLI.
@@ -232,6 +244,7 @@ class CodexProvider(CLIProvider):
                 "or sandbox scope to protect the hook policy"
             )
 
+        sandbox_scope, kwargs = _selected_container_options(sandbox_scope, kwargs)
         approval_mode = kwargs.get("approval_mode", "full-auto")
         _validate_orchestrated_safety(
             sandbox_scope=sandbox_scope,
@@ -271,11 +284,15 @@ class CodexProvider(CLIProvider):
             *scope_argv,
         ]
         if sandbox_scope is None:
-            self._append_approval_flags(
-                cmd,
-                approval_mode=approval_mode,
-                execution_mode=execution_mode,
-            )
+            if kwargs.get("sandbox") == "danger-full-access":
+                # The guard above admits this only for sealed Docker container mode.
+                cmd.extend(["--ask-for-approval", "never"])
+            else:
+                self._append_approval_flags(
+                    cmd,
+                    approval_mode=approval_mode,
+                    execution_mode=execution_mode,
+                )
 
         if execution_mode == "exec":
             cmd.append("exec")

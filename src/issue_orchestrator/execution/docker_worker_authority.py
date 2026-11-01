@@ -75,7 +75,80 @@ def _public_proof_bytes(path: Path) -> bytes:
     return bytes(raw)
 
 
-def _require_admission(packet: dict, outer: dict, inner: dict) -> None:
+def _check_container_mount(item: object, protected: set[Path], empty: Path, found: set[Path]) -> bool:
+    if (type(item) is not dict or set(item) != {"source", "target", "read_only"} or
+            type(item["source"]) is not str or type(item["target"]) is not str or
+            type(item["read_only"]) is not bool):
+        raise ValueError("Docker container-only mount entry differs")
+    source, target = Path(item["source"]), Path(item["target"])
+    if (not source.is_absolute() or not target.is_absolute() or
+            os.path.normpath(item["source"]) != item["source"] or
+            os.path.normpath(item["target"]) != item["target"]):
+        raise ValueError("Docker container-only mount path differs")
+    if not item["read_only"] and empty.is_relative_to(source):
+        raise ValueError("Docker readonly-empty source is writable")
+    if target in protected:
+        if target in found or item["read_only"] is not True or source not in (target, empty):
+            raise ValueError("Docker protected workspace overlay differs")
+        found.add(target)
+        return source == empty
+    elif source == empty or source != target:
+        raise ValueError("Docker container-only mount alias differs")
+    if any(target != root and target.is_relative_to(root) for root in protected):
+        raise ValueError("Docker protected workspace overlay has nested mount")
+    return False
+
+
+def require_container_only_mounts(packet: dict, *, worker: bool = False) -> None:
+    """Enforce selected overlays in the controller or worker namespace."""
+    mounts = packet.get("mounts")
+    workspace = Path(packet["working_dir"])
+    empty = Path("/srv/builder/tasks") / packet["builder_run_id"] / "readonly-empty"
+    if (not workspace.is_absolute() or not isinstance(mounts, list) or len(mounts) > 36):
+        raise ValueError("Docker container-only mount shape differs")
+    protected = {workspace / name for name in (".codex", ".agents", ".issue-orchestrator")}
+    found = set()
+    alias_used = False
+    for item in mounts:
+        alias_used = _check_container_mount(item, protected, empty, found) or alias_used
+    if found != protected:
+        raise ValueError("Docker protected workspace overlay is incomplete")
+    if worker:
+        _require_worker_mounts(protected)
+        paths = [Path(item['target']) for item in mounts if item['source'] == str(empty)]
+    else:
+        paths = [empty] if alias_used else []
+    for path in paths:
+        info = path.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or
+                stat.S_IMODE(info.st_mode) != 0o555 or path.resolve(strict=True) != path or
+                any(path.iterdir())):
+            raise ValueError("Docker readonly-empty source or target differs")
+
+
+
+def _require_worker_mounts(protected: set[Path]) -> None:
+    # The source is not mounted at its controller path inside the worker.
+    rows = Path('/proc/self/mountinfo').read_text().splitlines()
+    actual = []
+    for row in rows:
+        fields = row.split()
+        if len(fields) < 10 or '-' not in fields:
+            raise ValueError("Docker worker mount table is invalid")
+        target = Path(re.sub(r'\\([0-7]{3})', lambda m: chr(int(m.group(1), 8)), fields[4]))
+        actual.append((target, fields[5].split(',')))
+    for target in protected:
+        matching = [options for path, options in actual if path == target]
+        if len(matching) != 1 or 'ro' not in matching[0] or any(
+                path != target and path.is_relative_to(target) for path, _ in actual):
+            raise ValueError("Docker protected worker mount differs")
+
+def _require_selected_mounts(packet: dict, authorization: dict, *, worker: bool) -> None:
+    if authorization.get("kind") in CONTAINER_GRANT_KINDS:
+        require_container_only_mounts(packet, worker=worker)
+
+
+def _require_admission(packet: dict, outer: dict, inner: dict, *, worker: bool) -> None:
     if type(outer.get("schema_version")) is not int:
         raise ValueError("Docker worker admission version is invalid")
     if outer.get("schema_version") == 1:
@@ -105,6 +178,7 @@ def _require_admission(packet: dict, outer: dict, inner: dict) -> None:
             authorization.get("acceptance_sha256") != acceptance["sha256"]):
         raise ValueError("Docker root authorization belongs to another delivery subject")
     require_current_model_grant(packet, inner, authorization)
+    _require_selected_mounts(packet, authorization, worker=worker)
     _require_model_controls(packet)
 
 
@@ -124,13 +198,29 @@ def _require_model_controls(packet: dict) -> None:
         raise ValueError("Docker model admission held by durable " + command)
 
 
+CONTAINER_GRANT_KINDS = frozenset({"builder-docker-container-model-authorization", "builder-docker-container-synthetic-authorization"})
+SYNTHETIC_AUTH = '{"tokens":{"access_token":"disposable-test-only","id_token":"e30.e30.eA","refresh_token":"fixture","account_id":"fixture"}}'
+
+
 def require_current_model_grant(packet: dict, inner: dict, grant: dict) -> None:
     """Current finite permission is distinct from authentic retained material."""
     now = time.time_ns()
     bounds = inner.get('bounds', {})
     deadline, expiry = bounds.get('deadline_unix_ns'), grant.get('expires_unix_ns')
-    if (type(grant.get('schema_version')) is not int or grant['schema_version'] != 1 or
-            grant.get('kind') != 'builder-docker-model-authorization' or grant.get('role') != inner.get('role') or
+    legacy = type(grant.get('schema_version')) is int and grant['schema_version'] == 1 and grant.get('kind') == 'builder-docker-model-authorization'
+    container = (type(grant.get('schema_version')) is int and grant['schema_version'] == 2 and
+                 grant.get('kind') in CONTAINER_GRANT_KINDS and
+                 type(grant.get('max_model_requests')) is int and 1 <= grant['max_model_requests'] <= 100000)
+    synthetic = grant.get('kind') == 'builder-docker-container-synthetic-authorization'
+    if synthetic and (inner.get('repository', {}).get('name') != 'local/one' or
+            inner.get('issue', {}).get('number') != 42 or
+            not isinstance(grant.get('fixture_capability_sha256'), str) or
+            not re.fullmatch(r'[0-9a-f]{64}', grant['fixture_capability_sha256']) or
+            grant['fixture_capability_sha256'] != inner.get('capabilities', {}).get('capability_bundle_sha256')):
+        raise ValueError('Docker synthetic authorization differs from selected fixture')
+    if container and inner.get('role') == 'standard-review' and grant['max_model_requests'] > 256:
+        raise ValueError('Docker review model request allowance exceeds history proof bound')
+    if (not (legacy or container) or grant.get('role') != inner.get('role') or
             not isinstance(inner.get('capabilities', {}).get('model'), str) or not inner['capabilities']['model'] or
             grant.get('model') != inner['capabilities']['model'] or grant.get('bounds') != bounds or
             type(deadline) is not int or type(expiry) is not int or not now < deadline <= expiry <= now + 3600_000_000_000 or
@@ -138,7 +228,7 @@ def require_current_model_grant(packet: dict, inner: dict, grant: dict) -> None:
         raise ValueError('Docker current finite model authorization differs from selected execution')
 
 
-def _authority_environment(packet: dict) -> dict[str, str]:
+def _authority_environment(packet: dict, *, worker: bool = False) -> dict[str, str]:
     descriptor = packet.get("worker_authority")
     if descriptor is None:
         if "admission_proofs" in packet:
@@ -158,7 +248,7 @@ def _authority_environment(packet: dict) -> dict[str, str]:
     if canonical(outer) != outer_raw or canonical(inner) != inner_raw:
         raise ValueError("Docker worker authority encoding changed")
     _require_subject(packet, outer, inner, inner_path)
-    _require_admission(packet, outer, inner)
+    _require_admission(packet, outer, inner, worker=worker)
     return {"XORETS_EXECUTION_CONTRACT": str(outer_path), "XORETS_EXECUTION_DIGEST": sha256(outer_raw).hexdigest()}
 
 
@@ -252,6 +342,32 @@ def docker_model_auth_requested() -> bool:
     return True
 
 
+def docker_container_grant_kind() -> str | None:
+    """Prove the controller-selected root-sealed v2 Docker mode, never task input."""
+    template = os.environ.get("ISSUE_ORCHESTRATOR_DOCKER_TEMPLATE")
+    if not template:
+        return None
+    if not docker_model_auth_requested():
+        return None
+    raw = sealed_bytes(Path(template))
+    packet = json.loads(raw)
+    if canonical(packet) != raw:
+        raise ValueError("Docker model template encoding changed")
+    environment = _authority_environment(packet)
+    if not environment:
+        return None
+    outer, inner = _model_authority(packet, environment)
+    if outer.get("schema_version") != 2:
+        return None
+    grant = _public_proof(outer["authorization"], Path(packet["admission_proofs"]["authorization"]), packet)
+    require_current_model_grant(packet, inner, grant)
+    return grant.get("kind") if grant.get("schema_version") == 2 and grant.get("kind") in CONTAINER_GRANT_KINDS else None
+
+
+def docker_container_only_requested() -> bool:
+    return bool(docker_container_grant_kind())
+
+
 def _model_environment(packet: dict, provider: dict[str, str], environment: dict[str, str]) -> dict[str, str]:
     if not environment:
         if MODEL_AUTH_ENV in provider:
@@ -279,7 +395,7 @@ def _model_environment(packet: dict, provider: dict[str, str], environment: dict
 def worker_environment(packet: dict, provider: dict[str, str], callback_token: str | None) -> dict[str, str]:
     """Only explicit provider secrets, scoped callback and verified seals cross."""
     reserved = {*DEFAULT_FORBIDDEN_ENV_VARS, "ISSUE_ORCH_GITHUB_TOKEN", "XORETS_EXECUTION_CONTRACT",
-        "XORETS_EXECUTION_DIGEST", "ISSUE_ORCHESTRATOR_AGENT_CALLBACK_TOKEN", MODEL_LAUNCH_ENV, MODEL_PROJECTION_ENV}
+        "XORETS_EXECUTION_DIGEST", "ISSUE_ORCHESTRATOR_AGENT_CALLBACK_TOKEN", "ISSUE_ORCHESTRATOR_MODEL_GATEWAY_TOKEN", "ISSUE_ORCHESTRATOR_MODEL_GATEWAY_PID", "ISSUE_ORCHESTRATOR_MODEL_GATEWAY_BIRTH", "ISSUE_ORCHESTRATOR_DOCKER_PROVIDER_DIR", MODEL_LAUNCH_ENV, MODEL_PROJECTION_ENV}
     if any(name in reserved or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) or "\x00" in value
             for name, value in provider.items()):
         raise ValueError("Docker provider environment overrides controller authority")
@@ -287,7 +403,16 @@ def worker_environment(packet: dict, provider: dict[str, str], callback_token: s
             r"[A-Za-z0-9_-]{64}", provider.get("ISSUE_ORCHESTRATOR_COMPLETION_CAPABILITY", "")):
         raise ValueError("Docker worker authority requires allocation-bound completion capability")
     authority_environment = _authority_environment(packet)
-    environment = {**provider, **authority_environment, **_model_environment(packet, provider, authority_environment)}
+    if authority_environment:
+        outer, _ = _model_authority(packet, authority_environment)
+        if outer.get("schema_version") == 2:
+            grant = _public_proof(outer["authorization"], Path(packet["admission_proofs"]["authorization"]), packet)
+            if grant.get("kind") in CONTAINER_GRANT_KINDS and any(
+                    key not in {MODEL_AUTH_ENV, "ISSUE_ORCHESTRATOR_COMPLETION_CAPABILITY"} for key in provider):
+                raise ValueError("Docker container-only provider environment is not allowlisted")
+    model_environment = _model_environment(packet, provider, authority_environment)
+    worker_provider = {name: value for name, value in provider.items() if name != MODEL_AUTH_ENV}
+    environment = {**worker_provider, **authority_environment, **model_environment}
     if callback_token:
         if not re.fullmatch(r"[0-9a-f]{64}", callback_token):
             raise ValueError("Docker callback token is invalid")

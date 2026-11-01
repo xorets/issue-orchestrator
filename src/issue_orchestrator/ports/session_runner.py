@@ -8,6 +8,7 @@ This abstraction keeps terminal backend details out of the core.
 """
 
 from typing import NotRequired, Protocol, TypedDict
+from ..domain.session_run import SessionRunAssets
 
 
 class DiscoveredSession(TypedDict):
@@ -28,6 +29,14 @@ class SessionRunner(Protocol):
     Note: session_name is required - callers must compute the name explicitly
     (e.g., "issue-123" or "review-456"). No fallback logic in implementations.
     """
+
+    def activation_pending(self, session_name: str) -> bool:
+        """Whether an allocation must be activated after its custody is bound."""
+        ...
+
+    def activate_session(self, run: SessionRunAssets, session_name: str, fence: str) -> None:
+        """Activate a retained, admitted terminal allocation."""
+        ...
 
     def create_session(
         self,
@@ -188,6 +197,12 @@ class SessionRunner(Protocol):
 
 class NullSessionRunner:
     """No-op session runner for testing."""
+
+    def activation_pending(self, session_name: str) -> bool:
+        return False
+
+    def activate_session(self, run: SessionRunAssets, session_name: str, fence: str) -> None:
+        raise ValueError('No retained terminal allocation')
 
     def create_session(
         self,

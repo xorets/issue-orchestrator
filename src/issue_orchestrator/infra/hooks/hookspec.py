@@ -43,6 +43,14 @@ class TerminalSpec:
         """Bind engine-assigned assets to an already admitted terminal template."""
 
     @hookspec(firstresult=True)
+    def activate_session(self, run: SessionRunAssets, session_name: str, fence: str) -> bool | None:
+        """Activate an already bound, retained terminal allocation."""
+
+    @hookspec(firstresult=True)
+    def activation_pending(self, session_name: str) -> bool | None:
+        """Whether this exact retained allocation still requires activation."""
+
+    @hookspec(firstresult=True)
     def create_session(
         self,
         session_id: int,

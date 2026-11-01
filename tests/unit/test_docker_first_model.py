@@ -321,9 +321,13 @@ def test_facade_rechecks_shutdown_after_acquiring_shared_state_custody(sample_or
     actual_lock = orchestrator.state_lock
 
     class ShutdownAtLockAcquisition:
+        shutdown_committed = False
+
         def __enter__(self):
             actual_lock.acquire()
-            orchestrator.shutdown_requested = True
+            if not self.shutdown_committed:
+                self.shutdown_committed = True
+                orchestrator.shutdown_requested = True
 
         def __exit__(self, *_):
             actual_lock.release()
@@ -335,3 +339,206 @@ def test_facade_rechecks_shutdown_after_acquiring_shared_state_custody(sample_or
     assert owner.observe(42)['owner'] is None
     adapter.first_model_snapshot.assert_not_called()
     adapter.seal_first_model.assert_not_called()
+
+
+def test_model_gateway_requires_live_original_and_rechecks_custody(first_model_owner):
+    owner, session, adapter, command = first_model_owner
+    owner.first_model(session.run_assets, command)
+    observed = adapter.first_model_snapshot.return_value
+    gateway = {**observed, 'engine_run_id':command.run_id, 'contract_sha256':command.contract_sha256,
+               'launch_sha256':command.launch_sha256, 'model':'selected', 'grant_sha256':'9'*64,
+               'grant_kind':'builder-docker-container-model-authorization',
+               'max_model_requests':2, 'deadline_unix_ns':1, 'max_output_bytes':100,
+               'outer_contract_path':'/controller/outer','inner_contract_path':'/controller/inner',
+               'launch_path':'/controller/launch','controller_home':'/controller'}
+    adapter.model_gateway_snapshot.return_value = gateway
+    result=owner.model_gateway_context(session.run_assets)
+    assert result['engine_run_id']==command.run_id
+    assert result['claim_ref_sha']==owner.observe(42)['fence']
+    assert adapter.model_gateway_snapshot.call_count==2
+    adapter.model_gateway_snapshot.side_effect=[gateway,{}]
+    with pytest.raises(ValueError): owner.model_gateway_context(session.run_assets)
+
+
+def test_read_only_review_history_proves_selected_renewals(reviewer_owner, claim_http):
+    """Real claim adapter/history with only GitHub storage substituted."""
+    from hashlib import sha256
+    import json
+    from issue_orchestrator.adapters.github.claim_parser import format_claim_comment
+    from issue_orchestrator.adapters.github.ref_claim_adapter import CLAIM_REF_PREFIX
+    from issue_orchestrator.control.original_delivery_history import prove_history
+    owner, _, _, _, parent, anchor = reviewer_owner
+    selected = anchor
+    claim_http.seed_record(CLAIM_REF_PREFIX+'/issue-42', format_claim_comment(selected))
+    selected, selected_fence = owner.claims.original_claim(42)
+    assert owner.claims.renew_claim(42, selected.lease_id)
+    current, current_fence = owner.claims.original_claim(42)
+    assert current_fence != selected_fence
+    request = {'issue_number':42, 'parent':{'fence':selected_fence,
+        'original_inner_sha256':selected.original.contract_sha256, 'engine_run_id':selected.original.run_id,
+        'head_sha':parent['head_sha']}, 'expected_current_fence':current_fence,
+        'receipts':[{'claim_ref_sha':selected_fence,
+                     'reserved_unix_ns':__import__('time').time_ns()}]}
+    digest = sha256((json.dumps(request, sort_keys=True, indent=2)+'\n').encode()).hexdigest()
+    assert prove_history(owner.claims, owner.config.repo, request) == {
+        'status':'PASS', 'current_fence':current_fence, 'subject_sha256':digest}
+    bad = {**request, 'receipts':[{'claim_ref_sha':selected_fence,
+        'reserved_unix_ns':int(selected.expires_at.timestamp()*1_000_000_000)}]}
+    with pytest.raises(ValueError, match='chronology'):
+        prove_history(owner.claims, owner.config.repo, bad)
+    with pytest.raises(ValueError, match='current fence'):
+        prove_history(owner.claims, owner.config.repo, {**request, 'expected_current_fence':'f'*40})
+
+
+@pytest.mark.parametrize('fault', ['lease', 'owner', 'custody', 'head', 'missing', 'backwards', 'current-drift'])
+def test_read_only_review_history_refuses_foreign_or_drifting_claims(reviewer_owner, claim_http, fault):
+    """Use actual immutable Git-ref reader; only the GitHub transport is fake."""
+    from datetime import timedelta
+    from issue_orchestrator.adapters.github.claim_parser import format_claim_comment
+    from issue_orchestrator.adapters.github.ref_claim_adapter import CLAIM_REF_PREFIX
+    from issue_orchestrator.control.original_delivery_history import prove_history
+    owner, _, _, _, parent, anchor = reviewer_owner
+    selected = replace(anchor, original=replace(anchor.original, head_sha=parent['head_sha']))
+    claim_http.seed_record(CLAIM_REF_PREFIX+'/issue-42', format_claim_comment(selected))
+    selected, fence = owner.claims.original_claim(42)
+    request = {'issue_number':42, 'parent':{'fence':fence,
+        'original_inner_sha256':selected.original.contract_sha256, 'engine_run_id':selected.original.run_id,
+        'head_sha':selected.original.head_sha}, 'expected_current_fence':fence, 'receipts':[]}
+    if fault == 'missing':
+        request['parent']['fence'] = 'f'*40
+    elif fault == 'current-drift':
+        request['expected_current_fence'] = 'f'*40
+    else:
+        altered = selected
+        if fault == 'lease': altered = replace(selected, lease_id='foreign')
+        if fault == 'owner': altered = replace(selected, original=replace(selected.original, engine_pid=selected.original.engine_pid+1))
+        if fault == 'custody': altered = replace(selected, original=replace(selected.original, docker_custody=()))
+        if fault == 'head': altered = replace(selected, original=replace(selected.original, head_sha='3'*40))
+        if fault == 'backwards': altered = replace(selected, expires_at=selected.expires_at-timedelta(seconds=1))
+        claim_http.seed_record(CLAIM_REF_PREFIX+'/issue-42', format_claim_comment(altered))
+        _, request['expected_current_fence'] = owner.claims.original_claim(42)
+    from issue_orchestrator.domain.claim import ClaimFetchError
+    with pytest.raises((ValueError, ClaimFetchError)):
+        prove_history(owner.claims, owner.config.repo, request)
+
+
+@pytest.mark.asyncio
+async def test_history_mcp_returns_only_digest_and_current_fence(reviewer_owner, claim_http, monkeypatch):
+    from contextlib import contextmanager
+    from issue_orchestrator.adapters.github.claim_parser import format_claim_comment
+    from issue_orchestrator.adapters.github.ref_claim_adapter import CLAIM_REF_PREFIX
+    from issue_orchestrator.contracts.original_delivery_history import HistoryRequest
+    from issue_orchestrator.entrypoints import mcp_original_delivery
+    owner, _, _, _, parent, anchor = reviewer_owner
+    selected = replace(anchor, original=replace(anchor.original, head_sha=parent['head_sha']))
+    claim_http.seed_record(CLAIM_REF_PREFIX+'/issue-42', format_claim_comment(selected))
+    selected, fence = owner.claims.original_claim(42)
+    request = HistoryRequest(issue_number=42, parent={'fence':fence,
+        'original_inner_sha256':selected.original.contract_sha256, 'engine_run_id':selected.original.run_id,
+        'head_sha':selected.original.head_sha}, expected_current_fence=fence, receipts=[])
+    @contextmanager
+    def offline(_config):
+        yield owner
+    monkeypatch.setattr(mcp_original_delivery, 'build_offline_original_delivery_owner', offline)
+    monkeypatch.setattr(mcp_original_delivery.Config, 'load', lambda _: owner.config)
+    response = await mcp_original_delivery.original_delivery_history_result(Path('/fixture'), request)
+    assert not response.isError
+    assert set(response.structuredContent) == {'status', 'current_fence', 'subject_sha256'}
+    assert response.structuredContent['status'] == 'PASS'
+    assert response.structuredContent['current_fence'] == fence
+    assert selected.lease_id not in str(response.structuredContent)
+
+
+def test_read_only_history_refuses_current_ref_change_after_history_read(reviewer_owner, claim_http):
+    from issue_orchestrator.adapters.github.claim_parser import format_claim_comment
+    from issue_orchestrator.adapters.github.ref_claim_adapter import CLAIM_REF_PREFIX
+    from issue_orchestrator.control.original_delivery_history import prove_history
+    owner, _, _, _, parent, anchor = reviewer_owner
+    claim_http.seed_record(CLAIM_REF_PREFIX+'/issue-42', format_claim_comment(anchor))
+    selected, fence = owner.claims.original_claim(42)
+    request = {'issue_number':42, 'parent':{'fence':fence,
+        'original_inner_sha256':selected.original.contract_sha256, 'engine_run_id':selected.original.run_id,
+        'head_sha':parent['head_sha']}, 'expected_current_fence':fence, 'receipts':[]}
+    from unittest.mock import patch
+    with patch.object(owner.claims, 'original_claim', side_effect=[(selected, fence), (selected, 'f'*40)]):
+        with pytest.raises(ValueError, match='current fence changed'):
+            prove_history(owner.claims, owner.config.repo, request)
+
+
+def test_history_request_rejects_overflow_and_malformed_fence():
+    from pydantic import ValidationError
+    from issue_orchestrator.contracts.original_delivery_history import HistoryRequest
+    data = {'issue_number':42, 'parent':{'fence':'a'*40, 'original_inner_sha256':'b'*64,
+        'engine_run_id':'20261022-211413Z-'+'c'*32, 'head_sha':'d'*40},
+        'expected_current_fence':'e'*40, 'receipts':[]}
+    with pytest.raises(ValidationError):
+        HistoryRequest.model_validate({**data, 'receipts':[{'claim_ref_sha':'a'*40, 'reserved_unix_ns':1}]*257})
+    with pytest.raises(ValidationError):
+        HistoryRequest.model_validate({**data, 'expected_current_fence':'bad'})
+
+
+def test_history_reuses_same_immutable_receipt_snapshot(reviewer_owner, claim_http):
+    import time
+    from unittest.mock import patch
+    from issue_orchestrator.adapters.github.claim_parser import format_claim_comment
+    from issue_orchestrator.adapters.github.ref_claim_adapter import CLAIM_REF_PREFIX
+    from issue_orchestrator.control.original_delivery_history import prove_history
+    owner, _, _, _, parent, anchor = reviewer_owner
+    claim_http.seed_record(CLAIM_REF_PREFIX+'/issue-42', format_claim_comment(anchor))
+    selected, selected_fence = owner.claims.original_claim(42)
+    assert owner.claims.renew_claim(42, selected.lease_id)
+    _, fence = owner.claims.original_claim(42)
+    timestamp = time.time_ns()
+    request = {'issue_number':42, 'parent':{'fence':selected_fence,
+        'original_inner_sha256':selected.original.contract_sha256, 'engine_run_id':selected.original.run_id,
+        'head_sha':parent['head_sha']}, 'expected_current_fence':fence,
+        'receipts':[{'claim_ref_sha':selected_fence, 'reserved_unix_ns':timestamp} for _ in range(2)]}
+    with patch.object(owner.claims, 'original_claim_at', wraps=owner.claims.original_claim_at) as read:
+        assert prove_history(owner.claims, owner.config.repo, request)['status'] == 'PASS'
+        assert read.call_count == 1
+
+
+def test_prestart_registration_binds_fresh_claim_before_live_first_model(first_model_owner):
+    import asyncio
+    from pathlib import Path
+    from issue_orchestrator.domain.pause_state import PauseActor, PauseReason
+    from issue_orchestrator.entrypoints.mcp_original_delivery import original_delivery_result
+    owner, session, adapter, command = first_model_owner
+    owner.state.pause_state = owner.state.pause_state.running()
+    custody = adapter.capture.return_value
+    adapter.prestart_snapshot.return_value = {'contract_sha256':command.contract_sha256,
+        'launch_sha256':command.launch_sha256, 'custody':custody}
+    adapter.diagnostic.return_value = None
+    before = owner.observe(42)
+    assert before['owner'] is None
+    owner.register_prestart(session)
+    after = owner.observe(42)
+    assert after['fence'] != before['fence'] and after['lease_current']
+    assert after['owner']['run_id'] == session.run_assets.run_id
+    assert after['owner']['docker_custody'][0]['provider_exec_id'] == custody.provider_exec_id
+    class Api:
+        async def original_delivery(self, issue_number, operation, payload):
+            return owner.observe(issue_number)
+    result = asyncio.run(original_delivery_result(Api(), Path('/unused'), 42, 'observe', None, running=True))
+    assert not result.isError and result.structuredContent['fence'] == after['fence']
+    owner.state.pause_state = owner.state.pause_state.paused_now(reason=PauseReason.OPERATOR, actor=PauseActor.MCP)
+    assert owner.first_model(session.run_assets, command)['receipt']['claim_ref_sha'] == after['fence']
+
+
+@pytest.mark.parametrize('failure', ['cancel', 'cas', 'custody', 'foreign', 'expired'])
+def test_prestart_registration_refuses_changed_authority(first_model_owner, monkeypatch, failure):
+    from datetime import datetime, timedelta
+    owner, session, adapter, command = first_model_owner
+    owner.state.pause_state = owner.state.pause_state.running()
+    custody = adapter.capture.return_value
+    adapter.prestart_snapshot.return_value = {'contract_sha256':command.contract_sha256,
+        'launch_sha256':command.launch_sha256, 'custody':custody}
+    if failure == 'cancel': owner.repository.get_issue.return_value.labels.append('dispatch:cancel-requested')
+    if failure == 'cas': monkeypatch.setattr(owner.claims, 'bind_original', lambda *_:False)
+    if failure == 'custody': adapter.prestart_snapshot.side_effect = ValueError('custody changed')
+    if failure == 'foreign': session.lease_id = 'foreign'
+    if failure == 'expired':
+        claim, fence = owner.claims.original_claim(42)
+        monkeypatch.setattr(owner.claims, 'original_claim', lambda _: (replace(claim, expires_at=datetime.now() - timedelta(seconds=1)), fence))
+    with pytest.raises(ValueError): owner.register_prestart(session)
+    assert owner.observe(42)['owner'] is None

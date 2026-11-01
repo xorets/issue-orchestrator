@@ -39,6 +39,8 @@ import inspect
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
 from ..contracts.original_delivery import OriginalDeliveryRequest
+from ..contracts.original_delivery_history import HistoryRequest
+from .mcp_original_delivery import original_delivery_history_result
 from .mcp_original_delivery import original_delivery_result
 
 from ..domain.pause_state import PauseActor
@@ -265,6 +267,7 @@ MCP_TOOLS: tuple[tuple[str, str], ...] = (
     # running agent's prompt via that tool.
     ("orchestrator.session.kill", "tool_session_kill"),
     ("orchestrator.original_delivery", "tool_original_delivery"),
+    ("orchestrator.original_delivery_history", "tool_original_delivery_history"),
     ("orchestrator.issue.retry", "tool_issue_retry"),
     ("orchestrator.session.focus", "tool_session_focus"),
     ("orchestrator.urls", "tool_urls"),
@@ -448,6 +451,13 @@ class McpApp:
         """Observe/bind current original custody, admit bounded correction, or reconcile its terminal lease."""
         return await original_delivery_result(self._api, self._settings.config_path, issue_number,
             operation, payload, running=self._client.status().state == "running")
+
+    async def tool_original_delivery_history(self, issue_number: int, parent: dict, expected_current_fence: str,
+                                             receipts: list[dict]) -> CallToolResult:
+        """Verify bounded original-claim renewal history without mutation."""
+        return await original_delivery_history_result(self._settings.config_path,
+            HistoryRequest.model_validate({'issue_number':issue_number, 'parent':parent,
+                'expected_current_fence':expected_current_fence, 'receipts':receipts}))
 
     async def tool_session_kill(self, issue_number: int) -> dict[str, Any]:
         return await self._safe(

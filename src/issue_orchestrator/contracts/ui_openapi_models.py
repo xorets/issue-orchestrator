@@ -125,6 +125,39 @@ class CapturedOutputAvailabilityPayload(BaseModel):
     stderr_available: bool = Field(..., strict=True)
     stdout_available: bool = Field(..., strict=True)
 
+class ChildProviderDiagnosticPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    elapsed_ms: int = Field(..., ge=0, le=86400000, strict=True)
+    exception_type: Literal['TimeoutExpired', 'KeyboardInterrupt', 'InterruptedError', 'FileNotFoundError', 'PermissionError', 'OSError', 'SubprocessError'] | None
+    exit_code: int | None
+    kind: Literal['builder-codex-child-diagnostic']
+    launch_sha256: str
+    own_timer_fired: bool = Field(..., strict=True)
+    phase: Literal['codex-child']
+    reason: Literal['nonzero', 'timeout', 'interrupted', 'spawn_failed']
+    remaining_ms: int = Field(..., ge=0, le=86400000, strict=True)
+    run_id: str
+    schema_version: Literal[1]
+    secondary: list[Literal['record_failed', 'cleanup_failed']] = Field(..., max_length=2)
+    source: Literal['slot', 'marker']
+    stderr_bytes: int | None
+    stderr_sha256: str | None
+    stderr_truncated: bool | None
+
+    @field_validator('launch_sha256')
+    @classmethod
+    def _validate_launch_sha256_pattern(cls, value: Any) -> Any:
+        if value is not None and re.search('^[0-9a-f]{64}$', value) is None:
+            raise ValueError("launch_sha256 must match '^[0-9a-f]{64}$'")
+        return value
+
+    @field_validator('run_id')
+    @classmethod
+    def _validate_run_id_pattern(cls, value: Any) -> Any:
+        if value is not None and re.search('^[0-9]{8}-[0-9]{6}Z-[0-9a-f]{32}$', value) is None:
+            raise ValueError("run_id must match '^[0-9]{8}-[0-9]{6}Z-[0-9a-f]{32}$'")
+        return value
+
 class ClientCapabilitiesPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
     focus_session: bool = Field(..., strict=True)
@@ -402,6 +435,33 @@ class DockerCustodyPayload(BaseModel):
     provider_exec_id: str
     run_id: str
     schema_version: Literal[1]
+
+class DockerNeverStartedMissingExec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    kind: Literal['exact-exec-not-found']
+    status: Literal[404]
+
+class DockerNeverStartedObservation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    exit_code: None
+    pid: Literal[0]
+    running: bool = Field(..., strict=True)
+
+class DockerNeverStartedPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    after: DockerNeverStartedObservation | DockerNeverStartedMissingExec
+    before: DockerNeverStartedObservation
+    container_id: str
+    contract_sha256: str
+    controller_container_id: str
+    daemon_id: str
+    disposition: Literal['cancelled-before-exec-start']
+    kind: Literal['docker-never-started']
+    launch_sha256: str
+    provider_exec_id: str
+    run_id: str
+    schema_version: Literal[1]
+    stop_wait: Literal['completed']
 
 class DoctorCheckPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -1153,11 +1213,13 @@ class OriginalDeliveryOwnerPayload(BaseModel):
 class OriginalDeliveryPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
     claimant: str
+    diagnostic: ProviderDiagnosticPayload | None = None
     expires_at: str
     fence: str
     issue_number: int = Field(..., ge=1, strict=True)
     lease_current: bool = Field(..., strict=True)
     lease_id: str
+    never_started: DockerNeverStartedPayload | None = None
     owner: OriginalDeliveryOwnerPayload | None
     remote_released: bool = Field(..., strict=True)
 
@@ -1243,6 +1305,38 @@ class ProviderCircuitStatusPayload(BaseModel):
     open_providers: list[str]
     status_unavailable: bool = Field(..., strict=True)
     summary_text: str
+
+class ProviderDiagnosticPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    child: ChildProviderDiagnosticPayload | None = None
+    launch_sha256: str
+    primary: ProviderPrimaryDiagnosticPayload | None
+    run_id: str
+    secondary: list[ProviderSecondaryDiagnosticPayload] = Field(..., max_length=4)
+
+    @field_validator('launch_sha256')
+    @classmethod
+    def _validate_launch_sha256_pattern(cls, value: Any) -> Any:
+        if value is not None and re.search('^[0-9a-f]{64}$', value) is None:
+            raise ValueError("launch_sha256 must match '^[0-9a-f]{64}$'")
+        return value
+
+    @field_validator('run_id')
+    @classmethod
+    def _validate_run_id_pattern(cls, value: Any) -> Any:
+        if value is not None and re.search('^[0-9]{8}-[0-9]{6}Z-[0-9a-f]{32}$', value) is None:
+            raise ValueError("run_id must match '^[0-9]{8}-[0-9]{6}Z-[0-9a-f]{32}$'")
+        return value
+
+class ProviderPrimaryDiagnosticPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    phase: Literal['provider']
+    reason: Literal['provider_nonzero', 'provider_timeout', 'provider_cancelled', 'provider_auth', 'provider_quota', 'provider_transient', 'controller_deadline']
+
+class ProviderSecondaryDiagnosticPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    phase: Literal['status', 'record', 'stop', 'output', 'transport']
+    reason: Literal['status_unavailable', 'record_failed', 'stop_unverified', 'output_failed', 'transport_failed', 'record_unavailable']
 
 class PublishFailedCodingAttemptPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")

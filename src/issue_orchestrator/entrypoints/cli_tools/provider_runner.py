@@ -15,6 +15,7 @@ from pathlib import Path
 
 from issue_orchestrator.execution.subprocess_runner import SubprocessAgentRunner
 from issue_orchestrator.execution.agent_runner_types import AgentSpec, RetryPolicy
+from issue_orchestrator.execution.docker_codex_runner import DockerCodexRunner
 from issue_orchestrator.infra.env import ENV_PREFIX
 from issue_orchestrator.infra.provider_resilience import ProviderStatus, now_iso, write_provider_status
 from issue_orchestrator.ports.provider_resilience import ProviderErrorType
@@ -59,7 +60,12 @@ def _build_command(command: str) -> list[str]:
 
 
 def _summarize_error(stderr: str) -> str | None:
-    text = stderr.strip()
+    # Keep ambiguity visible: whitespace or other output must not become a
+    # valid diagnostic marker through the normal summary normalization.
+    if os.environ.get("ISSUE_ORCHESTRATOR_CALLBACK_SCOPE") == "docker" and "ACPCHILD1|" in stderr:
+        text = stderr.removesuffix("\n")
+    else:
+        text = stderr.strip()
     if not text:
         return None
     if len(text) > 300:
@@ -71,7 +77,12 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv or sys.argv[1:])
 
     run_dir = _resolve_run_dir(args)
+    if os.environ.get("ISSUE_ORCHESTRATOR_CALLBACK_SCOPE") == "docker":
+        from issue_orchestrator.execution.docker_provider_status import worker_slot
+        run_dir = worker_slot(os.environ["ISSUE_ORCHESTRATOR_DOCKER_PROVIDER_DIR"], run_dir)
     output_dir = run_dir / "provider-runner"
+    if os.environ.get("ISSUE_ORCHESTRATOR_CALLBACK_SCOPE") == "docker":
+        output_dir.mkdir(mode=0o700)  # The authenticated worker slot is private and one-shot.
 
     provider = args.provider or detect_ai_system_from_command(args.command) or None
     retry_policy = RetryPolicy(
@@ -81,7 +92,8 @@ def main(argv: list[str] | None = None) -> int:
         jitter=args.jitter,
     )
 
-    runner = SubprocessAgentRunner()
+    runner = (DockerCodexRunner() if os.environ.get("ISSUE_ORCHESTRATOR_CALLBACK_SCOPE") == "docker"
+              and provider is not None and provider.partition(":")[0] == "codex" else SubprocessAgentRunner())
     result = runner.run(AgentSpec(
         command=_build_command(args.command),
         working_dir=Path.cwd(),

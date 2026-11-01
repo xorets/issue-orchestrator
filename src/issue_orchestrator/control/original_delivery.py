@@ -19,11 +19,16 @@ from ..domain.session_run import SessionRunAssets
 from uuid import uuid4
 import re
 import time
+from .original_delivery_history import require_expiry_only
 from .issue_termination import IssueTerminationOutcome
 from .pause_facade import require_model_preflight_barrier, require_operator_barrier
 
 if TYPE_CHECKING:
     from ..infra.config import Config
+
+
+class ModelGatewayGrantUnavailable(ValueError):
+    """The active allocation does not carry a supported model grant."""
 
 
 @dataclass(frozen=True)
@@ -94,7 +99,7 @@ class OriginalDeliveryOwner:
         # Recheck the live daemon after registration and before producing evidence.
         if self.docker_custody.first_model_snapshot(session, command.contract_sha256, command.launch_sha256) != snapshot:
             raise ValueError("Docker first-model custody changed during registration")
-        current = self._review_original(session, snapshot) if reviewing else self.observe(session.issue.number)
+        current = self._review_original(session, snapshot) if reviewing else self.observe(session.issue.number, include_diagnostic=False)
         if reviewing:
             original = current  # Both reads independently authenticated only expiry renewal from the anchor.
         elif current != original:
@@ -109,6 +114,57 @@ class OriginalDeliveryOwner:
             receipt['review_parent'] = snapshot['review_parent']
         evidence = self.docker_custody.seal_first_model(session, receipt)
         return {"schema_version": 1, "kind": "builder-docker-first-model", "receipt": receipt, "controller_evidence": evidence}
+
+    def model_gateway_context(self, run: SessionRunAssets, previous: dict[str, object] | None = None) -> dict[str, object]:
+        """Bind a live allocated Docker request without creating or resuming a hold."""
+        require_model_preflight_barrier(self.state)
+        if self.docker_custody is None or self.config.terminal_adapter != "issue_orchestrator.execution.terminal_docker:DockerPlugin":
+            raise ValueError("Docker model gateway custody unavailable")
+        assert self.state is not None
+        sessions = [session for session in self.state.active_sessions if session.run_assets == run]
+        if len(sessions) != 1:
+            raise ValueError("Docker model gateway allocation unavailable")
+        session = sessions[0]
+        snapshot = self.docker_custody.model_gateway_snapshot(session)
+        if snapshot['engine_run_id'] != run.run_id:
+            raise ValueError("Docker model gateway allocation changed")
+        if session.key.kind.capabilities.reports_verdict:
+            if snapshot['role'] != 'standard-review':
+                raise ValueError("Docker model gateway review role differs")
+            original = self._review_original(session, snapshot)
+        else:
+            if not session.key.kind.capabilities.open_pr_means_done or session.rework_cycle or snapshot['role'] != 'standard-implementation':
+                raise ValueError("Docker model gateway role differs")
+            original = self.observe(session.issue.number, include_diagnostic=False)
+            owner = original['owner']
+            if (not isinstance(owner, dict) or owner['run_id'] != run.run_id or
+                    owner['contract_sha256'] != snapshot['contract_sha256'] or owner['cancelled'] or owner['released'] or
+                    not original['lease_current'] or original['lease_id'] != session.lease_id or
+                    tuple(owner['docker_custody']) != (snapshot['custody'],)):
+                raise ValueError("Docker model gateway original claim or custody differs")
+        if self.docker_custody.model_gateway_snapshot(session) != snapshot:
+            raise ValueError("Docker model gateway custody changed during validation")
+        again = self._review_original(session, snapshot) if session.key.kind.capabilities.reports_verdict else self.observe(session.issue.number, include_diagnostic=False)
+        if again != original:
+            raise ValueError("Docker model gateway claim changed during validation")
+        worker = snapshot['worker']
+        keys = ('engine_run_id','builder_run_id','role','model','contract_sha256','outer_sha256','launch_sha256',
+                'projection_sha256','grant_sha256','grant_kind','deadline_unix_ns','max_model_requests','max_output_bytes',
+                'outer_contract_path','inner_contract_path','launch_path','controller_home')
+        context = {**{key:snapshot[key] for key in keys}, 'issue_number':session.issue.number,
+                'claim_ref_sha':original['fence'], **{key:worker[key] for key in
+                    ('daemon_id','container_id','provider_exec_id','image_id')}}
+        return self.admit_model_gateway_context(context, previous)
+
+    @staticmethod
+    def admit_model_gateway_context(context: dict[str, object], previous: dict[str, object] | None) -> dict[str, object]:
+        if previous is not None and {k: v for k, v in context.items() if k != 'claim_ref_sha'} != {
+                k: v for k, v in previous.items() if k != 'claim_ref_sha'}:
+            raise ValueError('Docker model gateway authority changed')
+        if previous is not None and context.get('grant_kind') not in {'builder-docker-container-model-authorization',
+                'builder-docker-container-synthetic-authorization'}:
+            raise ModelGatewayGrantUnavailable('Docker model grant kind unavailable')
+        return context
 
     def first_model_preflight(self, run: SessionRunAssets, command: DockerFirstModelCommand) -> tuple[Session, dict[str, Any]]:
         """Only the exact active admitted allocation may request its fixed planner barrier."""
@@ -147,7 +203,7 @@ class OriginalDeliveryOwner:
             self.execute(session.issue.number, OriginalDeliveryCommand("register", str(observed["lease_id"]),
                 str(observed["fence"]), command.contract_sha256, command.run_id,
                 "docker-first-model-" + uuid4().hex, session_name=session.terminal_id, started_at=run.started_at))
-        original = self.observe(session.issue.number)
+        original = self.observe(session.issue.number, include_diagnostic=False)
         owner = original["owner"]
         if (not isinstance(owner, dict) or owner["run_id"] != run.run_id or
                 owner["contract_sha256"] != command.contract_sha256 or owner["cancelled"] or owner["released"] or
@@ -165,8 +221,7 @@ class OriginalDeliveryOwner:
         except ClaimFetchError as error:
             raise ValueError('Docker REVIEW selection anchor is unavailable') from error
         claim, fence = self.claims.original_claim(session.issue.number)
-        if replace(claim, expires_at=anchor.expires_at) != anchor or claim.expires_at < anchor.expires_at:
-            raise ValueError('Docker REVIEW permits only the selected lease expiry renewal')
+        require_expiry_only(anchor, claim)
         owner = claim.original
         if (owner is None or owner.execution_backend != 'docker' or owner.repository != self.config.repo or
                 owner.contract_sha256 != parent['original_inner_sha256'] or owner.run_id != parent['engine_run_id'] or
@@ -207,15 +262,22 @@ class OriginalDeliveryOwner:
             return self.claims.bind_original_docker_custody(issue_number, lease_id, fence, captured.docker_custody)
         return self.claims.bind_original_processes(issue_number, lease_id, fence, captured.process_roots)
 
-    def observe(self, issue_number: int) -> dict[str, object]:
+    def observe(self, issue_number: int, *, include_diagnostic: bool = True) -> dict[str, object]:
         claim, fence = self.claims.original_claim(issue_number)
         if claim.original is not None:
             self._require_scope(claim.original)
-        return {"issue_number": issue_number, "lease_id": claim.lease_id, "claimant": claim.claimant,
+        result: dict[str, object] = {"issue_number": issue_number, "lease_id": claim.lease_id, "claimant": claim.claimant,
                 "fence": fence, "lease_current": not claim.is_expired(),
                 "expires_at": claim.expires_at.isoformat(),
                 "owner": None if claim.original is None else claim.original.to_dict(),
                 "remote_released": claim.original is not None and claim.original.released}
+        if include_diagnostic and claim.original is not None and claim.original.execution_backend == "docker" and self.docker_custody is not None:
+            result["diagnostic"] = self.docker_custody.diagnostic(claim.original)
+            if claim.original.cancelled:
+                proof = self.docker_custody.never_started(claim.original)
+                if proof is not None:
+                    result['never_started'] = proof
+        return result
 
     def execute(self, issue_number: int, command: OriginalDeliveryCommand) -> dict[str, object]:
         claim, fence = self.claims.original_claim(issue_number)
@@ -324,6 +386,45 @@ class OriginalDeliveryOwner:
     def _register(self, issue_number: int, command: OriginalDeliveryCommand, claim: Claim) -> dict[str, object]:
         if self.state is None or not self.state.paused or str(self.state.pause_state.reason) != "operator":
             raise ValueError("Original engine requires current OPERATOR hold")
+        return self._register_bound(issue_number, command, claim)
+
+    def register_prestart(self, session: Session) -> str:
+        """Bind the retained implementation allocation before its provider starts."""
+        if self.state is None or self.docker_custody is None:
+            raise ValueError('Docker original pre-start owner unavailable')
+        if [s for s in self.state.active_sessions if s.issue.number == session.issue.number] != [session]:
+            raise ValueError('Docker pre-start active session changed')
+        snapshot = self.docker_custody.prestart_snapshot(session)
+        claim, fence = self.claims.original_claim(session.issue.number)
+        if claim.original is not None or claim.lease_id != session.lease_id or claim.is_expired():
+            raise ValueError('Docker pre-start claim differs')
+        run = session.run_assets
+        command = OriginalDeliveryCommand('register', claim.lease_id, fence, snapshot['contract_sha256'],
+            run.run_id, 'docker-prestart-' + uuid4().hex, session_name=session.terminal_id, started_at=run.started_at)
+        self._register_bound(session.issue.number, command, claim)
+        _, fence = self.claims.original_claim(session.issue.number)
+        self.require_prestart_current(session, fence)
+        return fence
+
+    def require_prestart_current(self, session: Session, fence: str) -> None:
+        if self.state is None or self.docker_custody is None:
+            raise ValueError('Docker original pre-start owner unavailable')
+        if [s for s in self.state.active_sessions if s.issue.number == session.issue.number] != [session]:
+            raise ValueError('Docker pre-start active session changed')
+        snapshot = self.docker_custody.prestart_snapshot(session)
+        self._require_unused_budget(session.issue.number)
+        fresh, current_fence = self.claims.original_claim(session.issue.number)
+        owner = fresh.original
+        if (current_fence != fence or fresh.lease_id != session.lease_id or fresh.is_expired() or owner is None or
+                owner.cancelled or owner.released or owner.run_id != session.run_assets.run_id or
+                owner.contract_sha256 != snapshot['contract_sha256'] or owner.docker_custody != (snapshot['custody'],) or
+                self.identity() != (owner.engine_host, owner.engine_pid, owner.engine_birth) or
+                self.docker_custody.prestart_snapshot(session) != snapshot):
+            raise ValueError('Docker pre-start owner or custody changed')
+        self._require_scope(owner)
+        self._require_live(owner, fresh)
+
+    def _register_bound(self, issue_number: int, command: OriginalDeliveryCommand, claim: Claim) -> dict[str, object]:
         sessions = [s for s in self.state.active_sessions if s.issue.number == issue_number]
         if len(sessions) != 1:
             raise ValueError("One current original session is required")

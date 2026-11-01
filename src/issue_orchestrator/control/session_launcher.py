@@ -87,7 +87,7 @@ from ..ports.coder_prompt import (
     NO_CODER_PROMPT_ADDENDUM,
 )
 from ..ports.session_output import SessionOutput
-from ..ports.event_sink import SessionStartedEventPayload, make_session_started_event
+from ..ports.event_sink import make_session_started_event
 from ..ports.worktree_manager import WorktreeManager, WorktreeReuseOptions
 from ..ports.event_sink import make_run_scoped_event, make_trace_event
 from .provider_availability import ProviderAvailabilityPolicy
@@ -106,6 +106,8 @@ from .launch_transaction import (
     LaunchWorkClaim,
     SpawnGuard,
     abandon_claim_unless_spawned,
+    activate_prepared_original,
+    publish_issue_launch,
 )
 from .recovery_review_hold import NO_RECOVERY_HOLDS, RecoveryHolds
 from .session_launch_types import (
@@ -164,6 +166,10 @@ class SessionLauncher:
     - get_session_machine: Callback to get/create session state machines
     - get_review_machine: Callback to get/create review state machines
     """
+
+    def docker_model_credentials(self) -> dict[str, str]:
+        """Resolve selected controller-only Docker credentials through the port."""
+        return dict(self._provider_credentials.session_env("codex", docker=True))
 
     def __init__(
         self,
@@ -664,6 +670,7 @@ class SessionLauncher:
         *,
         tech_lead_scope: "TechLeadLaunchScope | None" = None,
         work_claim: LaunchWorkClaim = NO_LAUNCH_WORK_CLAIM,
+        activate_original: Callable[[Session], None] | None = None,
     ) -> LaunchResult:
         """Launch a session for an issue.
 
@@ -1103,30 +1110,17 @@ class SessionLauncher:
                 tech_lead_scope=tech_lead_scope,
             )
 
+            if not activate_prepared_original(self._session_preparation, session, active_sessions,
+                                              self.session_manager, activate_original):
+                return LaunchResult(None, False, 'Docker original activation unavailable')
+
             total_time = time.time() - launch_start
             logger.info(
                 issue_log(issue.number, "Session launched: type=%s agent=%s time=%.1fs"),
                 kind.value, issue.agent_type, total_time
             )
 
-            full_completion_path = (worktree_path / completion_path).resolve()
-            session_started_payload: SessionStartedEventPayload = {
-                "issue_number": issue.number,
-                "session_id": session_name,
-                "agent": issue.agent_type,
-                "task": kind.value,
-                "worktree_path": str(worktree_path),
-                "branch_name": branch_name,
-                "reset_from_scratch": from_scratch_pending,
-                "run_id": run.run_id,
-                "run_dir": str(run.run_dir),
-                "completion_path": completion_path,
-                "completion_path_absolute": str(full_completion_path),
-                "session_prompt_path": prompt_path,
-            }
-            if from_scratch_pending:
-                session_started_payload["review_cache_boundary_started_at"] = run.started_at
-            self.events.publish(make_session_started_event(session_started_payload))
+            publish_issue_launch(self.events, session, issue.agent_type, prompt_path, from_scratch=from_scratch_pending)
 
             # State machine transitions
             self._trigger_issue_session_state_transitions(issue, session_name, agent_config.timeout_minutes)

@@ -229,6 +229,7 @@ server is bound to.
 | `orchestrator.session.claude_log` | `issue_number`, `limit: int = 200` | `{"log_path", "issue_number", "run_dir", "entry_count", "entries"}`. `entries` are parsed JSONL records from the agent's session log, truncated to `limit`. Unparseable lines come back as `{"_raw", "_parse_error": true}`. |
 | `orchestrator.session.orchestrator_log` | `issue_number` | `{"filtered_log_path", "full_log_path", "issue_number"}`. Writes an issue-scoped tail (up to 500 lines) of the orchestrator log next to the run and returns its path. |
 | `orchestrator.original_delivery` | `issue_number`, `operation`, `payload` | [Original owner custody](original_delivery.md): fenced correction admission and terminal reconciliation; observe returns current remote authority. |
+| `orchestrator.original_delivery_history` | `issue_number`, `parent`, `expected_current_fence`, `receipts` | Read-only bounded expiry-only claim snapshot proof; returns status, current fence, and request digest. |
 | `orchestrator.session.kill` | `issue_number` | `{"status": "terminated", "issue_number", "title", "killed_sessions", "hold_label", "errors"}`. Terminates the session **and applies a hold label** so the orchestrator does not immediately relaunch it. |
 | `orchestrator.session.focus` | `issue_number` | `{"status": "focused", "issue_number"}`. Brings the agent's terminal to the foreground. Only meaningful for terminal backends that support focus (not the `subprocess` backend). |
 

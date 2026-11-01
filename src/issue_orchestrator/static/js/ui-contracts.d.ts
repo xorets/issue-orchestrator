@@ -111,6 +111,25 @@ export interface CapturedOutputAvailabilityPayload {
   stdout_available: boolean;
 }
 
+export interface ChildProviderDiagnosticPayload {
+  elapsed_ms: number;
+  exception_type: "TimeoutExpired" | "KeyboardInterrupt" | "InterruptedError" | "FileNotFoundError" | "PermissionError" | "OSError" | "SubprocessError" | null;
+  exit_code: number | null;
+  kind: "builder-codex-child-diagnostic";
+  launch_sha256: string;
+  own_timer_fired: boolean;
+  phase: "codex-child";
+  reason: "nonzero" | "timeout" | "interrupted" | "spawn_failed";
+  remaining_ms: number;
+  run_id: string;
+  schema_version: 1;
+  secondary: ("record_failed" | "cleanup_failed")[];
+  source: "slot" | "marker";
+  stderr_bytes: number | null;
+  stderr_sha256: string | null;
+  stderr_truncated: boolean | null;
+}
+
 export interface ClientCapabilitiesPayload {
   focus_session: boolean;
   host_platform: string;
@@ -367,6 +386,33 @@ export interface DockerCustodyPayload {
   provider_exec_id: string;
   run_id: string;
   schema_version: 1;
+}
+
+export interface DockerNeverStartedMissingExec {
+  kind: "exact-exec-not-found";
+  status: 404;
+}
+
+export interface DockerNeverStartedObservation {
+  exit_code: null;
+  pid: 0;
+  running: boolean;
+}
+
+export interface DockerNeverStartedPayload {
+  after: DockerNeverStartedObservation | DockerNeverStartedMissingExec;
+  before: DockerNeverStartedObservation;
+  container_id: string;
+  contract_sha256: string;
+  controller_container_id: string;
+  daemon_id: string;
+  disposition: "cancelled-before-exec-start";
+  kind: "docker-never-started";
+  launch_sha256: string;
+  provider_exec_id: string;
+  run_id: string;
+  schema_version: 1;
+  stop_wait: "completed";
 }
 
 export interface DoctorCheckPayload {
@@ -1071,11 +1117,13 @@ export interface OriginalDeliveryOwnerPayload {
 
 export interface OriginalDeliveryPayload {
   claimant: string;
+  diagnostic?: ProviderDiagnosticPayload | null;
   expires_at: string;
   fence: string;
   issue_number: number;
   lease_current: boolean;
   lease_id: string;
+  never_started?: DockerNeverStartedPayload;
   owner: OriginalDeliveryOwnerPayload | null;
   remote_released: boolean;
 }
@@ -1154,6 +1202,24 @@ export interface ProviderCircuitStatusPayload {
   open_providers: string[];
   status_unavailable: boolean;
   summary_text: string;
+}
+
+export interface ProviderDiagnosticPayload {
+  child?: ChildProviderDiagnosticPayload;
+  launch_sha256: string;
+  primary: ProviderPrimaryDiagnosticPayload | null;
+  run_id: string;
+  secondary: ProviderSecondaryDiagnosticPayload[];
+}
+
+export interface ProviderPrimaryDiagnosticPayload {
+  phase: "provider";
+  reason: "provider_nonzero" | "provider_timeout" | "provider_cancelled" | "provider_auth" | "provider_quota" | "provider_transient" | "controller_deadline";
+}
+
+export interface ProviderSecondaryDiagnosticPayload {
+  phase: "status" | "record" | "stop" | "output" | "transport";
+  reason: "status_unavailable" | "record_failed" | "stop_unverified" | "output_failed" | "transport_failed" | "record_unavailable";
 }
 
 export interface PublishFailedCodingAttemptPayload {

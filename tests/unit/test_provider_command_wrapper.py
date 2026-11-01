@@ -103,3 +103,36 @@ def test_one_shot_wrapper_reports_the_observed_lane_and_recovery_mode(
     argv = shlex.split(wrapped)
     assert argv[argv.index("--provider") + 1] == "codex:spark"
     assert "--quota-heals-on-timer" in argv
+
+
+
+def test_native_ignores_untrusted_docker_provider_path(tmp_path: Path, monkeypatch) -> None:
+    import os
+    import subprocess
+    run_dir = tmp_path / 'controller-run'; run_dir.mkdir(mode=0o700)
+    untrusted = tmp_path / 'untrusted'; untrusted.mkdir(mode=0o700)
+    agent = AgentConfig(prompt_path=tmp_path / 'prompt.md', provider='codex', provider_args={'execution_mode':'exec'})
+    command = _wrapper().wrap('true', agent, run_dir)
+    monkeypatch.delenv('ISSUE_ORCHESTRATOR_CALLBACK_SCOPE', raising=False)
+    env = {**os.environ, 'ISSUE_ORCHESTRATOR_DOCKER_PROVIDER_DIR':str(untrusted),
+        'PYTHONPATH':str(Path(__file__).resolve().parents[2] / 'src')}
+    result = subprocess.run(shlex.split(command), cwd=tmp_path, env=env, capture_output=True, timeout=15)
+    assert result.returncode == 0
+    assert (run_dir / 'provider-status.json').exists()
+    assert not (untrusted / 'provider-status.json').exists()
+
+
+def test_forged_docker_provider_override_without_authority_refuses(tmp_path: Path) -> None:
+    import os
+    import subprocess
+    run_dir = tmp_path / 'controller-run'; run_dir.mkdir(mode=0o700)
+    untrusted = tmp_path / 'untrusted'; untrusted.mkdir(mode=0o700)
+    agent = AgentConfig(prompt_path=tmp_path / 'prompt.md', provider='codex', provider_args={'execution_mode':'exec'})
+    command = _wrapper().wrap('true', agent, run_dir)
+    env = {**os.environ, 'ISSUE_ORCHESTRATOR_CALLBACK_SCOPE':'docker',
+        'ISSUE_ORCHESTRATOR_DOCKER_PROVIDER_DIR':str(untrusted),
+        'PYTHONPATH':str(Path(__file__).resolve().parents[2] / 'src')}
+    env.pop('XORETS_DOCKER_LAUNCH_JSON', None)
+    result = subprocess.run(shlex.split(command), cwd=tmp_path, env=env, capture_output=True, timeout=15)
+    assert result.returncode != 0
+    assert not (untrusted / 'provider-status.json').exists()

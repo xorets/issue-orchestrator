@@ -1,6 +1,7 @@
 """Unit tests for the scheduler module."""
 
 from pathlib import Path
+from threading import RLock
 import pytest
 from unittest.mock import MagicMock, patch
 from issue_orchestrator.control.needs_human_block import (
@@ -1424,6 +1425,7 @@ class TestLaunchSessionDependencyCAS:
 
         with patch.object(Orchestrator, '__init__', lambda self, *args, **kwargs: None):
             orch = Orchestrator.__new__(Orchestrator)
+            orch.state_lock = RLock()
             orch.config = config
             orch.state = MagicMock()
             orch.state.active_sessions = []
@@ -1529,6 +1531,7 @@ class TestLaunchSessionDependencyCAS:
 
         with patch.object(Orchestrator, '__init__', lambda self, *args, **kwargs: None):
             orch = Orchestrator.__new__(Orchestrator)
+            orch.state_lock = RLock()
             orch.config = config
             orch.state = MagicMock()
             orch.state.active_sessions = []

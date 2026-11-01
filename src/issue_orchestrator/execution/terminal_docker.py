@@ -6,15 +6,13 @@ packet, retains Docker identities before start, and never replays a launch.
 from __future__ import annotations
 
 from contextlib import suppress
+
 from hashlib import sha256
 import json
 import logging
 import os
 from pathlib import Path
-import pwd
 import re
-import selectors
-import signal
 import subprocess
 import threading
 import time
@@ -22,84 +20,28 @@ import time
 from ..domain.original_delivery import DockerCustody
 from ..domain.docker_execution import DockerSessionState
 from ..domain.session_run import SessionRunAssets
+from ..ports.original_docker_custody import DockerPrestartSnapshot
 from ..infra.hooks.hookspec import hookimpl
+from .docker_startup_allowance import reserve_startup, seed_control_manifest
+from .docker_provider_status import (ENV as PROVIDER_DIR_ENV,
+    allocate as allocate_provider_dir, collect_terminal_status, record_diagnostic)
 from .docker_engine import DockerEngine
+from .docker_never_started import ProviderIntentError, refuse_uncertain_start, require_never_started, stop_retained
+from .docker_lifecycle_hooks import run_hooks
 from .docker_output import (
-    bounded_output, private_directory as private_directory,
+    run_cli_capture as run_cli_capture, bounded_output, private_directory as private_directory,
     seal_first_model_bytes as seal_first_model_bytes, first_model_evidence_size as first_model_evidence_size,
 )
 from .docker_worker_state import (
-    require_worker_identity, require_first_model_liveness as require_first_model_liveness,
+    require_worker_identity, validate_created_worker, verify_stopped_parent, require_prestart_liveness, require_first_model_liveness as require_first_model_liveness,
     require_selected_bridge, require_worker_network as require_worker_network,
     require_bridge_endpoint as require_bridge_endpoint, worker_network_endpoint as worker_network_endpoint,
-    require_stopped_parent_state, require_stopped_worker_network,
 )
-from .docker_launch_input import canonical as canonical, sealed_bytes as sealed_bytes, network_arguments as network_arguments, control_manifest_bytes, require_create_intent, hook_argv
-from .docker_worker_authority import worker_environment, model_projection_snapshot, model_review_parent
+from .docker_launch_input import canonical as canonical, sealed_bytes as sealed_bytes, network_arguments as network_arguments, control_manifest_bytes, require_create_intent
+from .docker_worker_authority import (worker_environment, model_projection_snapshot, model_review_parent,
+    _authority_environment, _model_authority, _public_proof)
 
 logger = logging.getLogger(__name__)
-
-
-def seed_control_manifest(packet: dict, temporary: Path) -> None:
-    """Use the pinned CLI cache path and the actual fetch time, never copy time."""
-    if "control_manifest" not in packet:
-        return
-    raw = control_manifest_bytes(packet["control_manifest"])
-    username = pwd.getpwuid(os.geteuid()).pw_name
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+", username):
-        raise ValueError("Docker CLI account name is unsafe")
-    cache = private_directory(temporary / ("devcontainercli-" + username), create=True) / "control-manifest.json"
-    descriptor = os.open(cache, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(descriptor, "wb") as destination:
-        destination.write(raw)
-    fetched = packet["control_manifest"]["fetched_unix_ns"]
-    os.utime(cache, ns=(fetched, fetched), follow_symlinks=False)
-
-
-def run_cli_capture(argv: list[str], *, environment: dict[str, str], timeout: float,
-                    output_limit: int = 1024 * 1024, diagnostic_path: Path | None = None) -> tuple[bytes, bytes, int]:
-    """Bound both CLI pipes before allocation and kill descendants on timeout."""
-    if timeout <= 0:
-        raise ValueError("Dev Container CLI deadline exhausted")
-    child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, env=environment, start_new_session=True)
-    assert child.stdout is not None and child.stderr is not None
-    output, errors = bytearray(), bytearray()
-    completed = False
-    deadline = time.monotonic() + timeout
-    selector = selectors.DefaultSelector()
-    try:
-        selector.register(child.stdout, selectors.EVENT_READ, output)
-        selector.register(child.stderr, selectors.EVENT_READ, errors)
-        while selector.get_map():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise ValueError("Dev Container CLI deadline exhausted")
-            for key, _ in selector.select(min(remaining, 0.2)):
-                chunk = os.read(key.fd, 65536)
-                if not chunk:
-                    selector.unregister(key.fileobj)
-                elif len(output) + len(errors) + len(chunk) > output_limit:
-                    raise ValueError("Dev Container CLI output bound exhausted")
-                else:
-                    key.data.extend(chunk)
-        exit_code = child.wait(timeout=max(0.001, deadline - time.monotonic()))
-        completed = exit_code == 0
-        return bytes(output), bytes(errors), exit_code
-    finally:
-        selector.close()
-        if not completed:
-            with suppress(ProcessLookupError):
-                os.killpg(child.pid, signal.SIGKILL)
-        child.wait(timeout=5)
-        child.stdout.close()
-        child.stderr.close()
-        if diagnostic_path is not None:
-            descriptor = os.open(diagnostic_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-            with os.fdopen(descriptor, "wb") as destination:
-                destination.write(bytes(output) + b"\n--- stderr ---\n" + bytes(errors))
-                destination.flush()
-                os.fsync(destination.fileno())
 
 
 def run_cli(argv: list[str], *, environment: dict[str, str], timeout: float, diagnostic_path: Path | None = None) -> bytes:
@@ -124,11 +66,13 @@ class DockerPlugin:
                 selected = json.loads(active.read_bytes())
                 self.select_run(selected["run_id"])
         self.engine = engine or DockerEngine()
+        self._require_original_owner = False
         self._record: dict | None = None
         self._packet: dict | None = None
         self._lock = threading.RLock()
         self._watcher: threading.Thread | None = None
         self._watched_record: dict | None = None
+        self._provider_slot: tuple[Path, int, str, bool] | None = None
 
     def select_run(self, run_id: str) -> None:
         if self.template_path is None or not re.fullmatch(r"[0-9]{8}-[0-9]{6}Z-[0-9a-f]{32}", run_id):
@@ -155,6 +99,7 @@ class DockerPlugin:
         if packet.get("worker_authority", {}).get("engine_contract_path", str(contract_path)) != str(contract_path):
             raise ValueError("Docker worker projection differs from controller contract path")
         contract = json.loads(sealed_bytes(contract_path, expected=packet["contract_sha256"]))
+        self._require_original_owner = contract.get("role") == "standard-implementation"
         declaration = contract.get("execution", {}).get("docker_launch", {})
         intent = {key: value for key, value in packet.items() if key not in {"contract_sha256", "run_id", "engine_run_dir", "command_sha256"}}
         if (contract.get("execution", {}).get("backend") != "docker" or
@@ -342,48 +287,24 @@ class DockerPlugin:
         self._save()
 
     def _validate_created(self, packet: dict, container_id: str, launch_digest: str, *, stopped_parent: bool = False) -> dict:
-        actual = self.engine.request("GET", f"/containers/{container_id}/json")
-        host = actual.get("HostConfig", {})
-        config = actual.get("Config", {})
-        limits = packet["limits"]
-        require_worker_identity(actual, container_id, launch_digest)
-        if stopped_parent:
-            require_stopped_parent_state(actual)
-        if (actual.get("Image") != packet["image_id"] or
-                actual.get("Name") != "/" + packet["container_name"] or
-                config.get("User") != packet["user"] or
-                config.get("Volumes") or host.get("ReadonlyRootfs") is not True or host.get("Privileged") is not False or
-                host.get("CapAdd") or set(host.get("CapDrop") or []) != {"ALL"} or
-                set(host.get("SecurityOpt") or []) != {"no-new-privileges:true"} or
-                host.get("PidMode") or host.get("IpcMode") not in {"private", ""} or
-                host.get("NetworkMode") != packet["network_id"] or host.get("Devices") or host.get("DeviceRequests") or
-                host.get("PortBindings") or host.get("PublishAllPorts") or host.get("ExtraHosts") or
-                host.get("LogConfig", {}).get("Type") != "none" or host.get("RestartPolicy", {}).get("Name") != "no" or
-                host.get("Memory") != limits["memory_bytes"] or host.get("MemorySwap") != limits["swap_bytes"] or
-                host.get("NanoCpus") != limits["cpu_nano"] or host.get("PidsLimit") != limits["pids"] or
-                host.get("Tmpfs") != packet.get("tmpfs")):
-            raise ValueError("Docker created result differs from admitted security/resource intent")
-        expected = {(item["source"], item["target"], item["read_only"]) for item in packet["mounts"]}
-        observed = {(item.get("Source"), item.get("Destination"), not item.get("RW")) for item in actual.get("Mounts", []) if item.get("Type") == "bind"}
-        if expected != observed or any(item.get("Type") not in {"bind", "tmpfs"} for item in actual.get("Mounts", [])):
-            raise ValueError("Docker created mounts differ from admitted mounts")
-        if any(item.get("Destination") not in packet["tmpfs"] for item in actual.get("Mounts", []) if item.get("Type") == "tmpfs"):
-            raise ValueError("Docker created an unbounded temporary mount")
-        if stopped_parent:
-            require_stopped_worker_network(actual, packet)
-        else:
-            require_worker_network(actual, packet)
-        if "network" in packet:
-            controller = self.engine.request("GET", f"/containers/{packet['controller_container_id']}/json")
-            if controller.get("Id") != packet["controller_container_id"] or controller.get("State", {}).get("Running") is not True:
-                raise ValueError("Docker controller identity is unavailable")
-            require_selected_bridge(self.engine, packet, controller)
-        return actual
+        return validate_created_worker(self.engine, packet, container_id, launch_digest, stopped_parent=stopped_parent)
+
+    def _prepare_provider_dir(self, packet: dict, environment: dict[str, str], command: str) -> None:
+        if "XORETS_DOCKER_LAUNCH_JSON" in environment:
+            root = Path("/srv/builder/tasks") / packet["builder_run_id"]
+            self._provider_slot = allocate_provider_dir(packet, root, command)
+            environment[PROVIDER_DIR_ENV] = str(self._provider_slot[0])
+
+    def _close_provider_dir(self) -> None:
+        if self._provider_slot is not None:
+            os.close(self._provider_slot[1])
+            self._provider_slot = None
 
     @hookimpl
     def create_session(self, session_id: int, command: str, working_dir: str, title: str | None,
                        session_name: str, secret_env: dict[str, str] | None) -> bool:
         reserved = False
+        attempt_uncertain = False
         packet = None
         try:
             packet = self._load_packet()
@@ -392,6 +313,9 @@ class DockerPlugin:
                 raise ValueError("Docker launch command/session/worktree changed")
             environment_values = worker_environment(packet, secret_env or {},
                 self._callback_token or os.environ.get("ISSUE_ORCHESTRATOR_AGENT_CALLBACK_TOKEN"))
+            attempt_uncertain = self._require_original_owner
+            reserve_startup(packet, self.template_path)
+            self._prepare_provider_dir(packet, environment_values, command)
             launch_digest = sha256(canonical(packet)).hexdigest()
             with self._lock:
                 descriptor = os.open(self.receipt_path(), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -403,11 +327,10 @@ class DockerPlugin:
                     "contract_sha256": packet["contract_sha256"], "launch_sha256": launch_digest,
                     "daemon_id": packet["daemon_id"], "controller_container_id": packet["controller_container_id"],
                     "container_id": "", "provider_exec_id": "", "state": DockerSessionState.RESERVED, "output_bytes": 0,
-                    "overflow": False, "provider_exit_code": None, "error": ""}
+                    "overflow": False, "provider_exit_code": None, "error": "", "start_intent": "not-requested",
+                    "original_binding": "pending" if self._require_original_owner else "not-applicable", "start_gate_version": 1}
                 self._record["hook_execs"] = []
                 self._save()
-            # CLI sees only generated admitted config. The provider command never
-            # reaches the service shell or Dev Container lifecycle machinery.
             ordinary = private_directory(self._output_root(packet) / packet["run_id"], create=True)
             home = private_directory(ordinary / "home", create=True)
             temporary = private_directory(ordinary / "tmp", create=True)
@@ -437,7 +360,6 @@ class DockerPlugin:
             self._validate_limits(packet)
             self._run_hooks(packet)
             self._validate_limits(packet)
-            # API payload is over the trusted Unix socket, never provider argv.
             payload = {"AttachStdout": True, "AttachStderr": True, "AttachStdin": False, "Tty": False,
                 "User": packet["user"], "WorkingDir": working_dir, "Cmd": ["/bin/sh", "-c", command],
                 "Env": [name + "=" + value for name, value in environment_values.items()]}
@@ -447,16 +369,15 @@ class DockerPlugin:
             self._record["provider_exec_id"] = exec_id
             self._record["state"] = DockerSessionState.EXEC_CREATED
             self._save()  # Durable before the only allowed exec start.
-            self._watched_record = self._record
-            self._watcher = threading.Thread(target=self._run_provider, daemon=True)
-            self._watcher.start()
+            self._start_automatic_watcher()
             return True
-        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
             logger.exception("Docker session creation refused; no Native fallback")
+            self._close_provider_dir()
             if reserved and self._record is not None:
                 self._record["error"] = "launch-refused-or-uncertain"
                 self._record["state"] = DockerSessionState.RETAINED
-                self._save()
+                with suppress(OSError): self._save()
                 if not self._record.get("container_id") and packet is not None:
                     try:
                         self._recover_created_identity(packet)
@@ -464,63 +385,74 @@ class DockerPlugin:
                         logger.error("Docker create acknowledgement unknown; immutable reservation retained")
                 if self._record.get("container_id"):
                     try:
-                        self.kill_session(session_id, session_name)
+                        self._stop_owned(session_id, session_name)
                     except Exception:
-                        self._record["error"] = "container-stop-unproven"
+                        logger.exception("Docker startup stop unverified")
                         self._record["state"] = DockerSessionState.RETAINED
-                        self._save()
+                        with suppress(OSError): self._save()
+            refuse_uncertain_start(attempt_uncertain, error)
             return False
+
+    def _start_watcher(self, stream=None) -> None:
+        self._watched_record = self._record
+        self._watcher = threading.Thread(target=self._run_provider, args=(stream,), daemon=True)
+        self._watcher.start()
+
+    def _start_automatic_watcher(self) -> None:
+        if not self._require_original_owner:
+            self._start_watcher()
+
+    @hookimpl
+    def activation_pending(self, session_name: str) -> bool:
+        record = self._record_for(session_name)
+        return self._require_original_owner and record is not None and record.get('original_binding') == 'pending'
+
+    @hookimpl
+    def activate_session(self, run: SessionRunAssets, session_name: str, fence: str) -> bool:
+        """Activate exactly the locally retained prepared exec after owner binding."""
+        with self._lock:
+            if not self._require_original_owner or self._record is None or self._packet is None:
+                raise ValueError('Docker pre-start allocation is unavailable')
+            if (self._record['run_id'], self._record['session_name']) != (run.run_id, session_name):
+                raise ValueError('Docker pre-start session changed')
+            if (self._record.get('original_binding') != 'pending' or type(self._record.get('start_gate_version')) is not int or
+                    self._record['start_gate_version'] != 1 or not re.fullmatch(r'[0-9a-f]{40}', fence)):
+                raise ValueError('Docker original binding is unavailable')
+            if not _authority_environment(self._packet):  # Recheck the sealed grant and deadline.
+                raise ValueError('Docker pre-start authority is unavailable')
+            self._record['original_binding'] = 'bound'
+            self._record['original_fence'] = fence
+            try:
+                self._save()
+            except OSError:
+                self._record['original_binding'] = 'pending'
+                raise
+            stream = self._open_provider(self._record, self._packet)
+            try:
+                self._start_watcher(stream)
+            except Exception:
+                stream.close()
+                self._stop_owned(self._record['issue_number'], session_name)
+                raise
+            return True
 
     def _deadline_stop(self) -> None:
         assert self._record is not None
         self._record["error"] = "global-deadline-exhausted"
+        if self._record.get("provider_exit_code") is None and self._record.get("provider_exec_id"):
+            record_diagnostic(self._lock, self._record, {"phase":"provider", "reason":"controller_deadline"})
         try:
-            self.kill_session(self._record["issue_number"], self._record["session_name"])
+            self._stop_owned(self._record["issue_number"], self._record["session_name"])
         except Exception:
+            record_diagnostic(self._lock, self._record, secondary={"phase":"stop", "reason":"stop_unverified"})
             self._record["error"] = "deadline-stop-unproven"
             self._record["state"] = DockerSessionState.RETAINED
             self._save()
 
     def _run_hooks(self, packet: dict) -> None:
-        hooks = packet.get("hooks", {})
-        phases = ("onCreateCommand", "updateContentCommand", "postCreateCommand", "postStartCommand")
-        if type(hooks) is not dict or set(hooks) - set(phases):
-            raise ValueError("Unsupported Docker lifecycle phase")
-        if not hooks:
-            return
         assert self._record is not None
-        record = self._record
-        output = self._output_directory(packet) / "docker-hook-output.log"
-        with output.open("xb") as destination:
-            for phase in phases:
-                if phase not in hooks:
-                    continue
-                argv = hook_argv(hooks[phase])
-                payload = {"AttachStdout": True, "AttachStderr": True, "AttachStdin": False, "Tty": False,
-                    "User": packet["user"], "WorkingDir": packet["working_dir"], "Cmd": argv, "Env": []}
-                exec_id = self.engine.request("POST", f"/containers/{record['container_id']}/exec", payload)["Id"]
-                if not re.fullmatch(r"[0-9a-f]{64}", exec_id):
-                    raise ValueError("Docker lifecycle exec identity is invalid")
-                row = {"phase": phase, "exec_id": exec_id, "exit_code": None}
-                record["hook_execs"].append(row)
-                self._save()
-                def consume(chunk: bytes) -> None:
-                    self._consume_output(packet, record, destination, chunk)
-                remaining = (packet["deadline_unix_ns"] - time.time_ns()) / 1e9
-                if remaining <= 0:
-                    raise ValueError("Docker lifecycle deadline exhausted")
-                timer = threading.Timer(remaining, self._deadline_stop)
-                timer.daemon = True
-                timer.start()
-                try:
-                    self.engine.start_exec(exec_id, consume, remaining)
-                finally:
-                    timer.cancel()
-                observed = self.engine.request("GET", f"/exec/{exec_id}/json")
-                if observed.get("ContainerID") != record["container_id"] or observed.get("Running") is not False or observed.get("ExitCode") != 0:
-                    raise ValueError("Docker lifecycle failed or did not settle")
-                row["exit_code"] = 0
-                self._save()
+        run_hooks(self.engine, packet, self._record, self._output_directory(packet),
+            self._save, self._consume_output, self._deadline_stop)
 
     def _consume_output(self, packet: dict, record: dict, destination, chunk: bytes) -> None:
         with self._lock:
@@ -533,39 +465,73 @@ class DockerPlugin:
                 record["overflow"] = True
                 raise
 
-    def _run_provider(self) -> None:
+    def _run_provider(self, prepared_stream=None) -> None:
         assert self._record is not None and self._packet is not None
         record, packet = self._record, self._packet
         remaining = max(0, (packet["deadline_unix_ns"] - time.time_ns()) / 1e9)
         deadline = threading.Timer(remaining, self._deadline_stop)
         deadline.daemon = True
         deadline.start()
+        stage = "output"
+        stream = prepared_stream
         try:
             output = self._output_directory(packet) / "docker-output.log"
             with output.open("xb") as destination:
                 def consume(chunk: bytes) -> None:
+                    nonlocal stage
+                    stage = "output"
                     self._consume_output(packet, record, destination, chunk)
-                record["state"] = DockerSessionState.STARTING
-                self._save()
-                remaining = (packet["deadline_unix_ns"] - time.time_ns()) / 1e9
-                if remaining <= 0:
-                    raise ValueError("Docker launch deadline exhausted")
-                self.engine.start_exec(record["provider_exec_id"], consume, remaining)
-            provider = self.engine.request("GET", f"/exec/{record['provider_exec_id']}/json")
-            if provider.get("ContainerID") != record["container_id"] or provider.get("Running") is not False:
-                raise ValueError("Docker provider did not settle")
-            record["provider_exit_code"] = provider.get("ExitCode")
-        except Exception:
+                    stage = "transport"
+                stage = "transport"
+                stream = stream if stream is not None else self._open_provider(record, packet)
+                stream.consume(consume)
+                stage = "output"
+        except Exception as error:
             logger.exception("Docker provider result retained as unknown")
+            phase = "output" if record.get("overflow") else "record" if isinstance(error, ProviderIntentError) else stage
+            record_diagnostic(self._lock, record, secondary={"phase":phase, "reason":{
+                "output":"output_failed", "record":"record_failed", "transport":"transport_failed"}[phase]})
             record["error"] = "provider-unsettled-or-bound-exhausted"
         finally:
+            if stream is not None:
+                try:
+                    stream.close()
+                except Exception:
+                    record_diagnostic(self._lock, record, secondary={"phase":"transport", "reason":"transport_failed"})
+                    record["error"] = record["error"] or "provider-unsettled-or-bound-exhausted"
             deadline.cancel()
             try:
-                self.kill_session(record["issue_number"], record["session_name"])
+                collect_terminal_status(self.engine, self._lock, record, self._provider_slot, packet)
             except Exception:
+                logger.exception("Docker terminal provider evidence unavailable")
+                record_diagnostic(self._lock, record, secondary={"phase":"status", "reason":"status_unavailable"})
+                record["error"] = record["error"] or "provider-unsettled-or-bound-exhausted"
+            try:
+                self._close_provider_dir()
+            except OSError:
+                logger.exception("Docker provider slot descriptor close failed")
+            try:
+                self._stop_owned(record["issue_number"], record["session_name"])
+            except Exception:
+                record_diagnostic(self._lock, record, secondary={"phase":"stop", "reason":"stop_unverified"})
                 record["error"] = "container-stop-unproven"
                 record["state"] = DockerSessionState.RETAINED
                 self._save()
+
+    def _open_provider(self, record: dict, packet: dict):
+        with self._lock:
+            if record["state"] != DockerSessionState.EXEC_CREATED:
+                raise ValueError("Docker provider activation is no longer available")
+            remaining = (packet["deadline_unix_ns"] - time.time_ns()) / 1e9
+            if remaining <= 0:
+                raise ValueError("Docker launch deadline exhausted")
+            record["state"] = DockerSessionState.STARTING
+            record["start_intent"] = "requested"
+            try:
+                self._save()
+            except OSError as error:
+                raise ProviderIntentError('Docker start intent was not recorded') from error
+            return self.engine.open_exec(record["provider_exec_id"], remaining)
 
     def custody(self, session_name: str) -> DockerCustody:
         record = self._record_for(session_name)
@@ -576,6 +542,30 @@ class DockerPlugin:
         if provider.get("ID") != record["provider_exec_id"] or provider.get("ContainerID") != record["container_id"]:
             raise ValueError("Docker provider custody changed")
         return DockerCustody(**{key: record[key] for key in DockerCustody.__dataclass_fields__})
+
+    def prestart_snapshot(self, run: SessionRunAssets, session_name: str) -> DockerPrestartSnapshot:
+        """Authenticate the exact allocated implementation before its first start."""
+        if self.template_path is not None:
+            self.select_run(run.run_id)
+        packet = self._load_packet()
+        if (packet['run_id'], packet['engine_run_dir'], packet['working_dir'], packet['session_name']) != (
+                run.run_id, str(run.run_dir), str(run.worktree_path), session_name):
+            raise ValueError('Docker pre-start typed run changed')
+        _, inner, _ = model_projection_snapshot(packet)
+        if inner['role'] != 'standard-implementation':
+            raise ValueError('Docker pre-start role differs')
+        record = self._record_for(session_name)
+        if (record is None or type(record.get('start_gate_version')) is not int or record['start_gate_version'] != 1 or
+                record.get('state') != DockerSessionState.EXEC_CREATED or
+                record.get('start_intent') != 'not-requested'):
+            raise ValueError('Docker pre-start intent is unavailable')
+        custody = self.custody(session_name)
+        if custody.run_id != run.run_id or custody.launch_sha256 != sha256(canonical(packet)).hexdigest():
+            raise ValueError('Docker pre-start custody changed')
+        require_prestart_liveness(self._validate_created(packet, custody.container_id, custody.launch_sha256))
+        require_never_started(self.engine, self.launch_path, record)
+        return {'contract_sha256':packet['contract_sha256'], 'launch_sha256':custody.launch_sha256,
+            'custody':custody}
 
     def first_model_snapshot(self, run: SessionRunAssets, session_name: str, contract_sha256: str, launch_sha256: str) -> dict:
         """Fresh filtered live custody through the existing admitted worker checks."""
@@ -604,15 +594,33 @@ class DockerPlugin:
             "projection_sha256": sha256(canonical(projection)).hexdigest(),
             "custody": {key: getattr(custody, key) for key in DockerCustody.__dataclass_fields__}, "worker": worker}
 
+    def model_gateway_snapshot(self, run: SessionRunAssets, session_name: str) -> dict:
+        """Re-read the sealed container-only authority and exact live allocation."""
+        if self.template_path is not None:
+            self.select_run(run.run_id)
+        packet = self._load_packet()
+        environment = _authority_environment(packet)
+        if not environment:
+            raise ValueError('Docker model gateway authority unavailable')
+        outer, inner = _model_authority(packet, environment)
+        grant = _public_proof(outer['authorization'], Path(packet['admission_proofs']['authorization']), packet)
+        if grant.get('schema_version') != 2 or grant.get('kind') not in {'builder-docker-container-model-authorization', 'builder-docker-container-synthetic-authorization'}:
+            raise ValueError('Docker model gateway requires container-only grant')
+        launch_sha = sha256(canonical(packet)).hexdigest()
+        observed = self.first_model_snapshot(run, session_name, packet['contract_sha256'], launch_sha)
+        if self.launch_path is None:
+            raise ValueError('Docker model gateway launch path unavailable')
+        return {**observed, 'engine_run_id': run.run_id, 'model': inner['capabilities']['model'],
+            'contract_sha256': packet['contract_sha256'], 'launch_sha256': launch_sha,
+            'grant_sha256': outer['authorization']['sha256'], 'grant_kind': grant['kind'], 'max_model_requests': grant['max_model_requests'],
+            'deadline_unix_ns': packet['deadline_unix_ns'], 'max_output_bytes': packet['limits']['max_output_bytes'],
+            'outer_contract_path': packet['worker_authority']['contract_path'],
+            'inner_contract_path': packet['worker_authority']['engine_contract_path'],
+            'launch_path': str(self.launch_path), 'controller_home': inner['execution']['controller_home']}
+
     def verify_stopped_parent(self, packet: dict, custody: DockerCustody) -> None:
         """Read-only daemon proof of the granted implementation's terminal custody."""
-        if self.engine.request('GET', '/info').get('ID') != custody.daemon_id:
-            raise ValueError('Docker review parent daemon changed')
-        self._validate_created(packet, custody.container_id, custody.launch_sha256, stopped_parent=True)
-        provider = self.engine.request('GET', '/exec/' + custody.provider_exec_id + '/json')
-        if (provider.get('ID') != custody.provider_exec_id or provider.get('ContainerID') != custody.container_id or
-                provider.get('Running') is not False or type(provider.get('ExitCode')) is not int or provider['ExitCode'] != 0):
-            raise ValueError('Docker review parent implementation is not successfully stopped')
+        verify_stopped_parent(self.engine, packet, custody)
 
     def seal_first_model(self, run: SessionRunAssets, receipt: dict) -> dict:
         """Exclusive controller-only evidence in the existing bounded output root."""
@@ -661,12 +669,44 @@ class DockerPlugin:
     @hookimpl
     def kill_session(self, session_id: int, session_name: str) -> None:
         record = self._record_for(session_name)
-        if record is None or not record.get("container_id"):
-            raise ValueError("Docker stop target is unknown; retain evidence")
-        self._inspect_owned(record)
-        self.engine.stop(record["container_id"])
-        record["state"] = DockerSessionState.STOPPED
-        self._save()
+        if record is not None and self._provider_is_active(record):
+            record_diagnostic(self._lock, record, {'phase':'provider', 'reason':'provider_cancelled'})
+            try:
+                self._save()
+            except OSError:
+                record_diagnostic(self._lock, record, secondary={'phase':'record', 'reason':'record_failed'})
+        try:
+            self._stop_owned(session_id, session_name)
+        except Exception:
+            if record is not None:
+                record_diagnostic(self._lock, record, secondary={'phase':'stop', 'reason':'stop_unverified'})
+                try:
+                    self._save()
+                except OSError:
+                    logger.exception('Docker stop diagnostic recording failed')
+            raise
+
+    def _provider_is_active(self, record: dict) -> bool:
+        if not record.get('provider_exec_id') or record.get('provider_exit_code') is not None:
+            return False
+        try:
+            actual = self.engine.request('GET', f"/exec/{record['provider_exec_id']}/json")
+        except Exception:
+            return False  # Unobserved is not evidence of cancellation.
+        return (actual.get('ID') == record['provider_exec_id'] and
+                actual.get('ContainerID') == record.get('container_id') and actual.get('Running') is True)
+
+    def _stop_owned(self, session_id: int, session_name: str) -> None:
+        with self._lock:
+            record = self._record_for(session_name)
+            if record is None or not record.get("container_id"):
+                raise ValueError("Docker stop target is unknown; retain evidence")
+            self._inspect_owned(record)
+            stop_retained(self.engine, self.launch_path, record, self._save)
+
+    def verify_never_started(self, custody: DockerCustody) -> None:
+        require_never_started(self.engine, self.launch_path,
+            {key:getattr(custody, key) for key in DockerCustody.__dataclass_fields__})
 
     @hookimpl
     def discover_running_sessions(self) -> list[dict]:
@@ -674,15 +714,21 @@ class DockerPlugin:
             return []
         packet = json.loads(sealed_bytes(self.launch_path))
         record = self._record_for(packet["session_name"])
+        implementation = False
+        if packet.get('worker_authority'):
+            inner = json.loads(sealed_bytes(Path(packet['worker_authority']['engine_contract_path']),
+                expected=packet['contract_sha256']))
+            implementation = inner.get('role') == 'standard-implementation'
+        if (record and record.get('original_binding') == 'pending' or
+                implementation and (record is None or record.get('original_binding') != 'bound' or type(record.get('start_gate_version')) is not int or record['start_gate_version'] != 1)):
+            raise ValueError('Docker original allocation requires retained custody reconciliation')
         if record and not record.get("container_id"):
             self._recover_created_identity(packet)
         if record and record.get("container_id") and self.session_exists(0, packet["session_name"]):
             if (record is self._watched_record and self._watcher is not None and
                     self._watcher.is_alive()):
                 return []  # This exact in-process watcher still owns provider settlement.
-            # Restart never starts/reattaches the provider. Stop the old worker;
-            # the original owner must explicitly settle its retained claim.
-            self.kill_session(record["issue_number"], record["session_name"])
+            self._stop_owned(record["issue_number"], record["session_name"])
             record["error"] = "controller-restart-provider-result-unknown"
             self._save()
         return []
@@ -729,7 +775,7 @@ class DockerPlugin:
     @hookimpl
     def on_orchestrator_shutdown(self) -> None:
         if self._record and self._record.get("container_id"):
-            self.kill_session(self._record["issue_number"], self._record["session_name"])
+            self._stop_owned(self._record["issue_number"], self._record["session_name"])
         if self._watcher:
             self._watcher.join(timeout=3)
 

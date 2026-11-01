@@ -199,3 +199,76 @@ def test_selected_executable_provenance_refuses_before_secret_lookup(model_autho
             pytest.fail('unproven executable admitted')
     credentials.session_env.assert_not_called()
     assert list(output.iterdir()) == []
+
+
+def test_actual_readiness_cleans_cli_private_arg0_cache_without_following_links(readiness, tmp_path):
+    """A successful CLI status leaves its private arg0 helpers; they cannot turn readiness into refusal."""
+    packet, template, output, credentials = readiness
+    outside = tmp_path / 'outside'; outside.mkdir(); (outside / 'keep').write_text('unchanged')
+    class Runner:
+        def __init__(self, environment, deadline, limit, executable):
+            self.home = Path(environment['CODEX_HOME'])
+        def run(self, command, **kwargs):
+            cache = self.home / 'tmp/arg0/codex-arg0fixture'
+            cache.mkdir(parents=True)
+            (cache / '.lock').write_text('')
+            for name in ('codex-linux-sandbox', 'applypatch', 'apply_patch', 'codex-execve-wrapper'):
+                (cache / name).symlink_to(outside / 'keep')
+            return CommandResult(0, '', 'Logged in using ChatGPT')
+    probe = CLIProviderReadinessProbe(Mock(), resolve_provider=lambda _: CodexProvider(),
+        probe_context=lambda provider: docker_readiness_context(provider, Mock(), credentials, runner_factory=Runner))
+    assert probe.check_launch_readiness('codex').authenticated
+    assert list(output.iterdir()) == []
+    assert (outside / 'keep').read_text() == 'unchanged'
+
+
+def test_cache_cleanup_refuses_hardlink_after_removing_private_auth(readiness, tmp_path):
+    packet, template, output, credentials = readiness
+    outside = tmp_path / 'outside'; outside.write_text('unchanged')
+    homes = []
+    class Runner:
+        def __init__(self, environment, deadline, limit, executable):
+            self.home = Path(environment['CODEX_HOME']); homes.append(self.home)
+        def run(self, command, **kwargs):
+            os.link(outside, self.home / 'foreign-hardlink')
+            return CommandResult(0, '', 'Logged in using ChatGPT')
+    probe = CLIProviderReadinessProbe(Mock(), resolve_provider=lambda _: CodexProvider(),
+        probe_context=lambda provider: docker_readiness_context(provider, Mock(), credentials, runner_factory=Runner))
+    assert not probe.check_launch_readiness('codex').launchable
+    assert homes and not (homes[0] / 'auth.json').exists()
+    assert outside.read_text() == 'unchanged' and outside.stat().st_nlink == 2
+
+
+@pytest.mark.parametrize('kind', ['owner', 'device', 'too-many', 'fifo', 'changed'])
+def test_cache_cleanup_rejects_untrusted_or_unbounded_entries(readiness, monkeypatch, kind):
+    packet, template, output, credentials = readiness
+    homes = []
+    real_stat = os.stat
+    seen = []
+    class Runner:
+        def __init__(self, environment, deadline, limit, executable):
+            self.home = Path(environment['CODEX_HOME']); homes.append(self.home)
+        def run(self, command, **kwargs):
+            if kind == 'too-many':
+                for number in range(257): (self.home / str(number)).touch()
+            elif kind == 'fifo':
+                os.mkfifo(self.home / 'entry')
+            else:
+                (self.home / 'entry').touch()
+                def changed(path, *args, **kwargs):
+                    info = real_stat(path, *args, **kwargs)
+                    if path == 'entry' and kwargs.get('dir_fd') is not None:
+                        seen.append(1)
+                        return SimpleNamespace(st_uid=info.st_uid + (kind == 'owner'),
+                            st_dev=info.st_dev + (kind == 'device'),
+                            st_ino=info.st_ino + (kind == 'changed' and len(seen) == 2),
+                            st_mode=info.st_mode, st_nlink=info.st_nlink)
+                    return info
+                monkeypatch.setattr(os, 'stat', changed)
+            return CommandResult(0, '', 'Logged in using ChatGPT')
+    with pytest.raises(DockerReadinessRefused):
+        with docker_readiness_context('codex', Mock(), credentials, runner_factory=Runner) as runner:
+            runner.run(['codex', 'login', 'status'])
+    assert homes and not (homes[0] / 'auth.json').exists()
+    assert list(homes[0].iterdir())
+    if kind == 'changed': assert len(seen) == 2

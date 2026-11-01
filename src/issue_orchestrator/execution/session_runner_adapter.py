@@ -40,6 +40,13 @@ class PluggySessionRunner:
         if self._pm.hook.prepare_session(run=run, session_name=session_name, command=command) is not True:
             raise ValueError("Selected terminal did not prepare the admitted typed session")
 
+    def activate_session(self, run: SessionRunAssets, session_name: str, fence: str) -> None:
+        if self._pm.hook.activate_session(run=run, session_name=session_name, fence=fence) is not True:
+            raise ValueError('Selected terminal did not activate the admitted session')
+
+    def activation_pending(self, session_name: str) -> bool:
+        return self._pm.hook.activation_pending(session_name=session_name) is True
+
     def create_session(
         self,
         session_id: int,

@@ -68,7 +68,7 @@ def test_agent_runner_child_in_separate_process_group(tmp_path: Path) -> None:
 
 def test_agent_runner_stderr_on_command_not_found(tmp_path: Path) -> None:
     runner = SubprocessAgentRunner()
-    result = runner.run(_spec(tmp_path, ["/nonexistent/command"]))
+    result = runner.run(_spec(tmp_path, [str(tmp_path / "missing-command")]))
     assert result.exit_code == 127
     assert "not found" in result.stderr.lower()
 

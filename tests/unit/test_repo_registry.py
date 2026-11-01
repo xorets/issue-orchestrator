@@ -106,8 +106,7 @@ class TestConfigDir:
         with patch.dict("os.environ", {}, clear=True):
             with patch("os.environ.get", return_value=None):
                 result = _config_dir()
-
-        assert result == Path.home() / ".config" / "issue-orchestrator"
+                assert result == Path.home() / ".config" / "issue-orchestrator"
 
 
 class TestRegisteredRepo:

@@ -121,6 +121,9 @@ class ScriptSessionRunner:
     preventing regressions like #4057.
     """
 
+    def activation_pending(self, session_name: str) -> bool:
+        return False
+
     def __init__(self) -> None:
         self._last_output: dict[str, str] = {}
         self._runner = AgentRunner()
@@ -210,6 +213,9 @@ class FastScriptSessionRunner:
     only care about orchestrator behavior. Tests that verify ui-session.log
     filtering must opt into ``ScriptSessionRunner`` explicitly.
     """
+
+    def activation_pending(self, session_name: str) -> bool:
+        return False
 
     def __init__(self) -> None:
         self._last_output: dict[str, str] = {}

@@ -11,6 +11,7 @@ from typing import Mapping, Optional, TypedDict
 import pluggy
 
 from ..infra.hooks.hookspec import PROJECT_NAME, TerminalSpec, LifecycleSpec
+from ..domain.session_run import SessionRunAssets
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +147,13 @@ class PluginManager:
         return self._pm.hook
 
     # Convenience methods that wrap hook calls with sensible defaults
+
+    def activation_pending(self, session_name: str) -> bool:
+        return self._pm.hook.activation_pending(session_name=session_name) is True
+
+    def activate_session(self, run: SessionRunAssets, session_name: str, fence: str) -> None:
+        if self._pm.hook.activate_session(run=run, session_name=session_name, fence=fence) is not True:
+            raise ValueError('Selected terminal did not activate the admitted session')
 
     def create_session(
         self,

@@ -99,12 +99,7 @@ class BaseAgentRunner(ABC):
             logger.info("Agent attempt %d/%d", attempts, max_attempts)
 
             last_result = self._execute_once(spec, attempt=attempts)
-            last_error_type = classify_provider_error(
-                stdout=last_result.stdout,
-                stderr=last_result.stderr,
-                exit_code=last_result.exit_code,
-                timed_out=last_result.timed_out,
-            )
+            last_error_type = self._classify_result(last_result)
 
             if last_result.succeeded:
                 break
@@ -135,6 +130,10 @@ class BaseAgentRunner(ABC):
             provider_error_type=last_error_type,
             attempts=attempts,
         )
+
+    def _classify_result(self, result: AgentResult) -> ProviderErrorType | None:
+        return classify_provider_error(stdout=result.stdout, stderr=result.stderr,
+            exit_code=result.exit_code, timed_out=result.timed_out)
 
     @abstractmethod
     def _execute_once(self, spec: AgentSpec, *, attempt: int) -> AgentResult:

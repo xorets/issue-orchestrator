@@ -38,10 +38,11 @@ from ..control.orchestrator_support import (
     init_orchestrator_components,
 )
 from ..control.original_delivery_facade import original_delivery as _original_delivery, docker_first_model as _docker_first_model
+from .original_delivery_activation import launch_issue as _launch_issue_with_original
+from .docker_model_gateway_mixin import DockerModelGatewayMixin
 from ..control.session_launch_types import LaunchStep
 from ..control.github_workflow import GitHubWorkflow, launch_issue_by_number as _gw_launch_issue_by_number, get_issue_machine as _gw_get_issue_machine
 from ..control.worktree_manager import get_worktree_path, get_session_name, extract_issue_branches
-
 logger = logging.getLogger(__name__)
 
 
@@ -98,7 +99,6 @@ from ..control.session_routing import (
     create_session as _create_session,
     session_exists as _session_exists,
     kill_session as _kill_session,
-    orchestrator_launch_session as _launch_session,
     get_session_machine as _sl_get_session_machine,
 )
 from ..control.cleanup_manager import CleanupManager, build_cleanup_manager
@@ -129,7 +129,7 @@ from .sqlite_maintenance import run_backups_if_due
 
 
 @dataclass
-class Orchestrator:
+class Orchestrator(DockerModelGatewayMixin):
     """Main orchestrator - mediates gather → plan → apply cycle.
 
     All dependencies are injected via OrchestratorDeps - no Optional fields, no Null defaults.
@@ -226,7 +226,8 @@ class Orchestrator:
     @shutdown_requested.setter
     def shutdown_requested(self, value: bool) -> None:
         """Set shutdown requested flag (use request_shutdown() for proper event emission)."""
-        self._shutdown_requested = value
+        with self.state_lock:
+            self._shutdown_requested = value
 
     @property
     def event_context(self) -> EventContext:
@@ -315,7 +316,7 @@ class Orchestrator:
         return self.deps.completion_handler_factory(state_machines=self.deps.state_machine_manager)
 
     @cached_property
-    def _session_launcher(self) -> SessionLauncher:
+    def session_launcher(self) -> SessionLauncher:
         return self.deps.session_launcher_factory(
             board_snapshot_provider=StateBoardSnapshotProvider(self.deps.board_snapshot_builder, lambda: self.state),
             session_exists_fn=lambda name: _session_exists(name, self.deps.session_manager, self.deps.events),
@@ -374,22 +375,22 @@ class Orchestrator:
 
 
     def _launch_review_by_number(self, n: int) -> LaunchStep:
-        return _ch_launch_review_by_number(n, self.state.pending_reviews, lambda review: _launch_review_session(review, self.state, self._session_launcher, self.deps.session_restorer, self.deps.pending_work_claims))
+        return _ch_launch_review_by_number(n, self.state.pending_reviews, lambda review: _launch_review_session(review, self.state, self.session_launcher, self.deps.session_restorer, self.deps.pending_work_claims))
 
     def _launch_retrospective_review_by_number(self, n: int) -> LaunchStep:
         review = next((r for r in self.state.pending_retrospective_reviews if r.issue_number == n), None)
         if review is None:
             return LaunchStep.not_queued("retrospective review", n)
-        return _launch_retrospective_review_session(review, self.state, self._session_launcher, self.deps.session_restorer, self.deps.pending_work_claims)
+        return _launch_retrospective_review_session(review, self.state, self.session_launcher, self.deps.session_restorer, self.deps.pending_work_claims)
 
     def _launch_rework_by_number(self, n: int) -> LaunchStep:
-        return _ch_launch_rework_by_number(n, self.state.pending_reworks, lambda rework: _launch_rework_session(rework, self.state, self._session_launcher, self.deps.session_restorer, self.deps.pending_work_claims))
+        return _ch_launch_rework_by_number(n, self.state.pending_reworks, lambda rework: _launch_rework_session(rework, self.state, self.session_launcher, self.deps.session_restorer, self.deps.pending_work_claims))
 
     def launch_validation_retry_by_number(self, n: int) -> LaunchStep:
         retry = next((r for r in self.state.pending_validation_retries if r.issue_number == n), None)
         if retry is None:
             return LaunchStep.not_queued("validation retry", n)
-        return _launch_validation_retry_session(retry, self.state, self._session_launcher, self.deps.session_restorer, self.deps.pending_work_claims)
+        return _launch_validation_retry_session(retry, self.state, self.session_launcher, self.deps.session_restorer, self.deps.pending_work_claims)
 
     def _launch_tech_lead_by_number(self, n: int) -> LaunchStep:
         return _ch_launch_tech_lead_by_number(n, self.state.pending_tech_lead_reviews, self.launch_tech_lead_step)
@@ -499,7 +500,7 @@ class Orchestrator:
             # repository-host error from a non-fetch startup phase propagates
             # unchanged, exactly as it did before issue-fetch resilience existed.
             self._record_permanent_fetch_failure(error.verdict, context="STARTUP")
-            self._shutdown_requested = True
+            self.shutdown_requested = True
 
     def _record_permanent_fetch_failure(self, verdict: FetchFailureVerdict, *, context: str) -> None:
         """Log an actionable message and persist a clear failure record.
@@ -528,7 +529,7 @@ class Orchestrator:
         return self.launch_session_step(issue, tech_lead_scope=tech_lead_scope).session
 
     def launch_session_step(self, issue: Issue, *, tech_lead_scope: "TechLeadLaunchScope | None" = None) -> LaunchStep:
-        return _launch_session(issue, self.state, self._session_launcher, self.deps.session_restorer, tech_lead_scope=tech_lead_scope)
+        return _launch_issue_with_original(self, issue, tech_lead_scope=tech_lead_scope)
 
     def handle_session_completion(self, session: Session, status: SessionStatus, *, provider_error_type: "ProviderErrorType | None" = None) -> None:
         _handle_session_completion(
@@ -567,7 +568,7 @@ class Orchestrator:
             self.deps.validated_work_recovery.tick(
                 self.state, self._recovery_drain_mode
             )
-            self._session_launcher.reconcile_stale_tech_lead_needs_human(self.state.active_sessions, discover_markers=not self.state.paused)
+            self.session_launcher.reconcile_stale_tech_lead_needs_human(self.state.active_sessions, discover_markers=not self.state.paused)
             self._loop_iteration, cont = _run_tick_impl(
                 self._loop_iteration,
                 self._event_context,
@@ -947,7 +948,7 @@ class Orchestrator:
                 # actionable message and shut down cleanly rather than crashing
                 # with a raw traceback or spinning the loop-error budget.
                 self._record_permanent_fetch_failure(e.verdict, context="LOOP")
-                self._shutdown_requested = True
+                self.shutdown_requested = True
                 break
             except Exception as e:
                 self._handle_loop_error(e)
@@ -992,8 +993,8 @@ class Orchestrator:
 
     def request_shutdown(self, force: bool = False) -> None:
         """Request graceful or forced shutdown."""
-        self._shutdown_requested = True
         with self.state_lock:
+            self._shutdown_requested = True
             active = self.state.active_sessions
         self.deps.events.publish(
             TraceEvent(
@@ -1093,13 +1094,13 @@ class Orchestrator:
         )
 
     def launch_review_session(self, review: PendingReview) -> Optional[Session]:
-        return _launch_review_session(review, self.state, self._session_launcher, self.deps.session_restorer, self.deps.pending_work_claims).session
+        return _launch_review_session(review, self.state, self.session_launcher, self.deps.session_restorer, self.deps.pending_work_claims).session
 
     def launch_retrospective_review_session(self, review: PendingRetrospectiveReview) -> Optional[Session]:
-        return _launch_retrospective_review_session(review, self.state, self._session_launcher, self.deps.session_restorer, self.deps.pending_work_claims).session
+        return _launch_retrospective_review_session(review, self.state, self.session_launcher, self.deps.session_restorer, self.deps.pending_work_claims).session
 
     def launch_queued_tech_lead_step(self, tech_lead: PendingTechLeadReview) -> LaunchStep:
-        return _launch_tech_lead_session(tech_lead, self.state, self.config, self._session_launcher, self.deps.session_restorer, self.deps.pending_work_claims)
+        return _launch_tech_lead_session(tech_lead, self.state, self.config, self.session_launcher, self.deps.session_restorer, self.deps.pending_work_claims)
 
     def launch_tech_lead_session(self, tech_lead: PendingTechLeadReview) -> Optional[Session]:
         return self.launch_tech_lead_step(tech_lead).session
@@ -1137,7 +1138,7 @@ class Orchestrator:
         return self._github_workflow.reconcile_orphaned_pr_labels(ORCHESTRATOR_PR_MARKER)
 
     def launch_rework_session(self, rework: PendingRework) -> Optional[Session]:
-        return _launch_rework_session(rework, self.state, self._session_launcher, self.deps.session_restorer, self.deps.pending_work_claims).session
+        return _launch_rework_session(rework, self.state, self.session_launcher, self.deps.session_restorer, self.deps.pending_work_claims).session
 
     def _recovery_drain_mode(self) -> RecoveryDrainMode:
         """Read lifecycle admission at each retained-work start boundary."""

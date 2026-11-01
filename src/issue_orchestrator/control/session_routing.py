@@ -591,17 +591,19 @@ def orchestrator_launch_session(
     session_restorer: "SessionRestorer | None" = None,
     *,
     tech_lead_scope: TechLeadLaunchScope | None = None,
+    activate_original: Callable[[Session], None] | None = None,
 ) -> LaunchStep:
     """Launch an issue session and update active-session tracking."""
     result = _rate_limit_gate(state, session_launcher).launch(
         lambda: session_launcher.launch_issue_session(
-            issue, state.active_sessions, tech_lead_scope=tech_lead_scope
+            issue, state.active_sessions, tech_lead_scope=tech_lead_scope, activate_original=activate_original
         ),
         issue_number=issue.number,
         work="issue",
     )
     if result.success and result.session:
-        append_unique_active_sessions(state.active_sessions, [result.session])
+        if result.session not in state.active_sessions:
+            append_unique_active_sessions(state.active_sessions, [result.session])
         return LaunchStep.launched(result.session)
     if result.disposition is LaunchDisposition.EXISTING_TERMINAL and session_restorer is not None:
         assert result.existing_terminal is not None  # the result type's invariant

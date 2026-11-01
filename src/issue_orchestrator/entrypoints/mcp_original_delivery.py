@@ -33,8 +33,28 @@ async def original_delivery_result(api: OrchestratorAsyncHttpApi, config_path: P
                 raise ValueError("An inactive engine permits only original terminal reconciliation")
             with build_offline_original_delivery_owner(Config.load(config_path)) as owner:
                 observed = owner.observe(issue_number) if request is None else owner.execute(issue_number, request.command(operation))
-        result = OriginalDeliveryPayload.model_validate(observed).model_dump(mode="json")
+        result = OriginalDeliveryPayload.model_validate(observed).model_dump(mode="json", exclude_unset=True)
     except (ValueError, ClaimFetchError, OSError, RuntimeError) as exc:
         logger.exception("MCP original delivery command refused")
         return CallToolResult(content=[TextContent(type="text", text=str(exc))], isError=True)
     return CallToolResult(content=[TextContent(type="text", text=json.dumps(result))], structuredContent=result)
+
+
+async def original_delivery_history_result(config_path: Path, request) -> CallToolResult:
+    """Read selected claim history using the existing repository-scoped owner."""
+    import asyncio
+    from ..control.original_delivery_history import prove_history
+
+    def read():
+        with build_offline_original_delivery_owner(Config.load(config_path)) as owner:
+            repository = owner.config.repo
+            if not repository:
+                raise ValueError('Original delivery repository is unavailable')
+            return prove_history(owner.claims, repository, request.model_dump(mode='json'))
+
+    try:
+        result = await asyncio.to_thread(read)
+    except (ValueError, ClaimFetchError, OSError, RuntimeError):
+        logger.warning('MCP original delivery history refused')
+        return CallToolResult(content=[TextContent(type='text', text='Original delivery history refused')], isError=True)
+    return CallToolResult(content=[TextContent(type='text', text=json.dumps(result))], structuredContent=result)

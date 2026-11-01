@@ -1465,6 +1465,288 @@
           }
         }
       },
+      "ProviderPrimaryDiagnosticPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "phase",
+          "reason"
+        ],
+        "properties": {
+          "phase": {
+            "type": "string",
+            "enum": [
+              "provider"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "provider_nonzero",
+              "provider_timeout",
+              "provider_cancelled",
+              "provider_auth",
+              "provider_quota",
+              "provider_transient",
+              "controller_deadline"
+            ]
+          }
+        }
+      },
+      "ProviderSecondaryDiagnosticPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "phase",
+          "reason"
+        ],
+        "properties": {
+          "phase": {
+            "type": "string",
+            "enum": [
+              "status",
+              "record",
+              "stop",
+              "output",
+              "transport"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "status_unavailable",
+              "record_failed",
+              "stop_unverified",
+              "output_failed",
+              "transport_failed",
+              "record_unavailable"
+            ]
+          }
+        }
+      },
+      "ChildProviderDiagnosticPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "kind",
+          "run_id",
+          "launch_sha256",
+          "phase",
+          "reason",
+          "exit_code",
+          "exception_type",
+          "stderr_bytes",
+          "stderr_sha256",
+          "stderr_truncated",
+          "elapsed_ms",
+          "remaining_ms",
+          "own_timer_fired",
+          "secondary",
+          "source"
+        ],
+        "properties": {
+          "schema_version": {
+            "type": "integer",
+            "enum": [
+              1
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "builder-codex-child-diagnostic"
+            ]
+          },
+          "run_id": {
+            "type": "string",
+            "pattern": "^[0-9]{8}-[0-9]{6}Z-[0-9a-f]{32}$"
+          },
+          "launch_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "phase": {
+            "type": "string",
+            "enum": [
+              "codex-child"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "nonzero",
+              "timeout",
+              "interrupted",
+              "spawn_failed"
+            ]
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": -255,
+                "maximum": 255
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "exception_type": {
+            "anyOf": [
+              {"type": "string", "enum": ["TimeoutExpired", "KeyboardInterrupt", "InterruptedError", "FileNotFoundError", "PermissionError", "OSError", "SubprocessError"]},
+              {"type": "null"}
+            ]
+          },
+          "stderr_bytes": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 32768
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "stderr_sha256": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "stderr_truncated": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "elapsed_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400000
+          },
+          "remaining_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 86400000
+          },
+          "own_timer_fired": {
+            "type": "boolean"
+          },
+          "secondary": {
+            "type": "array",
+            "maxItems": 2,
+            "items": {
+              "type": "string",
+              "enum": [
+                "record_failed",
+                "cleanup_failed"
+              ]
+            }
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "slot",
+              "marker"
+            ]
+          }
+        }
+      },
+      "ProviderDiagnosticPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "run_id",
+          "launch_sha256",
+          "primary",
+          "secondary"
+        ],
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "pattern": "^[0-9]{8}-[0-9]{6}Z-[0-9a-f]{32}$"
+          },
+          "launch_sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "primary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderPrimaryDiagnosticPayload"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "secondary": {
+            "type": "array",
+            "maxItems": 4,
+            "items": {
+              "$ref": "#/components/schemas/ProviderSecondaryDiagnosticPayload"
+            }
+          },
+          "child": {
+            "$ref": "#/components/schemas/ChildProviderDiagnosticPayload"
+          }
+        }
+      },
+      "DockerNeverStartedObservation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["running", "pid", "exit_code"],
+        "properties": {
+          "running": {"type": "boolean"},
+          "pid": {"type": "integer", "const": 0},
+          "exit_code": {"type": "null"}
+        }
+      },
+      "DockerNeverStartedMissingExec": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "status"],
+        "properties": {
+          "kind": {"type": "string", "const": "exact-exec-not-found"},
+          "status": {"type": "integer", "const": 404}
+        }
+      },
+      "DockerNeverStartedPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schema_version", "kind", "run_id", "contract_sha256", "launch_sha256", "daemon_id", "controller_container_id", "container_id", "provider_exec_id", "disposition", "before", "stop_wait", "after"],
+        "properties": {
+          "schema_version": {"type": "integer", "const": 1},
+          "kind": {"type": "string", "const": "docker-never-started"},
+          "run_id": {"type": "string"},
+          "contract_sha256": {"type": "string"},
+          "launch_sha256": {"type": "string"},
+          "daemon_id": {"type": "string"},
+          "controller_container_id": {"type": "string"},
+          "container_id": {"type": "string"},
+          "provider_exec_id": {"type": "string"},
+          "disposition": {"type": "string", "const": "cancelled-before-exec-start"},
+          "before": {"$ref": "#/components/schemas/DockerNeverStartedObservation"},
+          "stop_wait": {"type": "string", "const": "completed"},
+          "after": {"anyOf": [
+            {"$ref": "#/components/schemas/DockerNeverStartedObservation"},
+            {"$ref": "#/components/schemas/DockerNeverStartedMissingExec"}
+          ]}
+        }
+      },
       "OriginalDeliveryPayload": {
         "type": "object",
         "additionalProperties": false,
@@ -1508,6 +1790,13 @@
               }
             ]
           },
+          "diagnostic": {
+            "anyOf": [
+              {"$ref": "#/components/schemas/ProviderDiagnosticPayload"},
+              {"type": "null"}
+            ]
+          },
+          "never_started": {"$ref": "#/components/schemas/DockerNeverStartedPayload"},
           "remote_released": {
             "type": "boolean"
           }

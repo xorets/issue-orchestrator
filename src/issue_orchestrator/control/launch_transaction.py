@@ -32,14 +32,53 @@ from ..domain.models import Session
 from ..domain.pending_work import PendingWorkClaim
 from ..domain.session_run import SessionRunAssets
 from ..ports.pending_work_claim_store import PendingWorkClaimStore
+from ..ports.session_preparation import SessionPreparation
+from ..ports.event_sink import EventSink, SessionStartedEventPayload, make_session_started_event
 from .active_sessions import append_unique_active_sessions
 from .in_flight_work import InFlightWorkLedger
+from .session_manager import SessionManager, SessionRef
 from .session_launch_types import LaunchDisposition, LaunchResult, LaunchStep
 
 if TYPE_CHECKING:
     from ..domain.models import OrchestratorState
 
 logger = logging.getLogger(__name__)
+
+
+def activate_prepared_original(preparation: SessionPreparation | None, session: Session,
+                               active_sessions: list[Session], manager: SessionManager,
+                               activate: Callable[[Session], None] | None) -> bool:
+    """Retain the prepared session before activating its registered original."""
+    if preparation is None or preparation.activation_pending(session.terminal_id) is not True:
+        return True
+    if append_unique_active_sessions(active_sessions, [session]) != [session]:
+        raise ValueError('Docker prepared session is not unique')
+    try:
+        if activate is None:
+            raise ValueError('Docker original activation is unavailable')
+        activate(session)
+    except Exception:
+        logger.exception('Docker prepared original retained without activation')
+        return False
+    manager.mark_launched(SessionRef.for_issue(session.issue.number), session.worktree_path)
+    return True
+
+
+def publish_issue_launch(events: EventSink, session: Session, agent: str, prompt_path: str | None,
+                         *, from_scratch: bool) -> None:
+    """Publish the identity of a successfully activated issue session."""
+    run = session.run_assets
+    payload: SessionStartedEventPayload = {
+        "issue_number": session.issue.number, "session_id": session.terminal_id,
+        "agent": agent, "task": session.key.kind.value, "worktree_path": str(session.worktree_path),
+        "branch_name": session.branch_name, "reset_from_scratch": from_scratch,
+        "run_id": run.run_id, "run_dir": str(run.run_dir), "completion_path": session.completion_path,
+        "completion_path_absolute": str((session.worktree_path / session.completion_path).resolve()),
+        "session_prompt_path": prompt_path,
+    }
+    if from_scratch:
+        payload["review_cache_boundary_started_at"] = run.started_at
+    events.publish(make_session_started_event(payload))
 
 
 class WorkDisposal(Enum):

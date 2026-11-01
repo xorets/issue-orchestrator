@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Protocol
+from typing import Any, Protocol
 
 
 class ProviderErrorType(str, Enum):
@@ -30,6 +30,98 @@ class ProviderErrorType(str, Enum):
         that AUTH was given its own window to prevent (#6999).
         """
         return self in (ProviderErrorType.AUTH, ProviderErrorType.QUOTA)
+
+
+@dataclass(frozen=True)
+class ProviderStatus:
+    provider: str | None
+    error_type: ProviderErrorType | None
+    attempts: int
+    succeeded: bool
+    exit_code: int | None
+    timed_out: bool
+    last_error_summary: str | None
+    last_attempt_at: str
+    quota_heals_on_timer: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "provider": self.provider,
+            "error_type": self.error_type.value if self.error_type else None,
+            "attempts": self.attempts,
+            "succeeded": self.succeeded,
+            "exit_code": self.exit_code,
+            "timed_out": self.timed_out,
+            "last_error_summary": self.last_error_summary,
+            "last_attempt_at": self.last_attempt_at,
+            "quota_heals_on_timer": self.quota_heals_on_timer,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ProviderStatus":
+        try:
+            last_attempt_at = data["last_attempt_at"]
+        except KeyError as exc:
+            raise ValueError(
+                "provider status must include last_attempt_at"
+            ) from exc
+        if not isinstance(last_attempt_at, str):
+            raise ValueError("provider status last_attempt_at must be a string")
+        error_type = data.get("error_type")
+        parsed_error_type = None
+        if error_type:
+            try:
+                parsed_error_type = ProviderErrorType(str(error_type))
+            except ValueError:
+                parsed_error_type = None
+        return cls(
+            provider=data.get("provider"),
+            error_type=parsed_error_type,
+            attempts=int(data.get("attempts", 1)),
+            succeeded=bool(data.get("succeeded", False)),
+            exit_code=data.get("exit_code"),
+            timed_out=bool(data.get("timed_out", False)),
+            last_error_summary=data.get("last_error_summary"),
+            last_attempt_at=last_attempt_at,
+            quota_heals_on_timer=bool(data.get("quota_heals_on_timer", False)),
+        )
+
+
+    def diagnostic(self) -> dict[str, str] | None:
+        """Classify only observed provider outcomes, without worker text."""
+        if self.succeeded:
+            return None
+        kind = self.error_type.value if self.error_type else ''
+        reason = ('provider_timeout' if self.timed_out else
+            {'auth':'provider_auth', 'quota':'provider_quota', 'transient':'provider_transient'}.get(kind, 'provider_nonzero'))
+        return {'phase':'provider', 'reason':reason}
+
+    @classmethod
+    def from_worker_payload(cls, data: object, exit_code: int, lane: str, heals: bool) -> "ProviderStatus":
+        """Validate bounded untrusted provider results before they affect a circuit."""
+        fields = {'provider', 'error_type', 'attempts', 'succeeded', 'exit_code', 'timed_out', 'last_error_summary',
+            'last_attempt_at', 'quota_heals_on_timer'}
+        if (type(data) is not dict or set(data) != fields or type(data['attempts']) is not int or data['attempts'] != 1 or
+                type(data['succeeded']) is not bool or type(data['timed_out']) is not bool or
+                type(data['quota_heals_on_timer']) is not bool or
+                type(data['provider']) is not str or len(data['provider']) > 128 or
+                data['error_type'] is not None and data['error_type'] not in {x.value for x in ProviderErrorType} or
+                data['last_error_summary'] is not None and (type(data['last_error_summary']) is not str or len(data['last_error_summary']) > 303) or
+                type(data['last_attempt_at']) is not str or len(data['last_attempt_at']) > 64 or
+                data['exit_code'] is not None and type(data['exit_code']) is not int or
+                (data['exit_code'] if data['exit_code'] is not None else 124 if data['timed_out'] else 1) != exit_code):
+            raise ValueError('Docker provider status shape or exec result differs')
+        try:
+            observed = datetime.fromisoformat(data['last_attempt_at'])
+        except ValueError as exc:
+            raise ValueError('Docker provider status timestamp differs') from exc
+        if (type(exit_code) is not int or observed.utcoffset() is None or data['succeeded'] != (exit_code == 0) or
+                data['succeeded'] and data['error_type'] is not None):
+            raise ValueError('Docker provider status outcome differs')
+        result = cls.from_dict(data)
+        if result.provider != lane or result.quota_heals_on_timer is not heals:
+            raise ValueError('Docker provider status belongs to another lane')
+        return result
 
 
 @dataclass(frozen=True)

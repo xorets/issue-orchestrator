@@ -97,9 +97,67 @@ def admitted_readiness_context(provider: str, credentials: ProviderCredentials, 
             current = home.lstat()
             if (current.st_dev,current.st_ino) != (identity.st_dev,identity.st_ino):
                 raise ValueError('Docker readiness runtime identity changed')
+            _clear_private_home(descriptor, identity)
+            current = home.lstat()
+            if (current.st_dev,current.st_ino) != (identity.st_dev,identity.st_ino):
+                raise ValueError('Docker readiness runtime identity changed')
             home.rmdir()
         finally:
             os.close(descriptor)
+
+
+class _PrivateHomeCleaner:
+    """Bounded descriptor-relative cleanup of a private readiness home."""
+    def __init__(self, identity: os.stat_result):
+        self.identity = identity
+        self.remaining = 256
+
+    def clear(self, fd: int, depth: int) -> None:
+        if depth > 8:
+            raise ValueError('Docker readiness cache nesting exceeded')
+        names = []
+        with os.scandir(fd) as entries:
+            for entry in entries:
+                self.remaining -= 1
+                if self.remaining < 0:
+                    raise ValueError('Docker readiness cache entry limit exceeded')
+                names.append(entry.name)
+        for name in names:
+            self._remove(fd, name, depth)
+
+    def _remove(self, fd: int, name: str, depth: int) -> None:
+        before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        if before.st_uid != self.identity.st_uid or before.st_dev != self.identity.st_dev:
+            raise ValueError('Docker readiness cache ownership changed')
+        if stat.S_ISDIR(before.st_mode):
+            self._remove_directory(fd, name, depth, before)
+        elif stat.S_ISLNK(before.st_mode) or stat.S_ISREG(before.st_mode) and before.st_nlink == 1:
+            self._verify_identity(fd, name, before, 'entry')
+            os.unlink(name, dir_fd=fd)
+        else:
+            raise ValueError('Docker readiness cache contains unexpected entry')
+
+    @staticmethod
+    def _verify_identity(fd: int, name: str, before: os.stat_result, kind: str) -> None:
+        after = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
+            raise ValueError('Docker readiness cache ' + kind + ' changed')
+
+    def _remove_directory(self, fd: int, name: str, depth: int, before: os.stat_result) -> None:
+        child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        try:
+            actual = os.fstat(child)
+            if (actual.st_dev, actual.st_ino) != (before.st_dev, before.st_ino):
+                raise ValueError('Docker readiness cache directory changed')
+            self.clear(child, depth + 1)
+            self._verify_identity(fd, name, actual, 'directory')
+            os.rmdir(name, dir_fd=fd)
+        finally:
+            os.close(child)
+
+
+def _clear_private_home(directory_fd: int, identity: os.stat_result) -> None:
+    _PrivateHomeCleaner(identity).clear(directory_fd, 0)
 
 
 def readiness_task(provider: str) -> tuple[dict, Path, Path]:

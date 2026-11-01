@@ -824,6 +824,22 @@
       "rule_id": "control_policy_branch_sites",
       "value": 2
     },
+    "control_policy_branch_sites:src/issue_orchestrator/execution/docker_engine.py": {
+      "detail": "6 branch site(s) mention lifecycle/control terms",
+      "kind": "control_policy_branch_sites",
+      "metric_id": "src/issue_orchestrator/execution/docker_engine.py",
+      "path": "src/issue_orchestrator/execution/docker_engine.py",
+      "rule_id": "control_policy_branch_sites",
+      "value": 6
+    },
+    "control_policy_branch_sites:src/issue_orchestrator/execution/docker_never_started.py": {
+      "detail": "3 branch site(s) mention lifecycle/control terms",
+      "kind": "control_policy_branch_sites",
+      "metric_id": "src/issue_orchestrator/execution/docker_never_started.py",
+      "path": "src/issue_orchestrator/execution/docker_never_started.py",
+      "rule_id": "control_policy_branch_sites",
+      "value": 3
+    },
     "control_policy_branch_sites:src/issue_orchestrator/execution/git_working_copy.py": {
       "detail": "1 branch site(s) mention lifecycle/control terms",
       "kind": "control_policy_branch_sites",
@@ -855,6 +871,14 @@
       "path": "src/issue_orchestrator/execution/orchestrator_http_api.py",
       "rule_id": "control_policy_branch_sites",
       "value": 2
+    },
+    "control_policy_branch_sites:src/issue_orchestrator/execution/original_delivery_docker.py": {
+      "detail": "4 branch site(s) mention lifecycle/control terms",
+      "kind": "control_policy_branch_sites",
+      "metric_id": "src/issue_orchestrator/execution/original_delivery_docker.py",
+      "path": "src/issue_orchestrator/execution/original_delivery_docker.py",
+      "rule_id": "control_policy_branch_sites",
+      "value": 4
     },
     "control_policy_branch_sites:src/issue_orchestrator/execution/persistent_review_exchange_runner.py": {
       "detail": "1 branch site(s) mention lifecycle/control terms",
