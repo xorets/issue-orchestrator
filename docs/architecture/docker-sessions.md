@@ -342,7 +342,8 @@ readiness path. No host auth file is mounted or copied.
 ## Builder source composition checks
 
 Run `BUILDER_SOURCE=/path/to/builder make test-builder-source` to exercise the
-actual Builder listener and workspace-overlay producer with Engine consumers.
+actual Builder listener, workspace-overlay producer and child diagnostic producers
+with Engine consumers, including status/owner/MCP serialization.
 The selected target fails clearly if its Builder checkout is missing or invalid;
 it generates its overlay fixture locally rather than requiring a retained packet.
 These checks use local sockets with substituted admission/upstream behavior and

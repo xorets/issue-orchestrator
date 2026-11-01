@@ -566,7 +566,7 @@ sync-deps:
 
 # Explicitly selected cross-repository checks; selected prerequisites fail in builder_source.
 test-builder-source: sync-deps
-	$(PYTEST) tests/unit/test_docker_model_gateway_client.py tests/unit/test_docker_worker_authority.py -m builder_source -q --tb=short
+	$(PYTEST) tests/unit/test_docker_model_gateway_client.py tests/unit/test_docker_worker_authority.py tests/unit/test_terminal_docker.py -m builder_source -q --tb=short
 
 test-unit: sync-deps
 ifeq ($(LANE_EXECUTOR),condor)

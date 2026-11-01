@@ -1167,7 +1167,8 @@ def test_terminal_provider_handoff_stops_worker_even_on_invalid_status(launch, t
 
 
 @pytest.mark.parametrize(('outcome', 'status_recording_fails', 'receipt_recording_fails', 'transport_fails', 'corrupt_status', 'stream_failure'),
-    [(*row, '') for row in [(outcome, *case) for outcome in ('failure', 'timeout') for case in
+    [pytest.param(*scenario, marks=pytest.mark.builder_source if scenario[0].startswith('producer_') else ())
+     for scenario in [(*row, '') for row in [(outcome, *case) for outcome in ('failure', 'timeout') for case in
         [(False, False, False, ''), (True, False, False, ''), (False, True, False, ''),
          (True, True, False, ''), (False, True, True, ''), (False, True, False, 'malformed'),
          (False, True, False, 'foreign')]] + [('cancel', False, False, False, ''), ('cancel', True, False, False, ''),
@@ -1176,8 +1177,8 @@ def test_terminal_provider_handoff_stops_worker_even_on_invalid_status(launch, t
             ('child_file', False, False, False, ''), ('child_file', True, False, False, ''),
             ('child_file', False, True, False, ''), ('producer_file', False, False, False, ''),
             ('producer_marker', False, False, False, ''), ('producer_timeout', False, False, False, ''),
-            ('producer_interrupted', False, False, False, ''), ('producer_spawn', False, False, False, ''), ('producer_combined', False, False, False, '')]] + [(outcome, False, False, False, '', failure) for outcome in ('child', 'producer_timeout') for failure in ('transport', 'output', 'output_close')])
-def test_real_provider_failure_survives_stop_failure(launch, tmp_path, monkeypatch, status_recording_fails, receipt_recording_fails, transport_fails, corrupt_status, outcome, stream_failure):
+            ('producer_interrupted', False, False, False, ''), ('producer_spawn', False, False, False, ''), ('producer_combined', False, False, False, '')]] + [(outcome, False, False, False, '', failure) for outcome in ('child', 'producer_timeout') for failure in ('transport', 'output', 'output_close')]])
+def test_real_provider_failure_survives_stop_failure(launch, tmp_path, monkeypatch, status_recording_fails, receipt_recording_fails, transport_fails, corrupt_status, outcome, stream_failure, request):
     """Actual provider status must survive the later Docker stop error."""
     import shlex
     import subprocess
@@ -1208,10 +1209,9 @@ def test_real_provider_failure_survives_stop_failure(launch, tmp_path, monkeypat
     wrapper = ProviderCommandWrapper(ProviderShortRetryConfig(max_attempts=1, initial_backoff_seconds=1,
         max_backoff_seconds=1, jitter=False))
     child_command = "printf 'ACPCHILD1|nonzero|2|n|10|20|0|0' >&2; exit 78"
-    builder_source = os.environ.get('BUILDER_CHILD_PRODUCER_SOURCE')
+    builder_source = None
     if outcome.startswith('producer_'):
-        if not builder_source:
-            pytest.skip('explicit Builder child producer source not supplied')
+        builder_source = str(request.getfixturevalue('builder_source').parent.parent)
         import shlex
         producer_packet = tmp_path / 'producer-packet.json'; producer_packet.write_bytes(canonical(packet))
         producer = tmp_path / 'producer.py'
