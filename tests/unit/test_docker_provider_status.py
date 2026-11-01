@@ -297,7 +297,8 @@ def test_marker_classification_is_narrow(tmp_path, message, exact):
     assert actual.stderr == message and actual.attempts == 1
 
 
-def test_selected_docker_entrypoint_does_not_classify_marker_metadata(tmp_path, monkeypatch):
+@pytest.mark.parametrize('lane', ['codex', 'codex:spark'])
+def test_selected_docker_entrypoint_does_not_classify_marker_metadata(tmp_path, monkeypatch, lane):
     import shlex
     from issue_orchestrator.entrypoints.cli_tools.provider_runner import main
     from issue_orchestrator.execution import docker_provider_status
@@ -307,6 +308,7 @@ def test_selected_docker_entrypoint_does_not_classify_marker_metadata(tmp_path, 
     monkeypatch.setattr(docker_provider_status, 'worker_slot', lambda value, run_dir: Path(value))
     marker = 'ACPCHILD1|timeout|n|TimeoutExpired|401|500|1|0'
     command = 'printf %s ' + shlex.quote(marker + '\n') + ' >&2; exit 78'
-    assert main(['--command', command, '--provider', 'codex', '--run-dir', str(slot), '--max-attempts', '1']) == 78
+    assert main(['--command', command, '--provider', lane, '--run-dir', str(slot), '--max-attempts', '1']) == 78
     status = read_provider_status(slot)
+    assert status.provider == lane
     assert status.error_type is None and status.last_error_summary == marker

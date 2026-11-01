@@ -362,3 +362,29 @@ async def test_continuous_stream_accepts_renewed_fence(monkeypatch):
                            context, time.time_ns() + 10_000_000_000, {}, 'dummy')
     assert len([chunk async for chunk in stream]) == 20
     assert 2 <= len(checks) <= 4
+
+
+@pytest.mark.asyncio
+async def test_close_failure_releases_capability_for_next_request(monkeypatch):
+    from types import SimpleNamespace
+    from issue_orchestrator.entrypoints import control_api, docker_model_gateway_routes as route
+    monkeypatch.setattr(control_api, 'verify_docker_callback_authorization', lambda _: True)
+    monkeypatch.setattr(route, 'time', SimpleNamespace(time_ns=lambda:0, monotonic=lambda:0))
+    context = {'grant_kind':'builder-docker-container-model-authorization', 'deadline_unix_ns':10**12,
+        'controller_home':'/unused', 'max_output_bytes':100}
+    engine = SimpleNamespace(docker_model_gateway_context=lambda *args:context,
+        docker_model_gateway_credentials=lambda:{'XORETS_DOCKER_MODEL_AUTH_JSON':'DUMMY'})
+    async def upstream(**kwargs):
+        try:
+            yield b'chunk'
+        finally:
+            raise ConnectionResetError('fixture close failed')
+    monkeypatch.setattr(route, 'forward_model_request', upstream)
+    class Body:
+        async def stream(self): yield b'{}'
+    for _ in range(2):
+        response = await route.model_gateway(Body(), SimpleNamespace(get_orchestrator=lambda:engine),
+            authorization='x', x_completion_capability='close-failure-cap')
+        assert await anext(response.body_iterator) == b'chunk'
+        with pytest.raises(ConnectionResetError, match='fixture close failed'):
+            await response.body_iterator.aclose()

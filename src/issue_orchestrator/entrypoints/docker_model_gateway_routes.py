@@ -131,8 +131,10 @@ async def _stream(engine, capability, allocation, context, deadline, value, prov
                 except StopAsyncIteration:
                     break
     finally:
-        await iterator.aclose()
-        allocation.release()
+        try:
+            await iterator.aclose()
+        finally:
+            allocation.release()
 
 
 @router.post('/api/docker/model-gateway/responses')

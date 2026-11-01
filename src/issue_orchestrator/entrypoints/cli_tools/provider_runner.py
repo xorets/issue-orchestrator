@@ -93,7 +93,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     runner = (DockerCodexRunner() if os.environ.get("ISSUE_ORCHESTRATOR_CALLBACK_SCOPE") == "docker"
-              and provider == "codex" else SubprocessAgentRunner())
+              and provider is not None and provider.partition(":")[0] == "codex" else SubprocessAgentRunner())
     result = runner.run(AgentSpec(
         command=_build_command(args.command),
         working_dir=Path.cwd(),
