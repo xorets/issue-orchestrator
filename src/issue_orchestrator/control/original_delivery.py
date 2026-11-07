@@ -277,6 +277,9 @@ class OriginalDeliveryOwner:
                 proof = self.docker_custody.never_started(claim.original)
                 if proof is not None:
                     result['never_started'] = proof
+                proofs = self.docker_custody.stop_waits(claim.original)
+                if proofs:
+                    result['stop_waits'] = proofs
         return result
 
     def execute(self, issue_number: int, command: OriginalDeliveryCommand) -> dict[str, object]:
@@ -513,8 +516,11 @@ class OriginalDeliveryOwner:
         if self.state is not None and any(s.issue.number == issue_number for s in self.state.active_sessions):
             for session in self.state.active_sessions:
                 if session.issue.number == issue_number:
-                    self.verify_session(session)
-                    self.termination_scope(owner, session.run_assets.run_id)
+                    if owner.execution_backend == 'docker' and self.docker_custody is not None:
+                        self.docker_custody.verify_terminal_session(owner, session)
+                    else:
+                        self.verify_session(session)
+                        self.termination_scope(owner, session.run_assets.run_id)
             if self.terminate is None:
                 raise ValueError("Original termination capability is unavailable")
             if not self.terminate(issue_number).complete:

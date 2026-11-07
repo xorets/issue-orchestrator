@@ -463,6 +463,28 @@ class DockerNeverStartedPayload(BaseModel):
     schema_version: Literal[1]
     stop_wait: Literal['completed']
 
+class DockerStopWaitPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    container_id: str
+    contract_sha256: str
+    controller_container_id: str
+    daemon_id: str
+    kind: Literal['docker-stop-wait']
+    launch_sha256: str
+    provider_exec_id: str
+    repository: str
+    result: DockerStopWaitResult
+    run_id: str
+    schema_version: Literal[1]
+    session_name: str
+
+class DockerStopWaitResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    finished_at: str = Field(..., min_length=1)
+    restart_count: int = Field(..., ge=0, strict=True)
+    started_at: str = Field(..., min_length=1)
+    status_code: int
+
 class DoctorCheckPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
     detail: str | None = None
@@ -1222,6 +1244,7 @@ class OriginalDeliveryPayload(BaseModel):
     never_started: DockerNeverStartedPayload | None = None
     owner: OriginalDeliveryOwnerPayload | None
     remote_released: bool = Field(..., strict=True)
+    stop_waits: list[DockerStopWaitPayload] | None = None
 
 class OriginalDeliveryRequestPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")

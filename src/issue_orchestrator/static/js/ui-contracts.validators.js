@@ -1884,6 +1884,91 @@
             ],
             "type": "object"
         },
+        "DockerStopWaitPayload": {
+            "additionalProperties": false,
+            "properties": {
+                "container_id": {
+                    "type": "string"
+                },
+                "contract_sha256": {
+                    "type": "string"
+                },
+                "controller_container_id": {
+                    "type": "string"
+                },
+                "daemon_id": {
+                    "type": "string"
+                },
+                "kind": {
+                    "const": "docker-stop-wait",
+                    "type": "string"
+                },
+                "launch_sha256": {
+                    "type": "string"
+                },
+                "provider_exec_id": {
+                    "type": "string"
+                },
+                "repository": {
+                    "type": "string"
+                },
+                "result": {
+                    "$ref": "#/components/schemas/DockerStopWaitResult"
+                },
+                "run_id": {
+                    "type": "string"
+                },
+                "schema_version": {
+                    "const": 1,
+                    "type": "integer"
+                },
+                "session_name": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "schema_version",
+                "kind",
+                "repository",
+                "run_id",
+                "session_name",
+                "contract_sha256",
+                "launch_sha256",
+                "daemon_id",
+                "controller_container_id",
+                "container_id",
+                "provider_exec_id",
+                "result"
+            ],
+            "type": "object"
+        },
+        "DockerStopWaitResult": {
+            "additionalProperties": false,
+            "properties": {
+                "finished_at": {
+                    "minLength": 1,
+                    "type": "string"
+                },
+                "restart_count": {
+                    "minimum": 0,
+                    "type": "integer"
+                },
+                "started_at": {
+                    "minLength": 1,
+                    "type": "string"
+                },
+                "status_code": {
+                    "type": "integer"
+                }
+            },
+            "required": [
+                "status_code",
+                "started_at",
+                "finished_at",
+                "restart_count"
+            ],
+            "type": "object"
+        },
         "DoctorCheckPayload": {
             "additionalProperties": false,
             "properties": {
@@ -5221,6 +5306,12 @@
                 },
                 "remote_released": {
                     "type": "boolean"
+                },
+                "stop_waits": {
+                    "items": {
+                        "$ref": "#/components/schemas/DockerStopWaitPayload"
+                    },
+                    "type": "array"
                 }
             },
             "required": [

@@ -415,6 +415,28 @@ export interface DockerNeverStartedPayload {
   stop_wait: "completed";
 }
 
+export interface DockerStopWaitPayload {
+  container_id: string;
+  contract_sha256: string;
+  controller_container_id: string;
+  daemon_id: string;
+  kind: "docker-stop-wait";
+  launch_sha256: string;
+  provider_exec_id: string;
+  repository: string;
+  result: DockerStopWaitResult;
+  run_id: string;
+  schema_version: 1;
+  session_name: string;
+}
+
+export interface DockerStopWaitResult {
+  finished_at: string;
+  restart_count: number;
+  started_at: string;
+  status_code: number;
+}
+
 export interface DoctorCheckPayload {
   detail?: string | null;
   name?: string | null;
@@ -1126,6 +1148,7 @@ export interface OriginalDeliveryPayload {
   never_started?: DockerNeverStartedPayload;
   owner: OriginalDeliveryOwnerPayload | null;
   remote_released: boolean;
+  stop_waits?: DockerStopWaitPayload[];
 }
 
 export interface OriginalDeliveryRequestPayload {
