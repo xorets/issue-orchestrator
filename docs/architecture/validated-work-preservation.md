@@ -19,6 +19,12 @@ Allocation records the agent label and effective completion task with the attach
 
 The completion intake owner closes and drains the selected scope, repairing acknowledged receipt artifacts before returning typed prepared candidates. Eligibility uses immutable owner-normalized completion bytes and validator attestations. Agent-authored sidecars and latest-run filesystem discovery grant no authority.
 
+The run ledger establishes its canonical, current-owner state directory with
+mode `0700` before opening durable run or completion custody. Reopening an
+existing ledger also secures an owner-created directory left at `0755`, without
+changing its recorded allocations or receipts. Aliased paths and foreign
+ownership refuse initialization; consumers retain their private-custody checks.
+
 The fixed configured completion validator receives
 `ISSUE_ORCHESTRATOR_COMPLETION_CONTEXT` from the typed intake entry, overriding
 any ambient value. Its schema-1 JSON identifies the entry, retained raw path and
