@@ -15,6 +15,14 @@ revision after required qualification and independent Standards and Spec reviews
 pass. This source API does not constitute installed Ubuntu acceptance or a real
 delivery, and does not authorize production activation or human merge.
 
+Builder's selected Docker marker can inherit a schema-5 inner contract with a
+version-1 current-state retry identity. The original-owner and worker-authority
+readers verify its request/content digest, generation, Builder run identity and
+Docker backend, while preserving the same sealed grant, configuration, custody
+and correction limits. Schema-4 contracts retain their original interpretation;
+a current request cannot be relabeled as legacy authority. This compatibility
+change grants no model allowance, installation, activation or merge authority.
+
 ## Public commands
 
 MCP exposes `orchestrator.original_delivery(issue_number, operation, payload)`.
