@@ -1130,6 +1130,7 @@ export interface OriginalDeliveryOwnerPayload {
   process_roots: (string | number)[][];
   released: boolean;
   repository: string;
+  reservation_recovery?: ReservationRecoveryPayload | null;
   run_dir: string;
   run_id: string;
   session_name: string;
@@ -1159,6 +1160,8 @@ export interface OriginalDeliveryRequestPayload {
   head_sha?: string;
   lease_id: string;
   pr_number?: number;
+  recovery_evidence_path?: string;
+  recovery_evidence_sha256?: string;
   request_id: string;
   run_id: string;
   session_name?: string;
@@ -1505,6 +1508,13 @@ export interface RepositorySetupValidationDefaultsPayload {
   publish_command: string | null;
   quick_command: string | null;
   source: string;
+}
+
+export interface ReservationRecoveryPayload {
+  evidence_path: string;
+  evidence_sha256: string;
+  previous_fence: string;
+  request_id: string;
 }
 
 export interface RetrospectiveReviewDecisionPayload {

@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 from ..domain.models import Session
-from ..domain.original_delivery import DockerCustody, OriginalDelivery
+from ..domain.original_delivery import DockerCustody, OriginalDelivery, ReservationRecovery
 from ..ports.original_docker_custody import DockerPrestartSnapshot
 from .terminal_docker import DockerPlugin, canonical, sealed_bytes
 from .original_delivery_session import require_native_session_assets
-from hashlib import sha256
+from hashlib import sha256, file_digest
 import json
 import os
 import re
@@ -191,6 +191,63 @@ class DockerOriginalCustody:
         if not same_exec and not retained_stop:
             raise ValueError("Docker original exec identity or retained settlement changed")
         return actual
+
+    def recovery_snapshot(self, owner: OriginalDelivery) -> list[dict]:
+        """Current containment only; missing historical provider settlement stays unknown."""
+        from .docker_worker_state import stopped_container_generation
+        self.verify_contract(owner)
+        if (owner.execution_backend != "docker" or not owner.cancelled or not owner.docker_custody or
+                {row.run_id for row in owner.docker_custody} != {owner.run_id, *(row[1] for row in owner.correction_runs)}):
+            raise ValueError("Docker recovery custody coverage is unknown")
+        snapshots = []
+        for row in owner.docker_custody:
+            worker = self._container(row)
+            controller = self.runner.engine.request("GET", f"/containers/{row.controller_container_id}/json")
+            snapshots.append({"run_id": row.run_id,
+                "worker": stopped_container_generation(worker, row.container_id),
+                "controller": stopped_container_generation(controller, row.controller_container_id)})
+        return snapshots
+
+    def verify_reservation_recovery(self, owner: OriginalDelivery, lease_id: str, fence: str,
+                                    recovery: ReservationRecovery) -> None:
+        raw = _private_diagnostic_bytes(Path(recovery.evidence_path), 65536, mode=0o400)
+        if sha256(raw).hexdigest() != recovery.evidence_sha256:
+            raise ValueError("Reservation recovery evidence digest changed")
+        evidence = json.loads(raw, object_pairs_hook=_unique_record)
+        expected = {"schema_version": 1, "kind": "original-reservation-recovery", "lease_id": lease_id,
+            "previous_fence": fence, "owner": owner.to_dict(), "stopped": self.recovery_snapshot(owner)}
+        if (type(evidence) is not dict or set(evidence) != {*expected, "preserved"} or
+                canonical({k: evidence[k] for k in expected}) != canonical(expected)):
+            raise ValueError("Reservation recovery identity or stopped generation changed")
+        preserved = evidence["preserved"]
+        if type(preserved) is not dict or set(preserved) != {"claim_bundle", "task_archive", "git_bundle"}:
+            raise ValueError("Reservation recovery preservation is incomplete")
+        for artifact in preserved.values():
+            if (type(artifact) is not dict or set(artifact) != {"path", "sha256"} or
+                    type(artifact["path"]) is not str or type(artifact["sha256"]) is not str or
+                    re.fullmatch("[0-9a-f]{64}", artifact["sha256"]) is None):
+                raise ValueError("Reservation recovery preservation shape differs")
+            path = Path(artifact["path"])
+            if not path.is_absolute() or path.resolve(strict=True) != path:
+                raise ValueError("Reservation recovery preservation path differs")
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                before = os.fstat(fd)
+                if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size <= 0 or
+                        before.st_mode & 0o022):
+                    raise ValueError("Reservation recovery preservation custody differs")
+                with os.fdopen(fd, "rb", closefd=False) as stream:
+                    digest = file_digest(stream, "sha256").hexdigest()
+                after = os.fstat(fd)
+                named = path.lstat()
+                if (digest != artifact["sha256"] or (named.st_dev, named.st_ino) != (before.st_dev, before.st_ino) or
+                        any(getattr(before, key) != getattr(after, key) for key in
+                            ("st_dev", "st_ino", "st_uid", "st_nlink", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns"))):
+                    raise ValueError("Reservation recovery preservation changed")
+            finally:
+                os.close(fd)
+        if expected["stopped"] != self.recovery_snapshot(owner):
+            raise ValueError("Docker recovery stopped generation changed during verification")
 
     def quiescent(self, owner: OriginalDelivery, *, offline: bool) -> None:
         if owner.execution_backend != "docker" or not owner.docker_custody:

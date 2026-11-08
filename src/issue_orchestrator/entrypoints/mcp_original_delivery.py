@@ -29,9 +29,9 @@ async def original_delivery_result(api: OrchestratorAsyncHttpApi, config_path: P
             observed = await api.original_delivery(issue_number, operation,
                 None if request is None else request.model_dump())
         else:
-            if operation not in {"observe", "cancel", "reconcile"}:
+            if operation not in {"observe", "cancel", "reconcile", "retire"}:
                 raise ValueError("An inactive engine permits only original terminal reconciliation")
-            with build_offline_original_delivery_owner(Config.load(config_path)) as owner:
+            with build_offline_original_delivery_owner(Config.load(config_path), recovery_issue=issue_number if operation in {"observe", "retire"} else None) as owner:
                 observed = owner.observe(issue_number) if request is None else owner.execute(issue_number, request.command(operation))
         result = OriginalDeliveryPayload.model_validate(observed).model_dump(mode="json", exclude_unset=True)
     except (ValueError, ClaimFetchError, OSError, RuntimeError) as exc:

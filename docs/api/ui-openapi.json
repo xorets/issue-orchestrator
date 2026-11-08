@@ -30,7 +30,7 @@
         "operationId": "commandOriginalDelivery",
         "parameters": [
           {"name": "issue_number", "in": "path", "required": true, "schema": {"type": "integer", "minimum": 1}},
-          {"name": "operation", "in": "path", "required": true, "schema": {"type": "string", "enum": ["register", "handoff", "correct", "launch", "track", "resume", "cancel", "reconcile"]}}
+          {"name": "operation", "in": "path", "required": true, "schema": {"type": "string", "enum": ["register", "handoff", "correct", "launch", "track", "resume", "cancel", "reconcile", "retire"]}}
         ],
         "requestBody": {
           "required": true,
@@ -1263,6 +1263,30 @@
           }
         }
       },
+      "ReservationRecoveryPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "request_id",
+          "previous_fence",
+          "evidence_path",
+          "evidence_sha256"
+        ],
+        "properties": {
+          "request_id": {
+            "type": "string"
+          },
+          "previous_fence": {
+            "type": "string"
+          },
+          "evidence_path": {
+            "type": "string"
+          },
+          "evidence_sha256": {
+            "type": "string"
+          }
+        }
+      },
       "OriginalDeliveryOwnerPayload": {
         "type": "object",
         "additionalProperties": false,
@@ -1301,6 +1325,7 @@
           "docker_custody"
         ],
         "properties": {
+          "reservation_recovery": {"anyOf": [{"$ref": "#/components/schemas/ReservationRecoveryPayload"}, {"type": "null"}]},
           "repository": {
             "type": "string"
           },
@@ -1891,6 +1916,8 @@
       "OriginalDeliveryRequestPayload": {
         "additionalProperties": false,
         "properties": {
+          "recovery_evidence_path": {"type": "string", "default": "", "maxLength": 4096},
+          "recovery_evidence_sha256": {"type": "string", "default": "", "maxLength": 64},
           "lease_id": {
             "maxLength": 256,
             "minLength": 1,

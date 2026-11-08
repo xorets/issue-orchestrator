@@ -9,9 +9,9 @@ from typing import TYPE_CHECKING, Any
 
 from ..domain.claim import Claim, ClaimFetchError
 from ..domain.models import OrchestratorState, PendingRework, Session
-from ..domain.original_delivery import OriginalDelivery, OriginalDeliveryOperation
+from ..domain.original_delivery import OriginalDelivery, OriginalDeliveryOperation, ReservationRecovery
 from ..infra.runtime_artifacts import builtin_cleanup_root
-from ..ports.original_delivery import OriginalDeliveryClaims, OriginalDeliveryClaimHistory
+from ..ports.original_delivery import OriginalDeliveryClaims, OriginalDeliveryClaimHistory, OriginalReservationRecoveryClaims
 from ..ports.original_docker_custody import OriginalDockerCustody
 from ..ports.repository_host import RepositoryHost
 from ..ports.working_copy import WorkingCopy
@@ -45,6 +45,8 @@ class OriginalDeliveryCommand:
     head_sha: str = ""
     base_sha: str = ""
     feedback: str = ""
+    recovery_evidence_path: str = ""
+    recovery_evidence_sha256: str = ""
 
     def __post_init__(self) -> None:
         OriginalDeliveryOperation(self.operation)
@@ -289,6 +291,8 @@ class OriginalDeliveryOwner:
         if command.operation == "register":
             return self._register(issue_number, command, claim)
         owner = self._owner(claim, command)
+        if command.operation == "retire":
+            return self._retire(issue_number, command, owner, claim, fence)
         self._require_serving_custody(owner, command.operation)
         claim, fence, owner = self._record_remote_cancel(issue_number, claim, fence, owner)
         if command.operation in {"cancel", "reconcile"}:
@@ -307,6 +311,24 @@ class OriginalDeliveryOwner:
         if command.operation == "launch":
             return self._launch(issue_number, command, owner)
         return self._mutate_handoff(issue_number, command, claim, fence)
+
+    def _retire(self, issue_number: int, command: OriginalDeliveryCommand, owner: OriginalDelivery,
+                claim: Claim, fence: str) -> dict[str, object]:
+        if self.state is not None or self.docker_custody is None or not owner.cancelled or owner.released:
+            raise ValueError("Reservation retirement requires an offline cancelled Docker original")
+        previous = owner.reservation_recovery
+        recovery = ReservationRecovery(command.request_id, previous.previous_fence if previous else fence,
+            command.recovery_evidence_path, command.recovery_evidence_sha256)
+        if previous is not None:
+            if previous != recovery:
+                raise ValueError("Original reservation has been retired with different evidence")
+            return self.observe(issue_number, include_diagnostic=False)
+        if not isinstance(self.claims, OriginalReservationRecoveryClaims):
+            raise ValueError("Original reservation recovery storage is unavailable")
+        self.docker_custody.verify_reservation_recovery(owner, claim.lease_id, fence, recovery)
+        if self.claims.retire_original_reservation(issue_number, claim.lease_id, fence, recovery) is None:
+            raise ValueError("Original reservation fence changed before recovery")
+        return self.observe(issue_number, include_diagnostic=False)
 
     def _mutate_handoff(self, issue_number: int, command: OriginalDeliveryCommand, claim: Claim,
                         fence: str) -> dict[str, object]:

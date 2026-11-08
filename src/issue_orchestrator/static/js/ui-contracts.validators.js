@@ -5207,6 +5207,16 @@
                 "repository": {
                     "type": "string"
                 },
+                "reservation_recovery": {
+                    "anyOf": [
+                        {
+                            "$ref": "#/components/schemas/ReservationRecoveryPayload"
+                        },
+                        {
+                            "type": "null"
+                        }
+                    ]
+                },
                 "run_dir": {
                     "type": "string"
                 },
@@ -5358,6 +5368,14 @@
                 "pr_number": {
                     "minimum": 0,
                     "type": "integer"
+                },
+                "recovery_evidence_path": {
+                    "maxLength": 4096,
+                    "type": "string"
+                },
+                "recovery_evidence_sha256": {
+                    "maxLength": 64,
+                    "type": "string"
                 },
                 "request_id": {
                     "maxLength": 256,
@@ -6994,6 +7012,30 @@
                 "quick_command",
                 "publish_command",
                 "source"
+            ],
+            "type": "object"
+        },
+        "ReservationRecoveryPayload": {
+            "additionalProperties": false,
+            "properties": {
+                "evidence_path": {
+                    "type": "string"
+                },
+                "evidence_sha256": {
+                    "type": "string"
+                },
+                "previous_fence": {
+                    "type": "string"
+                },
+                "request_id": {
+                    "type": "string"
+                }
+            },
+            "required": [
+                "request_id",
+                "previous_fence",
+                "evidence_path",
+                "evidence_sha256"
             ],
             "type": "object"
         },

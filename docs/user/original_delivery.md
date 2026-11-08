@@ -36,7 +36,7 @@ Every mutation requires `lease_id`, `fence`, `contract_sha256`, `run_id`, and a
 bounded `request_id`. `fence` is the current remote claim commit SHA returned by
 observe. `run_id` is the original native engine run, distinct from a controller's
 execution-contract generation ID. Unknown fields and malformed identity values
-are refused. Mutations accept only the eight operation values below, validated
+are refused. Mutations accept only the operation values below, validated
 before transport or owner activity; arbitrary path fragments and unknown values
 are refused. Omitted observation payloads remain read-only. After a stale fence
 or lost acknowledgment, observe the remote record before retrying; a successful
@@ -52,6 +52,7 @@ historical acknowledgment is not authority.
 | `track` | Binds observed worker roots for the exact currently active correction run and admitted request. It cannot invent a run or session. |
 | `resume` | Explicit restart custody, preserving original run/session/contract/budget, canceled intent, admitted history, and process roots. Requires the old engine and supported workers positively gone and the same sealed configuration/contract. Records previous engine identities; cancellation refuses restart correction. |
 | `cancel` | Persists cancellation intent before termination and preserves it in the terminal record. A partial stop or unreadable owned process leaves the remote claim retained. |
+| `retire` | Offline cancelled Docker original only. Requires `recovery_evidence_path` and `recovery_evidence_sha256`, positive current containment, preserved evidence and unchanged-owner CAS. Records reservation recovery while keeping `released=false`; no task success, historical release certificate or fresh launch authority is inferred. |
 | `reconcile` | Reconciles only the exact fenced original after positive worker quiescence. Writes a released tombstone through non-force remote CAS, preserving original evidence and allowing legitimate successor claim acquisition. |
 
 Observe's `owner` contains the original native terminal `session_name` and
@@ -100,8 +101,10 @@ must resume the original fence explicitly. Remote release is the positively read
 `io:claimed` label is never a release oracle. Ordinary unregistered completion
 uses the existing release contract and reports release only after observation.
 
-When the selected engine is inactive, MCP permits only observe, cancel, and
-reconcile, using the explicitly configured original remote claimant. It starts
+When the selected engine is inactive, MCP permits observe, cancel, reconcile and guarded retirement. Cancel and
+reconcile require the explicitly configured original remote claimant. For legacy
+observe/retire only, a missing claimant may be resolved from the original remote
+record when its repository/configuration and original PID-derived claimant match. It starts
 no engine or model. Reconciliation requires the original engine's exact PID/birth
 to be gone on the same host, then checks owned run/workspace processes and
 retained worker/session identities. Supported descendants remain visible after
@@ -135,3 +138,35 @@ records the existing facade's serialized delegation, completion claim wiring,
 and retained-lease renewal. The owner keeps these decisions together; the facade
 delegates rather than duplicating authority policy. Public input/output contracts
 and native launch complexity remain enforced without new suppressions.
+
+## Abandoned Docker reservation recovery
+
+The trusted operator preserves the failed result, spent accounting, original
+claim Git bundle, task archive and task Git bundle before requesting `retire`.
+Recovery never overwrites original stop/wait receipts or changes an UNKNOWN
+historical release into a certificate. A stopped worker and controller prevent
+those exact containers from executing now; future runtime admission remains
+subject to its separate original authority and current configuration checks.
+
+The evidence is a canonical, single-link, current-user mode-0400 JSON file,
+limited to 64KiB, with exactly `schema_version: 1`,
+`kind: original-reservation-recovery`, `lease_id`, `previous_fence`, the complete
+`owner` observed before retirement, `stopped` from the custody owner's
+`recovery_snapshot`, and `preserved`. The latter contains exactly `claim_bundle`,
+`task_archive`, `git_bundle`, each an absolute canonical `path` and its `sha256`.
+The trusted operator is responsible for selecting complete matching archives
+and verifying their contents using the existing preservation procedures; these
+paths are evidence references, not worker-provided proof of archive completeness.
+The owner verifies file custody and hashes, then rereads exact daemon/worker/
+controller stopped generations before remote CAS. Live or restarted containers,
+changed claim/configuration, incomplete custody, missing or changed preservation
+and failed CAS refuse without retiring the reservation. Exec metadata is not
+needed to establish current container containment; normal release reconciliation
+still requires its positive original settlement proof.
+
+The retained claim records `reservation_recovery` with request, prior fence and
+evidence identity. Scheduling sees no active reservation; the immutable prior
+Git commits retain the failed original. Re-observe after lost acknowledgement;
+an identical recovery request returns its recorded disposition. A different
+request cannot rewrite it. Later cleanup and independent restoration verification
+remain separate, using existing supported controls and original baseline.

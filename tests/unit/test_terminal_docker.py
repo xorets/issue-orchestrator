@@ -2162,3 +2162,62 @@ def test_retained_poststop_preobservation_matches_exact_exec_validator():
         observed = json.loads(raw)
     require_never_started_exec(observed, observed['ContainerID'], observed['ID'], '1000:1000',
         ['/usr/bin/python3','-I','-B','-c','pass'])
+
+
+def test_abandoned_reservation_checks_current_containment_and_preservation(launch, monkeypatch, tmp_path):
+    from dataclasses import replace
+    from issue_orchestrator.domain.original_delivery import DockerCustody, ReservationRecovery
+    from issue_orchestrator.execution.original_delivery_docker import DockerOriginalCustody
+    from tests.unit.test_original_delivery import custody
+    runner, engine, packet, _ = launch
+    engine.running = engine.controller_running = False
+    request = engine.request
+    def read(method, route, payload=None):
+        if route == '/containers/'+'1'*64+'/json':
+            value = engine.worker()
+            value['Id'] = '1'*64
+            value['State']['Running'] = engine.controller_running
+            return value
+        return request(method, route, payload)
+    monkeypatch.setattr(engine, 'request', read)
+    monkeypatch.setattr(engine, 'inspect_exec', lambda _: (_ for _ in ()).throw(AssertionError('No historical exec proof')))
+    row = DockerCustody(1, packet['run_id'], engine.daemon, '1'*64, '2'*64, '3'*64,
+        sha256(canonical(packet)).hexdigest())
+    owner = replace(custody(), repository=packet['repository'], run_id=packet['run_id'],
+        contract_sha256=packet['contract_sha256'], worktree=packet['working_dir'], session_name=packet['session_name'],
+        run_dir=packet['engine_run_dir'], execution_backend='docker', docker_custody=(row,), cancelled=True)
+    backend = DockerOriginalCustody(runner)
+    evidence = {'schema_version':1, 'kind':'original-reservation-recovery', 'lease_id':'lease',
+        'previous_fence':'a'*40, 'owner':owner.to_dict(), 'stopped':backend.recovery_snapshot(owner), 'preserved':{}}
+    for name in ('claim_bundle', 'task_archive', 'git_bundle'):
+        path = tmp_path/name
+        path.write_bytes(('preserved fixture '+name).encode()); path.chmod(0o400)
+        evidence['preserved'][name] = {'path':str(path), 'sha256':sha256(path.read_bytes()).hexdigest()}
+    proof = tmp_path/'recovery.json'
+    raw = canonical(evidence)
+    proof.write_bytes(raw); proof.chmod(0o400)
+    recovery = ReservationRecovery('retire', 'a'*40, str(proof), sha256(raw).hexdigest())
+    backend.verify_reservation_recovery(owner, 'lease', 'a'*40, recovery)
+    assert not owner.released
+    for target, key, bad in [('owner','run_id','foreign'), ('stopped',None,[]), ('preserved','task_archive',None),
+            ('preserved','task_archive',{'path':42,'sha256':'a'*64})]:
+        changed = copy.deepcopy(evidence)
+        if key is None: changed[target] = bad
+        else: changed[target][key] = bad
+        proof.chmod(0o600); proof.write_bytes(canonical(changed)); proof.chmod(0o400)
+        bound = replace(recovery, evidence_sha256=sha256(proof.read_bytes()).hexdigest())
+        with pytest.raises(ValueError): backend.verify_reservation_recovery(owner, 'lease', 'a'*40, bound)
+    proof.chmod(0o600); proof.write_bytes(raw); proof.chmod(0o400)
+    for attribute in ('running', 'controller_running'):
+        setattr(engine, attribute, True)
+        with pytest.raises(ValueError): backend.verify_reservation_recovery(owner, 'lease', 'a'*40, recovery)
+        setattr(engine, attribute, False)
+    archive = tmp_path/'task_archive'
+    archive.chmod(0o600); archive.write_bytes(b'changed archive'); archive.chmod(0o400)
+    with pytest.raises(ValueError, match='preservation changed'):
+        backend.verify_reservation_recovery(owner, 'lease', 'a'*40, recovery)
+    archive.unlink()
+    with pytest.raises(FileNotFoundError): backend.verify_reservation_recovery(owner, 'lease', 'a'*40, recovery)
+    proof.chmod(0o600)
+    with pytest.raises(ValueError, match='custody'):
+        backend.verify_reservation_recovery(owner, 'lease', 'a'*40, recovery)
