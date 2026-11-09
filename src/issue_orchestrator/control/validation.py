@@ -10,6 +10,7 @@ Storage location: .issue-orchestrator/validation/<suite>/<HEAD_SHA>.json
 """
 
 import json
+from hashlib import sha256
 import logging
 import time
 from dataclasses import dataclass, replace
@@ -18,7 +19,9 @@ from pathlib import Path
 from typing import Optional
 
 from ..domain.attempt import Attempt, AttemptKey
-from ..domain.completion_intake import CompletionIntakeEntry
+from ..domain.completion_intake import CompletionIntakeEntry, CompletionIntakeError, ValidationBinding
+from ..domain.prepared_completion import PreparedCompletionEvidence
+from ..domain.completion_validation_policy import require_current_completion_validator
 from ..infra import validation_timings as timings
 from ..infra.atomic_json import atomic_write_json
 from ..infra.emit import emit_event
@@ -537,6 +540,38 @@ class PublishGate:
                 validation_record_path=str(record_path.resolve()),
             )
         )
+
+    def check_completion(
+        self, evidence: PreparedCompletionEvidence, session_output_dir: Path,
+    ) -> PublishGateResult:
+        """Consume exact owner validation without entering the HEAD-only cache."""
+        entry, attestation = evidence.entry, evidence.validation
+        head_sha = self._get_head_sha()
+        try:
+            if head_sha is None:
+                raise CompletionIntakeError("current publication HEAD is unavailable")
+            self._validate_attempt_key_head(head_sha)
+            require_current_completion_validator(
+                attestation.validator_digest, self.command, self.timeout_seconds,
+            )
+            record = ValidationRecord.from_dict(json.loads(evidence.validation_bytes))
+            if entry.normalized_sha256 is None:
+                raise CompletionIntakeError("owned completion has no normalized intent")
+            binding = ValidationBinding(entry.entry_id, entry.run.identity,
+                                        entry.raw_sha256, entry.normalized_sha256)
+            if (evidence.run.run != entry.run or entry.run.worktree_path != self.worktree
+                    or session_output_dir != entry.run.run_dir or attestation.binding != binding
+                    or sha256(evidence.validation_bytes).hexdigest() != attestation.result_sha256
+                    or attestation.head_sha != head_sha or attestation.passed is not True
+                    or record.head_sha != head_sha or record.command != self.command
+                    or record.schema_version != VALIDATION_SCHEMA_VERSION
+                    or record.suite != "completion_intake" or record.passed is not True
+                    or record.exit_code != 0 or record.timed_out):
+                raise CompletionIntakeError("owned validation does not bind current publication")
+        except (ValueError, TypeError, KeyError, CompletionIntakeError):
+            return PublishGateResult(False, "Owned completion validation does not match current publication")
+        self._materialize_cached_record(record, session_output_dir)
+        return PublishGateResult(True, "Owned completion validation passed", record=record)
 
     def check(self, session_output_dir: Optional[Path] = None) -> PublishGateResult:
         """Check if publishing is allowed.

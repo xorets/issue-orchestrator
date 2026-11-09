@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from ..ports.attempt_store import AttemptStore
     from ..ports.validation_attempt_key_factory import ValidationAttemptKeyFactory
 
+from ..domain.prepared_completion import PreparedCompletionEvidence
 from ..events import EventName
 from ..domain.review_subject import BranchSubject
 from ..domain.dirty_remediation import remediation_prompt_steps
@@ -394,6 +395,10 @@ class SessionController:
             repo_root=repo_root,
             issue_key=issue_key,
             task_kind=task_kind,
+            completion_evidence=(self.completion_processor.prepare_completion_receipt(
+                intake_receipt, run_assets, issue_number,
+            ) if status == SessionStatus.COMPLETED and intake_receipt is not None
+                and record.requests_publication else None),
         )
         if validation_decision is not None:
             status = validation_decision.status
@@ -847,6 +852,7 @@ class SessionController:
         repo_root: Path | None,
         issue_key: "IssueKey | None",
         task_kind: "SessionKind | None" = None,
+        completion_evidence: PreparedCompletionEvidence | None = None,
     ) -> ValidationGateDecision | None:
         if not (
             status == SessionStatus.COMPLETED
@@ -873,6 +879,7 @@ class SessionController:
             retry_prompt_template,
             repo_root,
             issue_key,
+            completion_evidence,
         )
 
     def _emit_pre_publish_validation_failure(
@@ -1201,6 +1208,7 @@ class SessionController:
         retry_prompt_template: str | None,
         repo_root: Path | None,
         issue_key: "IssueKey | None",
+        completion_evidence: PreparedCompletionEvidence | None = None,
     ) -> ValidationGateDecision:
         """Run validation gate and return updated status."""
         logger.info(
@@ -1216,6 +1224,7 @@ class SessionController:
                 issue_title,
                 run_dir,
                 issue_key,
+                completion_evidence,
             )
         )
 
@@ -1593,6 +1602,7 @@ class SessionController:
         issue_title: str,
         run_dir: Path,
         issue_key: "IssueKey | None" = None,
+        completion_evidence: PreparedCompletionEvidence | None = None,
     ) -> tuple[bool, Optional[str], Optional[Path]]:
         """Run validation command (with attempt-scoped caching) and return result.
 
@@ -1642,7 +1652,8 @@ class SessionController:
             sha_display,
         )
 
-        result = gate.check(session_output_dir=target_run_dir)
+        result = (gate.check_completion(completion_evidence, target_run_dir)
+                  if completion_evidence is not None else gate.check(session_output_dir=target_run_dir))
         if result.cache_hit:
             if result.record is None:
                 raise RuntimeError("validation cache hit did not include a record")

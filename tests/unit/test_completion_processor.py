@@ -1168,6 +1168,78 @@ class TestReviewExchangeExecution:
         assert evidence.head_sha == attestation.head_sha
         assert evidence.passed is True
 
+    def test_receipt_validation_survives_the_real_publish_gate(
+        self, tmp_path, mock_label_adapter, mock_pr_adapter, mock_git_adapter, event_bus,
+    ):
+        import shlex
+        import sys
+        from issue_orchestrator.control.completion_intake import CompletionEvidenceIntakeService
+        from issue_orchestrator.control.completion_intake_validation import ConfiguredCompletionEvidenceValidator
+        from issue_orchestrator.control.validation import PublishGate
+        from issue_orchestrator.execution.command_runner import LocalCommandRunner
+        from issue_orchestrator.ports.background_job import BackgroundJobRunner
+        from issue_orchestrator.ports.completion_intake import CompletionValidationWorkspace
+        from issue_orchestrator.ports.historical_intake import HistoricalIntakeHandler
+        from tests.unit.test_completion_evidence_intake import command, completion, setup
+
+        ledger, run, capability, _, working_copy, _ = setup(tmp_path)
+        calls = tmp_path / "validator-calls.jsonl"
+        script = tmp_path / "validator.py"
+        script.write_text(
+            "import json, os, pathlib, sys\n"
+            "context = json.loads(os.environ.get('ISSUE_ORCHESTRATOR_COMPLETION_CONTEXT', '{}'))\n"
+            "if not context: sys.exit(78)\n"
+            f"with pathlib.Path({str(calls)!r}).open('a') as output: output.write(json.dumps(context) + '\\n')\n"
+        )
+        validator_command = f"{shlex.quote(sys.executable)} -I -B {shlex.quote(str(script))}"
+        runner = LocalCommandRunner()
+        workspace = Mock(spec=CompletionValidationWorkspace)
+        workspace.checkout.return_value = run.worktree_path
+        intake = CompletionEvidenceIntakeService(
+            ledger, ConfiguredCompletionEvidenceValidator(
+                working_copy, runner, workspace, command=validator_command, timeout_seconds=30,
+            ), Mock(spec=HistoricalIntakeHandler), Mock(spec=BackgroundJobRunner),
+        )
+        raw = json.loads(completion())
+        raw["requested_actions"] = ["push_branch", "create_pr"]
+        receipt = intake.submit(capability, command(json.dumps(raw).encode(), "publish-gate"))
+        intake.drain()
+        assert ledger.validation_for_receipt(receipt.entry_id).passed
+        config = self._make_config(tmp_path)
+        config.repo = "example/repo"
+        config.agents["agent:claude"] = config.agents.pop("agent:coder")
+        mock_git_adapter.get_head_sha.return_value = working_copy.get_head_sha(run.worktree_path)
+        gate = PublishGate(run.worktree_path, runner, working_copy,
+                           command=validator_command, timeout_seconds=30)
+        processor = make_completion_processor(
+            agent_callback_endpoint=ready_callback_endpoint(), label_adapter=mock_label_adapter,
+            pr_adapter=mock_pr_adapter, git_adapter=mock_git_adapter,
+            session_output=FileSystemSessionOutput(), review_exchange_runner=_CapturingReviewExchangeRunner(),
+            event_bus=event_bus, config=config, completion_intake=intake,
+        )
+
+        from issue_orchestrator.control.session_controller import SessionController
+        from issue_orchestrator.domain.models import SessionStatus
+        from issue_orchestrator.observation.observation import SessionObservationResult
+        from issue_orchestrator.ports import NullEventSink
+        controller = SessionController(
+            processor, NullEventSink(), FileSystemSessionOutput(), working_copy,
+            command_runner=runner, validation_cmd=validator_command, validation_timeout_seconds=30,
+        )
+        decision = controller.decide_outcome(
+            SessionObservationResult.terminated(runtime_minutes=1), run.worktree_path, 42,
+            "Feature", run.session_name, session_run_assets=run, task_kind=SessionKind.CODE,
+        )
+        assert decision.status is SessionStatus.COMPLETED, decision
+        assert decision.validation_passed is True
+        recorded_calls = [json.loads(line) for line in calls.read_text().splitlines()]
+        assert [value["entry_id"] for value in recorded_calls] == [receipt.entry_id]
+        record = json.loads((run.run_dir / "validation-record.json").read_bytes())
+        assert record["passed"] is True
+        assert record["suite"] == "completion_intake"
+        # Context-free validation still executes and refuses: owned passes are not HEAD caches.
+        assert gate.check(session_output_dir=run.run_dir).allowed is False
+
     def test_exchange_failure_halts_before_pr_creation(
         self,
         tmp_path,

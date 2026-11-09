@@ -1471,7 +1471,7 @@ class TestSessionControllerValidationCaching:
         processor.completion_record = make_record(
             CompletionOutcome.COMPLETED,
             summary="Done",
-            requested_actions=[RequestedAction.CREATE_PR],
+            requested_actions=[],  # No publication receipt to reuse; the code gate still runs.
         )
 
         command_runner = MockCommandRunner(returncode=1, stderr="real failure")

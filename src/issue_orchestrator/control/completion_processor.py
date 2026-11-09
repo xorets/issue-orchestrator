@@ -413,6 +413,11 @@ class CompletionProcessor:
     ) -> CompletionIntakeReceipt | None:
         return self._completion_intake.receipt_for_run(run)
 
+    def prepare_completion_receipt(
+        self, receipt: CompletionIntakeReceipt, run: SessionRunAssets, issue_number: int,
+    ) -> PreparedCompletionEvidence:
+        return self._completion_intake.prepare_receipt_for_issue(receipt, run, issue_number)
+
     def read_completion_receipt(
         self, receipt: CompletionIntakeReceipt, run: SessionRunAssets
     ) -> CompletionRecord:
