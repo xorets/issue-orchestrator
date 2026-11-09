@@ -18,6 +18,7 @@ from tests.run_allocation_helpers import make_completion_processor
 
 import dataclasses
 import json
+import hashlib
 import pytest
 
 from issue_orchestrator.domain.dirty_remediation import (
@@ -1147,13 +1148,17 @@ class TestReviewExchangeExecution:
         mock_git_adapter.get_head_sha.return_value = working_copy.get_head_sha(
             run.worktree_path
         )
+        from issue_orchestrator.control.issue_run_allocator import IssueRunAllocationService
+        from issue_orchestrator.ports.working_copy import BranchStatus
+        working_copy.get_branch_status.return_value = BranchStatus("feature", 0, 0, False, True)
+        allocator = IssueRunAllocationService(FileSystemSessionOutput(), ledger, working_copy, configuration=config)
         review_runner = _CapturingReviewExchangeRunner()
         processor = make_completion_processor(
             agent_callback_endpoint=ready_callback_endpoint(),
             label_adapter=mock_label_adapter, pr_adapter=mock_pr_adapter,
             git_adapter=mock_git_adapter, session_output=FileSystemSessionOutput(),
             review_exchange_runner=review_runner, event_bus=event_bus,
-            config=config, completion_intake=intake,
+            config=config, completion_intake=intake, issue_run_allocator=allocator,
         )
 
         result = processor.process(
@@ -1168,8 +1173,9 @@ class TestReviewExchangeExecution:
         assert evidence.head_sha == attestation.head_sha
         assert evidence.passed is True
 
+    @pytest.mark.parametrize("rework", ["none", "passed", "missing", "failed"])
     def test_receipt_validation_survives_the_real_publish_gate(
-        self, tmp_path, mock_label_adapter, mock_pr_adapter, mock_git_adapter, event_bus,
+        self, tmp_path, mock_label_adapter, mock_pr_adapter, mock_git_adapter, event_bus, rework,
     ):
         import shlex
         import sys
@@ -1211,11 +1217,34 @@ class TestReviewExchangeExecution:
         mock_git_adapter.get_head_sha.return_value = working_copy.get_head_sha(run.worktree_path)
         gate = PublishGate(run.worktree_path, runner, working_copy,
                            command=validator_command, timeout_seconds=30)
+        from issue_orchestrator.control.issue_run_allocator import IssueRunAllocationService
+        from issue_orchestrator.ports.working_copy import BranchStatus
+        working_copy.get_branch_status.return_value = BranchStatus("feature", 0, 0, False, True)
+        allocator = IssueRunAllocationService(FileSystemSessionOutput(), ledger, working_copy, configuration=config)
+        final_receipts = [receipt.entry_id]
+        final_evidence = [intake.prepare_receipt_for_issue(receipt, run, 42)]
+        class ReworkingReviewRunner(_CapturingReviewExchangeRunner):
+            def run(self, **kwargs):
+                if rework != "none":
+                    child = kwargs["exchange_run"].session_run
+                    assert ledger.recorded_run(child).run == child
+                    working_copy.get_head_sha.return_value = "b" * 40
+                    mock_git_adapter.get_head_sha.return_value = "b" * 40
+                    if rework != "missing":
+                        if rework == "failed":
+                            script.write_text("import sys; sys.exit(1)\n")
+                        child_receipt = intake.submit(ledger.submission_capability(child),
+                            command(json.dumps(raw).encode(), "reworked"))
+                        intake.drain()
+                        if rework == "passed":
+                            final_evidence.append(intake.prepare_receipt_for_issue(child_receipt, child, 42))
+                            final_receipts.append(child_receipt.entry_id)
+                return super().run(**kwargs)
         processor = make_completion_processor(
             agent_callback_endpoint=ready_callback_endpoint(), label_adapter=mock_label_adapter,
             pr_adapter=mock_pr_adapter, git_adapter=mock_git_adapter,
-            session_output=FileSystemSessionOutput(), review_exchange_runner=_CapturingReviewExchangeRunner(),
-            event_bus=event_bus, config=config, completion_intake=intake,
+            session_output=FileSystemSessionOutput(), review_exchange_runner=ReworkingReviewRunner(),
+            event_bus=event_bus, config=config, completion_intake=intake, issue_run_allocator=allocator,
         )
 
         from issue_orchestrator.control.session_controller import SessionController
@@ -1230,13 +1259,26 @@ class TestReviewExchangeExecution:
             SessionObservationResult.terminated(runtime_minutes=1), run.worktree_path, 42,
             "Feature", run.session_name, session_run_assets=run, task_kind=SessionKind.CODE,
         )
+        if rework in {"missing", "failed"}:
+            assert decision.status is SessionStatus.VALIDATION_FAILED
+            assert decision.validation_passed is False
+            expected_error = ("accepted completion validation differs from current worktree"
+                              if rework == "missing" else "receipt is not completed and validated publication intent")
+            assert decision.validation_error == expected_error
+            mock_pr_adapter.create_pr.assert_not_called()
+            mock_git_adapter.push.assert_not_called()
+            return
         assert decision.status is SessionStatus.COMPLETED, decision
         assert decision.validation_passed is True
         recorded_calls = [json.loads(line) for line in calls.read_text().splitlines()]
-        assert [value["entry_id"] for value in recorded_calls] == [receipt.entry_id]
+        assert [value["entry_id"] for value in recorded_calls] == final_receipts
         record = json.loads((run.run_dir / "validation-record.json").read_bytes())
         assert record["passed"] is True
         assert record["suite"] == "completion_intake"
+        assert record["head_sha"] == ("b" if rework == "passed" else "a") * 40
+        assert record == json.loads(final_evidence[-1].validation_bytes)
+        original = final_evidence[-1].validation.result_path.read_bytes()
+        assert hashlib.sha256(original).hexdigest() == final_evidence[-1].validation.result_sha256
         # Context-free validation still executes and refuses: owned passes are not HEAD caches.
         assert gate.check(session_output_dir=run.run_dir).allowed is False
 

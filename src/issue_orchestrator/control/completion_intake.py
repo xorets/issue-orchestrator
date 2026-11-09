@@ -26,6 +26,7 @@ from ..domain.historical_intake import HistoricalIntakeCommand, HistoricalIntake
 from ..ports.historical_intake import HistoricalIntakeHandler
 from ..ports.background_job import BackgroundJobRunner
 
+from ..domain.review_exchange_run import ReviewExchangeRunAssets
 from ..domain.session_run import SessionRunAssets, RunContainedFile
 from ..ports.completion_intake import (
     CompletionEvidenceValidator,
@@ -122,6 +123,23 @@ class CompletionEvidenceIntakeService:
         if type(issue_number) is not int or issue_number <= 0:
             raise CompletionIntakeError("receipt preparation requires a positive issue number")
         return self._prepare_receipt(receipt, run, issue_number=issue_number)
+
+    def prepare_exchange_for_issue(
+        self, assets: ReviewExchangeRunAssets, issue_number: int,
+    ) -> PreparedCompletionEvidence | None:
+        """Resolve only an exact allocation from the durable owner, including after restart."""
+        with self._drain_lock:
+            recorded = [item for item in self._ledger.recorded_runs(issue_number)
+                        if item.run.run_dir == assets.run_dir]
+            if len(recorded) != 1:
+                raise CompletionIntakeError("exchange assets have no unique allocated issue run")
+            run = recorded[0].run
+            if ReviewExchangeRunAssets.from_run_dir(run.run_dir) != assets:
+                raise CompletionIntakeError("exchange artifacts differ from the allocated run")
+            receipt = self.exchange_receipt(run)
+            if receipt is None:
+                return None
+            return self.prepare_receipt_for_issue(receipt, run, issue_number)
 
     def _prepare_receipt(self, receipt: CompletionIntakeReceipt, run: SessionRunAssets,
                          *, issue_number: int | None) -> PreparedCompletionEvidence:

@@ -16,7 +16,12 @@ that exact owner attestation instead of rerunning the command without its
 completion context. Reuse requires the same run, receipt, current HEAD, command,
 timeout and intact passed result. Mismatches refuse validation; they do not
 fall back to a generic cached pass. These receipt-bound results do not populate
-or authorize the HEAD-only validation cache. Separate publish commands retain
+or authorize the HEAD-only validation cache. After local review rework, the
+receipt owner resolves the final coder evidence against the exact exchange
+assets and the existing durable issue allocation, including after restart.
+Missing or foreign allocations refuse. The controller validates that child run
+and atomically projects its passed result into the parent session; original
+receipt and validation custody remain intact. Separate publish commands retain
 their own gate.
 
 ## Configuration (YAML)

@@ -35,7 +35,7 @@ import logging
 import os
 import time
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
@@ -413,11 +413,6 @@ class CompletionProcessor:
     ) -> CompletionIntakeReceipt | None:
         return self._completion_intake.receipt_for_run(run)
 
-    def prepare_completion_receipt(
-        self, receipt: CompletionIntakeReceipt, run: SessionRunAssets, issue_number: int,
-    ) -> PreparedCompletionEvidence:
-        return self._completion_intake.prepare_receipt_for_issue(receipt, run, issue_number)
-
     def read_completion_receipt(
         self, receipt: CompletionIntakeReceipt, run: SessionRunAssets
     ) -> CompletionRecord:
@@ -789,7 +784,7 @@ class CompletionProcessor:
 
         # Build and return result
         total_duration = time.monotonic() - start_time
-        return build_processing_result(
+        result = build_processing_result(
             session_output=self.session_output,
             worktree=worktree,
             record=record,
@@ -811,6 +806,7 @@ class CompletionProcessor:
             post_issue_comment=self._add_issue_comment,
             cleanup_completion_record_fn=self._cleanup_completion_record,
         ).with_processing_policy(processing_policy)
+        return replace(result, validation_evidence=prepared.validation_evidence)
 
     def prepare_completion(
         self, worktree: Path, issue_number: int, issue_title: str, *,
@@ -924,8 +920,30 @@ class CompletionProcessor:
         )
         if isinstance(actions, ProcessingResult):
             return actions.with_processing_policy(processing_policy)
+        try:
+            validation = self._validation_after_exchange(prepared_evidence, actions, issue_number, worktree)
+        except CompletionIntakeError as exc:
+            refusal = ProcessingResult.for_intake_refusal(exc).with_processing_policy(processing_policy)
+            return replace(refusal, failure_kind="validation_failed")
         return PreparedCompletion(record, session_name, processing_policy, branch,
-                                  preserved_completion_path, actions)
+                                  preserved_completion_path, actions, validation)
+
+    def _validation_after_exchange(
+        self, evidence: PreparedCompletionEvidence | None, actions: PreparedActionPlan,
+        issue_number: int, worktree: Path,
+    ) -> PreparedCompletionEvidence | None:
+        if evidence is None or actions.halted:
+            return evidence
+        if actions.exchange_result is not None:
+            final = self._completion_intake.prepare_exchange_for_issue(
+                actions.exchange_result.run_assets, issue_number,
+            )
+            if final is not None:
+                evidence = final
+        if (evidence.entry.run.worktree_path != worktree
+                or self.git_adapter.get_head_sha(worktree) != evidence.validation.head_sha):
+            raise CompletionIntakeError("accepted completion validation differs from current worktree")
+        return evidence
 
     def prepare_retained_completion(
         self, evidence: PreparedCompletionEvidence, workspace: PublicationWorkspace,
