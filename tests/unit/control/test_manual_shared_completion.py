@@ -36,6 +36,8 @@ def shared(rig, mock_git_adapter, mock_label_adapter, mock_pr_adapter):
     receipt = custody.intake.submit(custody.capability, command(json.dumps(raw).encode(), "shared-owner"))
     locators = replace(locators, intake_receipt=receipt)
     config = Config(repo="owner/repo")
+    config.validation.quick.cmd = "true"
+    config.validation.quick.timeout_seconds = 30
     mock_git_adapter.get_head_sha.side_effect = custody.wc.get_head_sha
     mock_git_adapter.get_current_branch.return_value = "feature"
     mock_git_adapter.default_branch.return_value = "main"
@@ -91,5 +93,16 @@ def test_shared_source_policy_refusal_prevents_every_remote_publication_step(sha
     assert not result.processing.success
     assert result.processing.intake_receipt == locators.intake_receipt
     assert result.processing.require_processing_policy() == CompletionProcessingPolicy("agent:test", SessionKind.CODE)
+    executor.push_validated_head.assert_not_called()
+    executor.ensure_pull_request.assert_not_called()
+
+
+@pytest.mark.parametrize("field,value", [("cmd", "changed-validator"), ("timeout_seconds", 31), ("cmd", None)])
+def test_changed_validator_policy_refuses_manual_publication(shared, field, value):
+    _, locators, owner, executor, config = shared
+    setattr(config.validation.quick, field, value)
+    result = ManualCompletionPublisher(owner, executor).publish(locators, "Feature", lambda: True)
+    assert not result.processing.success
+    assert result.processing.failure_kind == "validation_failed"
     executor.push_validated_head.assert_not_called()
     executor.ensure_pull_request.assert_not_called()

@@ -14,8 +14,10 @@ Coding completion intake validates the owned receipt in an isolated checkout.
 When the terminal session controller applies the same quick validator, it uses
 that exact owner attestation instead of rerunning the command without its
 completion context. Reuse requires the same run, receipt, current HEAD, command,
-timeout and intact passed result. Mismatches refuse validation; they do not
-fall back to a generic cached pass. These receipt-bound results do not populate
+timeout and intact passed result. Shared automatic/manual preparation checks
+the current command and timeout before publication, including after review
+rework or restart; a changed or disabled validator cannot reuse the old receipt.
+Mismatches refuse validation; they do not fall back to a generic cached pass. These receipt-bound results do not populate
 or authorize the HEAD-only validation cache. After local review rework, the
 receipt owner resolves the final coder evidence against the exact exchange
 assets and the existing durable issue allocation, including after restart.

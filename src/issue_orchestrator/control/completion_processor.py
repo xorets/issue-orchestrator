@@ -19,6 +19,7 @@ from ..ports.issue_run_allocator import IssueRunAllocator
 from ..ports.completion_intake import CompletionIntakeRuntime
 from ..domain.review_subject import BranchSubject
 from ..domain.completion_intake import CompletionIntakeReceipt, CompletionIntakeError
+from ..domain.completion_validation_policy import require_current_completion_validator
 from ..domain.registered_completion import CompletionProcessingPolicy
 from ..domain.prepared_completion import PreparedCompletionEvidence
 from ..domain.publication_workspace import PublicationWorkspace
@@ -940,6 +941,12 @@ class CompletionProcessor:
             )
             if final is not None:
                 evidence = final
+        if self._config is None:
+            raise CompletionIntakeError("publication requires configured validation policy")
+        validation = self._config.validation.quick
+        require_current_completion_validator(
+            evidence.validation.validator_digest, validation.cmd, validation.timeout_seconds,
+        )
         if (evidence.entry.run.worktree_path != worktree
                 or self.git_adapter.get_head_sha(worktree) != evidence.validation.head_sha):
             raise CompletionIntakeError("accepted completion validation differs from current worktree")

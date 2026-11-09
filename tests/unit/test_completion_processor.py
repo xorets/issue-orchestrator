@@ -1144,6 +1144,8 @@ class TestReviewExchangeExecution:
         intake.drain()
         config = self._make_config(tmp_path)
         config.repo = "example/repo"
+        config.validation.quick.cmd = "configured-check"
+        config.validation.quick.timeout_seconds = 30
         config.agents["agent:claude"] = config.agents.pop("agent:coder")
         mock_git_adapter.get_head_sha.return_value = working_copy.get_head_sha(
             run.worktree_path
@@ -1173,7 +1175,52 @@ class TestReviewExchangeExecution:
         assert evidence.head_sha == attestation.head_sha
         assert evidence.passed is True
 
-    @pytest.mark.parametrize("rework", ["none", "passed", "missing", "failed"])
+    @pytest.mark.parametrize("policy", ["unchanged", "command", "timeout", "disabled", "missing-config"])
+    def test_restart_refuses_superseded_validator_before_publication(
+        self, tmp_path, mock_label_adapter, mock_pr_adapter, mock_git_adapter, policy,
+    ):
+        from issue_orchestrator.control.completion_intake import CompletionEvidenceIntakeService
+        from issue_orchestrator.control.completion_intake_validation import ConfiguredCompletionEvidenceValidator
+        from issue_orchestrator.execution.issue_run_ledger import SqliteIssueRunLedger
+        from issue_orchestrator.ports.background_job import BackgroundJobRunner
+        from issue_orchestrator.ports.completion_intake import CompletionValidationWorkspace
+        from issue_orchestrator.ports.historical_intake import HistoricalIntakeHandler
+        from tests.unit.test_completion_evidence_intake import command, completion, setup
+
+        ledger, run, capability, intake, working_copy, runner = setup(tmp_path)
+        raw = json.loads(completion())
+        raw["requested_actions"] = ["push_branch", "create_pr"]
+        receipt = intake.submit(capability, command(json.dumps(raw).encode(), "policy-restart"))
+        intake.drain()
+        original = ledger.validation_for_receipt(receipt.entry_id)
+        runner.run.reset_mock()
+        config = Config(repo="test-owner/test-repo")
+        config.review_enabled = False
+        config.validation.quick.cmd = "changed-validator" if policy == "command" else None if policy == "disabled" else "configured-check"
+        config.validation.quick.timeout_seconds = 31 if policy == "timeout" else 30
+        workspace = Mock(spec=CompletionValidationWorkspace)
+        workspace.checkout.return_value = run.worktree_path
+        reopened = CompletionEvidenceIntakeService(
+            SqliteIssueRunLedger(tmp_path / "state/issue_run_ledger.sqlite", repo_slug="test-owner/test-repo"),
+            ConfiguredCompletionEvidenceValidator(working_copy, runner, workspace,
+                command=config.validation.quick.cmd or "", timeout_seconds=config.validation.quick.timeout_seconds),
+            Mock(spec=HistoricalIntakeHandler), Mock(spec=BackgroundJobRunner),
+        )
+        mock_git_adapter.get_head_sha.return_value = working_copy.get_head_sha(run.worktree_path)
+        processor = make_completion_processor(label_adapter=mock_label_adapter,
+            pr_adapter=mock_pr_adapter, git_adapter=mock_git_adapter,
+            session_output=FileSystemSessionOutput(), agent_callback_endpoint=ready_callback_endpoint(),
+            config=None if policy == "missing-config" else config, completion_intake=reopened)
+        result = processor.process(run.worktree_path, 42, "Feature", run_assets=run, intake_receipt=receipt)
+        assert result.success is (policy == "unchanged"), result
+        runner.run.assert_not_called()
+        assert ledger.validation_for_receipt(receipt.entry_id) == original
+        if policy != "unchanged":
+            assert result.failure_kind == "validation_failed"
+            mock_git_adapter.push.assert_not_called()
+            mock_pr_adapter.create_pr.assert_not_called()
+
+    @pytest.mark.parametrize("rework", ["none", "passed", "missing", "failed", "command", "timeout", "disabled"])
     def test_receipt_validation_survives_the_real_publish_gate(
         self, tmp_path, mock_label_adapter, mock_pr_adapter, mock_git_adapter, event_bus, rework,
     ):
@@ -1213,6 +1260,8 @@ class TestReviewExchangeExecution:
         assert ledger.validation_for_receipt(receipt.entry_id).passed
         config = self._make_config(tmp_path)
         config.repo = "example/repo"
+        config.validation.quick.cmd = validator_command
+        config.validation.quick.timeout_seconds = 30
         config.agents["agent:claude"] = config.agents.pop("agent:coder")
         mock_git_adapter.get_head_sha.return_value = working_copy.get_head_sha(run.worktree_path)
         gate = PublishGate(run.worktree_path, runner, working_copy,
@@ -1236,9 +1285,15 @@ class TestReviewExchangeExecution:
                         child_receipt = intake.submit(ledger.submission_capability(child),
                             command(json.dumps(raw).encode(), "reworked"))
                         intake.drain()
-                        if rework == "passed":
+                        if rework in {"passed", "command", "timeout", "disabled"}:
                             final_evidence.append(intake.prepare_receipt_for_issue(child_receipt, child, 42))
                             final_receipts.append(child_receipt.entry_id)
+                        if rework == "command":
+                            config.validation.quick.cmd = "changed-validator"
+                        elif rework == "timeout":
+                            config.validation.quick.timeout_seconds = 31
+                        elif rework == "disabled":
+                            config.validation.quick.cmd = None
                 return super().run(**kwargs)
         processor = make_completion_processor(
             agent_callback_endpoint=ready_callback_endpoint(), label_adapter=mock_label_adapter,
@@ -1259,11 +1314,15 @@ class TestReviewExchangeExecution:
             SessionObservationResult.terminated(runtime_minutes=1), run.worktree_path, 42,
             "Feature", run.session_name, session_run_assets=run, task_kind=SessionKind.CODE,
         )
-        if rework in {"missing", "failed"}:
+        if rework in {"missing", "failed", "command", "timeout", "disabled"}:
             assert decision.status is SessionStatus.VALIDATION_FAILED
             assert decision.validation_passed is False
             expected_error = ("accepted completion validation differs from current worktree"
                               if rework == "missing" else "receipt is not completed and validated publication intent")
+            if rework in {"command", "timeout"}:
+                expected_error = "retained validation belongs to another configured validator"
+            elif rework == "disabled":
+                expected_error = "retained publication requires a configured validator"
             assert decision.validation_error == expected_error
             mock_pr_adapter.create_pr.assert_not_called()
             mock_git_adapter.push.assert_not_called()
