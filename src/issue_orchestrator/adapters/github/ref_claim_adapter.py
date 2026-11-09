@@ -23,7 +23,7 @@ from ...domain.claim import (
 )
 from ...domain.lease_config import LeaseConfig
 from ...domain.session_run import SessionRunAssets
-from ...domain.original_delivery import DockerCustody, OriginalDelivery, bind_correction_run, transition
+from ...domain.original_delivery import DockerCustody, OriginalDelivery, ReservationRecovery, bind_correction_run, retire_reservation, transition
 from ...domain.run_ledger import (
     RunLedger,
     RunLedgerDecodeError,
@@ -417,6 +417,33 @@ class GitHubRefClaimAdapter(ClaimManager):
             raise ClaimFetchError("Original remote claim is unreadable")
         return claim, snapshot.commit_sha
 
+    @staticmethod
+    def read_original_record(client: GitHubHttpClient, issue_number: int) -> Claim:
+        """Read identity before composing a legacy offline recovery writer."""
+        with gh_audit.context(reason=gh_audit.AuditReason.GH_READ,
+                issue_key=str(issue_number), scope=gh_audit.AuditScope.UNKNOWN):
+            snapshot = GitRefCasStore(client, ref_prefix=CLAIM_REF_PREFIX).read(_issue_ref_key(issue_number))
+        claim = None if snapshot is None else _parse_owned_claim(snapshot.record, issue_number=issue_number)
+        if claim is None or claim.original is None:
+            raise ClaimFetchError('Original recovery identity is unavailable')
+        return claim
+
+    def retire_original_reservation(self, issue_number: int, lease_id: str, fence: str,
+                                    recovery: ReservationRecovery) -> Claim | None:
+        snapshot = self._read_snapshot(issue_number)
+        if snapshot is None or snapshot.commit_sha != fence or recovery.previous_fence != fence:
+            return None
+        claim = _parse_owned_claim(snapshot.record, issue_number=issue_number)
+        if claim is None or claim.lease_id != lease_id or claim.claimant != self._claimant_id or claim.original is None:
+            return None
+        changed = dataclasses.replace(claim, original=retire_reservation(claim.original, recovery))
+        if not self._store.update(snapshot, _format_claim_commit_message(changed)):
+            return None
+        observed, _ = self.original_claim(issue_number)
+        if observed != changed:
+            raise ClaimFetchError('Retired reservation readback differs; reconcile before retry')
+        return observed
+
     def original_claim_at(self, issue_number: int, fence: str) -> Claim:
         """Authenticate one selected immutable anchor without reading or changing the ref."""
         try:
@@ -514,7 +541,8 @@ class GitHubRefClaimAdapter(ClaimManager):
         if snapshot is None or snapshot.commit_sha != fence:
             return False
         claim = _parse_owned_claim(snapshot.record, issue_number=issue_number)
-        if claim is None or claim.lease_id != lease_id or claim.claimant != self._claimant_id:
+        if (claim is None or claim.lease_id != lease_id or claim.claimant != self._claimant_id or
+                claim.original is not None and claim.original.reservation_recovery is not None):
             return False
         updated = dataclasses.replace(claim, original=owner)
         if renew:
@@ -545,7 +573,7 @@ class GitHubRefClaimAdapter(ClaimManager):
         if claim is None:
             raise ClaimFetchError("The remote claim record is unreadable")
         if claim.original is not None:
-            return None if claim.original.released else claim
+            return None if claim.original.released or claim.original.reservation_recovery is not None else claim
         return None if claim.is_expired(datetime.now()) else claim
 
     def _build_claim(

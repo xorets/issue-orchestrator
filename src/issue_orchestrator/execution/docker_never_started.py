@@ -70,8 +70,13 @@ def stop_retained(engine, launch_path: Path | None, record: dict, save: Callable
             require_never_started(engine, launch_path, record)
         except (OSError, ValueError, TypeError, KeyError) as error:
             failure = error
-    engine.stop(record['container_id'])
+    stopped = engine.stop(record['container_id'])
     record['state'] = DockerSessionState.STOPPED
+    if type(stopped) is dict:
+        record['stop_wait'] = {'schema_version':1, 'kind':'docker-stop-wait',
+            **{key:record[key] for key in ('repository', 'run_id', 'session_name', 'contract_sha256',
+                'launch_sha256', 'daemon_id', 'controller_container_id', 'container_id', 'provider_exec_id')},
+            'result':stopped}
     if pending and failure is None:
         try:
             after = after_stop(engine, launch_path, record)

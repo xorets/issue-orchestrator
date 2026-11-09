@@ -17,7 +17,6 @@ Example flows:
 - Validation failed -> VALIDATION_FAILED
 """
 
-import json
 import logging
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -36,6 +35,8 @@ if TYPE_CHECKING:
     from ..ports.attempt_store import AttemptStore
     from ..ports.validation_attempt_key_factory import ValidationAttemptKeyFactory
 
+from ..domain.prepared_completion import PreparedCompletionEvidence
+from ..infra.atomic_json import atomic_write_json
 from ..events import EventName
 from ..domain.review_subject import BranchSubject
 from ..domain.dirty_remediation import remediation_prompt_steps
@@ -366,8 +367,10 @@ class SessionController:
         )
 
         # Map outcome to status
+        validation_passed, validation_error, validation_error_file = None, None, None
         status = self._map_outcome_to_status(record)
         if result.failure_kind == "validation_failed":
+            validation_passed, validation_error = False, result.message
             status = self._handle_pre_publish_validation_failure(
                 run_dir=run_dir,
                 session_name=validation_session_name,
@@ -379,7 +382,6 @@ class SessionController:
         )
 
         # Run validation if configured
-        validation_passed, validation_error, validation_error_file = None, None, None
         validation_decision = self._run_validation_phase_if_needed(
             status=status,
             worktree_path=worktree_path,
@@ -394,6 +396,7 @@ class SessionController:
             repo_root=repo_root,
             issue_key=issue_key,
             task_kind=task_kind,
+            completion_evidence=result.validation_evidence,
         )
         if validation_decision is not None:
             status = validation_decision.status
@@ -847,6 +850,7 @@ class SessionController:
         repo_root: Path | None,
         issue_key: "IssueKey | None",
         task_kind: "SessionKind | None" = None,
+        completion_evidence: PreparedCompletionEvidence | None = None,
     ) -> ValidationGateDecision | None:
         if not (
             status == SessionStatus.COMPLETED
@@ -873,6 +877,7 @@ class SessionController:
             retry_prompt_template,
             repo_root,
             issue_key,
+            completion_evidence,
         )
 
     def _emit_pre_publish_validation_failure(
@@ -1201,6 +1206,7 @@ class SessionController:
         retry_prompt_template: str | None,
         repo_root: Path | None,
         issue_key: "IssueKey | None",
+        completion_evidence: PreparedCompletionEvidence | None = None,
     ) -> ValidationGateDecision:
         """Run validation gate and return updated status."""
         logger.info(
@@ -1216,6 +1222,7 @@ class SessionController:
                 issue_title,
                 run_dir,
                 issue_key,
+                completion_evidence,
             )
         )
 
@@ -1593,6 +1600,7 @@ class SessionController:
         issue_title: str,
         run_dir: Path,
         issue_key: "IssueKey | None" = None,
+        completion_evidence: PreparedCompletionEvidence | None = None,
     ) -> tuple[bool, Optional[str], Optional[Path]]:
         """Run validation command (with attempt-scoped caching) and return result.
 
@@ -1642,11 +1650,14 @@ class SessionController:
             sha_display,
         )
 
-        result = gate.check(session_output_dir=target_run_dir)
+        result = (gate.check_completion(completion_evidence, completion_evidence.entry.run.run_dir)
+                  if completion_evidence is not None else gate.check(session_output_dir=target_run_dir))
+        if result.allowed and result.record is not None and completion_evidence is not None:
+            self._materialize_validation_record(target_run_dir, result.record)
         if result.cache_hit:
             if result.record is None:
                 raise RuntimeError("validation cache hit did not include a record")
-            self._materialize_cached_validation_record(target_run_dir, result.record)
+            self._materialize_validation_record(target_run_dir, result.record)
         self._record_validation_evidence(
             worktree_path=worktree_path,
             run_dir=target_run_dir,
@@ -1733,10 +1744,10 @@ class SessionController:
         return worktree_path / stderr_path
 
     @staticmethod
-    def _materialize_cached_validation_record(run_dir: Path, record: Any) -> None:
+    def _materialize_validation_record(run_dir: Path, record: Any) -> None:
         record_path = run_dir / "validation-record.json"
         record_path.parent.mkdir(parents=True, exist_ok=True)
-        record_path.write_text(json.dumps(record.to_dict(), indent=2) + "\n")
+        atomic_write_json(record_path, record.to_dict())
 
     @staticmethod
     def _validation_error_summary(validation_error_file: Optional[Path]) -> str | None:

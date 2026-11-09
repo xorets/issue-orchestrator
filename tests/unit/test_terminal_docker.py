@@ -25,12 +25,16 @@ class Engine:
         self.record_path = None
         self.daemon = packet["daemon_id"]
         self.exec_payloads = {}
+        self.provider_exit = 0
+        self.controller_running = True
 
     def worker(self):
         p = self.packet
         return {"Id": "2" * 64, "Name": "/" + p["container_name"], "Image": p["image_id"],
             "State": {"Running": self.running, "Paused":False, "Restarting":False, "OOMKilled":False,
-                "Error":"", "Pid":42 if self.running else 0}, "RestartCount":0,
+                "Error":"", "Pid":42 if self.running else 0, "Status":"running" if self.running else "exited",
+                "ExitCode":137, "StartedAt":"2026-11-07T10:00:00Z",
+                "FinishedAt":"" if self.running else "2026-11-07T10:01:00Z"}, "RestartCount":0,
             "Config": {"User": p["user"], "Labels": {"io.builder.launch": sha256(canonical(p)).hexdigest()}},
             "Mounts": [], "HostConfig": {"ReadonlyRootfs": True, "Privileged": False, "CapDrop": ["ALL"], "SecurityOpt": ["no-new-privileges:true"],
                 "IpcMode": "private", "NetworkMode": p["network_id"], "LogConfig": {"Type": "none"}, "RestartPolicy": {"Name": "no"},
@@ -43,7 +47,12 @@ class Engine:
         if route == "/images/" + self.packet["image_id"] + "/json":
             return {"Id": self.packet["image_id"], "Config": {}}
         if route == "/containers/" + "1" * 64 + "/json":
-            return {"Id": "1" * 64, "State": {"Running": True}}
+            return {"Id": "1" * 64, "State": {"Running": self.controller_running, "Pid":1 if self.controller_running else 0}}
+        if route == '/containers/'+'2'*64+'/stop?t=2':
+            self.running = False
+            return {}
+        if route == '/containers/'+'2'*64+'/wait?condition=not-running':
+            return {'StatusCode':137}
         if route == "/containers/" + "2" * 64 + "/json":
             return self.worker()
         if route == "/containers/" + "2" * 64 + "/exec":
@@ -59,7 +68,7 @@ class Engine:
             payload = self.exec_payloads[exec_id]
             command = payload.get('Cmd', ['/bin/sh', '-c', ''])
             return {"ID": exec_id, "ContainerID": "2" * 64, "Running": False,
-                "Pid":0, "ExitCode":0 if exec_id in self.completed_execs else None,
+                "Pid":0, "ExitCode":self.provider_exit if exec_id in self.completed_execs else None,
                 "ProcessConfig":{"entrypoint":command[0], 'arguments':command[1:],
                     'user':payload.get('User', '1000:1000'), 'privileged':False, 'tty':False}}
         raise AssertionError((method, route))
@@ -1677,10 +1686,141 @@ def test_docker_stop_requires_positive_wait_result(wait, monkeypatch):
     engine = DockerEngine()
     def request(method, route, payload=None):
         if '/wait?' in route: return wait
-        if route.endswith('/json'): return {'State':{'Running':False}}
+        if route.endswith('/json'):
+            return {'Id':'a'*64, 'RestartCount':0, 'State':{'Running':False, 'Status':'exited',
+                'Paused':False, 'Restarting':False, 'Pid':0, 'ExitCode':137,
+                'StartedAt':'2026-11-07T10:00:00Z', 'FinishedAt':'2026-11-07T10:01:00Z'}}
         return {}
     monkeypatch.setattr(engine, 'request', request)
     with pytest.raises(ValueError): engine.stop('a'*64)
+
+
+@pytest.mark.parametrize('provider_exit', [0, 3])
+def test_started_original_retains_stop_wait_for_offline_recovery_after_exec_collection(launch, monkeypatch, provider_exit):
+    from dataclasses import replace
+    from shutil import copyfile
+    from issue_orchestrator.domain.original_delivery import DockerCustody
+    from issue_orchestrator.domain.session_run import SessionRunAssets
+    from issue_orchestrator.execution.docker_engine import DockerEngine
+    from issue_orchestrator.execution.original_delivery_docker import DockerOriginalCustody
+    from tests.unit.test_original_delivery import custody
+    runner, engine, packet, _ = launch
+    run_dir = Path(packet['working_dir'])/'.issue-orchestrator/sessions'/(packet['run_id']+'__issue-42')
+    packet['engine_run_dir'] = str(run_dir)
+    runner.launch_path.chmod(0o600)
+    runner.launch_path.write_bytes(canonical(packet)); runner.launch_path.chmod(0o400)
+    engine.provider_exit = provider_exit
+    monkeypatch.setattr(engine, 'stop', lambda ident:DockerEngine.stop(engine, ident))
+    runner._require_original_owner = True  # noqa: SLF001 - role admission is a fixture
+    monkeypatch.setattr(runner, '_start_watcher', runner._run_provider)  # synchronous real lifecycle
+    monkeypatch.setattr('issue_orchestrator.execution.terminal_docker._authority_environment', lambda _: {'admitted':'fixture'})
+    assert runner.create_session(42, 'echo safe', packet['working_dir'], None, 'issue-42', None)
+    run_dir = Path(packet['engine_run_dir'])
+    run = SessionRunAssets.from_paths(session_name='issue-42', run_id=packet['run_id'], started_at='start',
+        worktree_path=Path(packet['working_dir']), run_dir=run_dir,
+        terminal_recording_path=run_dir/'terminal.cast', manifest_path=run_dir/'manifest.json')
+    assert runner.activate_session(run, 'issue-42', 'a'*40)
+    record = json.loads(runner.receipt_path().read_bytes())
+    assert record['state']=='stopped' and record['provider_exit_code']==provider_exit
+    assert record['stop_wait']['result']['status_code']==137
+    directory = runner.launch_path.parent/packet['run_id']; directory.mkdir(mode=0o700)
+    copyfile(runner.launch_path, directory/'launch.json'); (directory/'launch.json').chmod(0o400)
+    copyfile(runner.receipt_path(), directory/'docker-session.json'); (directory/'docker-session.json').chmod(0o600)
+    observer = DockerPlugin(launch_path=directory/'launch.json', engine=engine)
+    observer.template_path = directory.parent/'template.json'
+    row = DockerCustody(**{key:record[key] for key in DockerCustody.__dataclass_fields__})
+    original = replace(custody(), repository=packet['repository'], run_id=packet['run_id'],
+        contract_sha256=packet['contract_sha256'], worktree=packet['working_dir'], session_name='issue-42',
+        run_dir=packet['engine_run_dir'], execution_backend='docker', docker_custody=(row,), cancelled=True)
+    engine.controller_running = False
+    monkeypatch.setattr(engine, 'inspect_exec', lambda _: {'status':404})
+    backend = DockerOriginalCustody(observer)
+    backend.quiescent(original, offline=True)
+    retained_path = directory/'docker-session.json'
+    raw = retained_path.read_bytes()
+    saved = json.loads(raw)
+    for key in saved['stop_wait']:
+        changed = copy.deepcopy(saved)
+        changed['stop_wait'][key] = None
+        retained_path.write_bytes(canonical(changed))
+        with pytest.raises(ValueError, match='settlement is unknown'):
+            backend.quiescent(original, offline=True)
+    retained_path.write_bytes(raw)
+    for key, bad in [('status_code', True), ('started_at', 'foreign'), ('finished_at', 'foreign'), ('restart_count', True)]:
+        changed = copy.deepcopy(saved); changed['stop_wait']['result'][key] = bad
+        retained_path.write_bytes(canonical(changed))
+        with pytest.raises(ValueError, match='settlement is unknown'):
+            backend.quiescent(original, offline=True)
+    retained_path.write_bytes(raw)
+    for mode in [0o644, 0o400]:
+        retained_path.chmod(mode)
+        with pytest.raises(ValueError, match='settlement is unknown'):
+            backend.quiescent(original, offline=True)
+    retained_path.chmod(0o600)
+    retained_path.write_bytes(b'{"stop_wait":null,' + raw[1:])
+    with pytest.raises(ValueError, match='settlement is unknown'): backend.quiescent(original, offline=True)
+    retained_path.write_bytes(raw)
+    retained_path.rename(directory/'retained-original.json')
+    retained_path.symlink_to(directory/'retained-original.json')
+    with pytest.raises(ValueError, match='settlement is unknown'): backend.quiescent(original, offline=True)
+    retained_path.unlink(); (directory/'retained-original.json').rename(retained_path)
+    request = engine.request
+    for key, bad in [('StartedAt', 'foreign'), ('FinishedAt', 'foreign'), ('Pid', 1), ('Running', True), ('Paused', True), ('Restarting', True)]:
+        def read(method, route, payload=None):
+            value = request(method, route, payload)
+            if route == '/containers/'+row.container_id+'/json':
+                value['State'][key] = bad
+            return value
+        monkeypatch.setattr(engine, 'request', read)
+        with pytest.raises(ValueError): backend.quiescent(original, offline=True)
+    monkeypatch.setattr(engine, 'request', request)
+    for bad in [{'status':500}, {'status':404, 'value':{}}, {'status':200,'value':{'Running':True}}]:
+        monkeypatch.setattr(engine, 'inspect_exec', lambda _, value=bad:value)
+        with pytest.raises(ValueError, match='settlement is unknown'): backend.quiescent(original, offline=True)
+    monkeypatch.setattr(engine, 'inspect_exec', lambda _: {'status':404})
+    engine.controller_running = True
+    with pytest.raises(ValueError, match='controller'): backend.quiescent(original, offline=True)
+    engine.controller_running = False
+    changed = copy.deepcopy(saved); del changed['stop_wait']
+    retained_path.write_bytes(canonical(changed))
+    with pytest.raises(ValueError, match='settlement is unknown'): backend.quiescent(original, offline=True)
+
+
+@pytest.mark.parametrize('failure', ['wait', 'wait-type', 'wait-error', 'wait-generation', 'restart', 'save', None])
+def test_stop_recording_failure_never_invents_terminal_evidence(launch, monkeypatch, failure):
+    from issue_orchestrator.execution.docker_engine import DockerEngine
+    from issue_orchestrator.execution.docker_never_started import stop_retained
+    runner, engine, packet, _ = launch
+    runner._require_original_owner = True  # noqa: SLF001 - role admission is a fixture
+    assert runner.create_session(42, 'echo safe', packet['working_dir'], None, 'issue-42', None)
+    record = json.loads(runner.receipt_path().read_bytes())
+    record.update(start_intent='requested', original_binding='bound', original_fence='a'*40)
+    runner.receipt_path().write_bytes(canonical(record))
+    request = engine.request
+    def read(method, route, payload=None):
+        if '/wait?' in route:
+            if failure == 'wait': raise OSError('fixture transport')
+            if failure == 'wait-type': return {'StatusCode':True}
+            if failure == 'wait-error': return {'StatusCode':137, 'Error':{'Message':'fixture'}}
+            if failure == 'wait-generation': return {'StatusCode':0}
+        value = request(method, route, payload)
+        if failure == 'restart' and route == '/containers/'+'2'*64+'/json' and not engine.running:
+            value['RestartCount'] = 1
+        return value
+    monkeypatch.setattr(engine, 'request', read)
+    monkeypatch.setattr(engine, 'stop', lambda ident:DockerEngine.stop(engine, ident))
+    def save():
+        if failure == 'save': raise OSError('fixture record failure')
+        runner.receipt_path().write_bytes(canonical(record))
+    if failure is not None:
+        with pytest.raises((ValueError, OSError)): stop_retained(engine, runner.launch_path, record, save)
+        assert 'stop_wait' not in json.loads(runner.receipt_path().read_bytes())
+    else:
+        stop_retained(engine, runner.launch_path, record, save)
+        saved = json.loads(runner.receipt_path().read_bytes())
+        assert saved['stop_wait']['result']['status_code'] == 137
+        assert saved.get('provider_exit_code') is None
+    assert not engine.running  # A failed recording/wait is distinct from physical stop.
 
 
 def test_restart_refuses_unbound_allocated_original_before_discovery(launch):
@@ -1725,7 +1865,10 @@ def test_real_typed_implementation_preparation_defers_exec(launch, monkeypatch):
 
 
 @pytest.mark.parametrize('missing_after_stop', [False, True])
-def test_owner_retains_prestart_cancellation_and_public_proof(launch, first_model_owner, monkeypatch, missing_after_stop):
+@pytest.mark.parametrize('started_exit', [None, 0, 3])
+@pytest.mark.parametrize('offline', [False, True])
+def test_owner_retains_prestart_cancellation_and_public_proof(launch, first_model_owner, monkeypatch, missing_after_stop, started_exit, offline):
+    from unittest.mock import Mock
     import asyncio
     import sys
     from types import SimpleNamespace
@@ -1792,28 +1935,49 @@ def test_owner_retains_prestart_cancellation_and_public_proof(launch, first_mode
         before = claims.original_claim(42)[1]
         fence = owner.register_prestart(session)
         assert fence != before and claims.original_claim(42)[0].original is not None
-        monkeypatch.setattr('issue_orchestrator.execution.terminal_docker.time.time_ns', lambda:packet['deadline_unix_ns'] + 1)
-        with pytest.raises(ValueError, match='deadline'):
-            runner.activate_session(run, session.terminal_id, fence)
-        assert engine.starts == 0
-        from unittest.mock import Mock
-        manager = SessionManager(runner, Mock(), owner.config)
-        core = CoreIssueRuntimeOwners(manager, owner.state.active_sessions, None, None, Mock(), Mock(), claims)
-        owners = SimpleNamespace(core=core)
-        owner.terminate = lambda issue: terminate_every_session(owners, issue, 'fixture-cancel',
-            capture=lambda:ValidatedWorkDispositionBatch.no_work(issue, 'fixture-cancel'), observe=lambda _:None)
+        if started_exit is None or not offline:
+            from unittest.mock import Mock
+            manager = SessionManager(runner, Mock(), owner.config)
+            core = CoreIssueRuntimeOwners(manager, owner.state.active_sessions, None, None, Mock(), Mock(), claims)
+            owners = SimpleNamespace(core=core)
+            owner.terminate = lambda issue: terminate_every_session(owners, issue, 'fixture-cancel',
+                capture=lambda:ValidatedWorkDispositionBatch.no_work(issue, 'fixture-cancel'), observe=lambda _:None)
+        if started_exit is None:
+            monkeypatch.setattr('issue_orchestrator.execution.terminal_docker.time.time_ns', lambda:packet['deadline_unix_ns'] + 1)
+            with pytest.raises(ValueError, match='deadline'):
+                runner.activate_session(run, session.terminal_id, fence)
+            assert engine.starts == 0
+        else:
+            from dataclasses import replace
+            from issue_orchestrator.execution.docker_engine import DockerEngine
+            engine.provider_exit = started_exit
+            monkeypatch.setattr(engine, 'stop', lambda ident:DockerEngine.stop(engine, ident))
+            monkeypatch.setattr(runner, '_start_watcher', runner._run_provider)  # deterministic real lifecycle
+            assert runner.activate_session(run, session.terminal_id, fence)
+            assert engine.starts == 1 and not engine.running
+            retained = DockerPlugin(launch_path=runner.launch_path, engine=engine)
+            retained.template_path = runner.template_path
+            backend = DockerOriginalCustody(retained)
+            engine.controller_running = not offline
+            owner = replace(owner, state=None if offline else owner.state, docker_custody=backend,
+                quiescent=lambda original, offline:backend.quiescent(original, offline=offline),
+                verify_contract=backend.verify_contract)
         command = OriginalDeliveryCommand('cancel', lease_id, fence, packet['contract_sha256'], run.run_id, 'cancel-fixture')
         released = owner.execute(42, command)
-        assert owner.state.active_sessions == [] and not engine.running
+        assert (owner.state is None or owner.state.active_sessions == []) and not engine.running
         assert released['owner']['cancelled'] and released['remote_released']
+        with pytest.raises(ValueError, match='owner or fence changed'):
+            owner.execute(42, command)
         class Api:
             async def original_delivery(self, issue_number, operation, payload): return owner.observe(issue_number)
         public = asyncio.run(original_delivery_result(Api(), Path('/unused'), 42, 'observe', None, running=True))
-        assert not public.isError and public.structuredContent['never_started']['provider_exec_id'] == '3'*64
-        assert public.structuredContent['never_started']['stop_wait'] == 'completed'
-        if missing_after_stop:
-            assert public.structuredContent['never_started']['after'] == {'kind':'exact-exec-not-found','status':404}
-        if builder_source := os.environ.get('BUILDER_CHILD_PRODUCER_SOURCE'):
+        assert not public.isError and public.structuredContent['remote_released'] is True
+        if started_exit is None:
+            assert public.structuredContent['never_started']['provider_exec_id'] == '3'*64
+            assert public.structuredContent['never_started']['stop_wait'] == 'completed'
+            if missing_after_stop:
+                assert public.structuredContent['never_started']['after'] == {'kind':'exact-exec-not-found','status':404}
+        if (builder_source := os.environ.get('BUILDER_CHILD_PRODUCER_SOURCE')):
             from unittest.mock import patch
             monkeypatch.syspath_prepend(str(Path(builder_source) / 'tools/orchestration'))
             import qualification_runner as builder
@@ -1825,7 +1989,8 @@ def test_owner_retains_prestart_cancellation_and_public_proof(launch, first_mode
                     'logical_child':public_owner['logical_child'], 'session_name':public_owner['session_name'],
                     'docker_launch':{'template_path':str(runner.template_path)}},
                 'supervised':{'correction':{'budget':{'max_rework_cycles':public_owner['max_cycles']}}}}
-            row = {**public_owner['docker_custody'][0], 'contract_sha256':packet['contract_sha256']}
+            row = {**public_owner['docker_custody'][0], 'contract_sha256':packet['contract_sha256'],
+                'repository':packet['repository'], 'session_name':packet['session_name']}
             independent_fence = claims.original_claim(42)[1]
             observation = {'original_delivery':observed, 'claim_ref_sha':independent_fence,
                 'status':{'active_sessions':[]}, 'supervisor':{'state':'running'}}
@@ -1848,7 +2013,10 @@ def test_owner_retains_prestart_cancellation_and_public_proof(launch, first_mode
                     patch.object(builder, 'engine_stop_proof', return_value={'pid':42}):
                 evidence = builder.verify_original_release(supervisor, 'repo', {}, 'path', 'sha',
                     authority.document['subject'], [row], BuilderDocker(), lambda event:None)
-            assert evidence['containers'][0]['never_started'] == observed['never_started']
+            if started_exit is None:
+                assert evidence['containers'][0]['never_started'] == observed['never_started']
+            elif missing_after_stop:
+                assert evidence['containers'][0]['stop_wait'] == observed['stop_waits'][0]
     finally:
         if http is not None: http.close()
         if fixture is not None: fixture.doCleanups()
@@ -1994,3 +2162,62 @@ def test_retained_poststop_preobservation_matches_exact_exec_validator():
         observed = json.loads(raw)
     require_never_started_exec(observed, observed['ContainerID'], observed['ID'], '1000:1000',
         ['/usr/bin/python3','-I','-B','-c','pass'])
+
+
+def test_abandoned_reservation_checks_current_containment_and_preservation(launch, monkeypatch, tmp_path):
+    from dataclasses import replace
+    from issue_orchestrator.domain.original_delivery import DockerCustody, ReservationRecovery
+    from issue_orchestrator.execution.original_delivery_docker import DockerOriginalCustody
+    from tests.unit.test_original_delivery import custody
+    runner, engine, packet, _ = launch
+    engine.running = engine.controller_running = False
+    request = engine.request
+    def read(method, route, payload=None):
+        if route == '/containers/'+'1'*64+'/json':
+            value = engine.worker()
+            value['Id'] = '1'*64
+            value['State']['Running'] = engine.controller_running
+            return value
+        return request(method, route, payload)
+    monkeypatch.setattr(engine, 'request', read)
+    monkeypatch.setattr(engine, 'inspect_exec', lambda _: (_ for _ in ()).throw(AssertionError('No historical exec proof')))
+    row = DockerCustody(1, packet['run_id'], engine.daemon, '1'*64, '2'*64, '3'*64,
+        sha256(canonical(packet)).hexdigest())
+    owner = replace(custody(), repository=packet['repository'], run_id=packet['run_id'],
+        contract_sha256=packet['contract_sha256'], worktree=packet['working_dir'], session_name=packet['session_name'],
+        run_dir=packet['engine_run_dir'], execution_backend='docker', docker_custody=(row,), cancelled=True)
+    backend = DockerOriginalCustody(runner)
+    evidence = {'schema_version':1, 'kind':'original-reservation-recovery', 'lease_id':'lease',
+        'previous_fence':'a'*40, 'owner':owner.to_dict(), 'stopped':backend.recovery_snapshot(owner), 'preserved':{}}
+    for name in ('claim_bundle', 'task_archive', 'git_bundle'):
+        path = tmp_path/name
+        path.write_bytes(('preserved fixture '+name).encode()); path.chmod(0o400)
+        evidence['preserved'][name] = {'path':str(path), 'sha256':sha256(path.read_bytes()).hexdigest()}
+    proof = tmp_path/'recovery.json'
+    raw = canonical(evidence)
+    proof.write_bytes(raw); proof.chmod(0o400)
+    recovery = ReservationRecovery('retire', 'a'*40, str(proof), sha256(raw).hexdigest())
+    backend.verify_reservation_recovery(owner, 'lease', 'a'*40, recovery)
+    assert not owner.released
+    for target, key, bad in [('owner','run_id','foreign'), ('stopped',None,[]), ('preserved','task_archive',None),
+            ('preserved','task_archive',{'path':42,'sha256':'a'*64})]:
+        changed = copy.deepcopy(evidence)
+        if key is None: changed[target] = bad
+        else: changed[target][key] = bad
+        proof.chmod(0o600); proof.write_bytes(canonical(changed)); proof.chmod(0o400)
+        bound = replace(recovery, evidence_sha256=sha256(proof.read_bytes()).hexdigest())
+        with pytest.raises(ValueError): backend.verify_reservation_recovery(owner, 'lease', 'a'*40, bound)
+    proof.chmod(0o600); proof.write_bytes(raw); proof.chmod(0o400)
+    for attribute in ('running', 'controller_running'):
+        setattr(engine, attribute, True)
+        with pytest.raises(ValueError): backend.verify_reservation_recovery(owner, 'lease', 'a'*40, recovery)
+        setattr(engine, attribute, False)
+    archive = tmp_path/'task_archive'
+    archive.chmod(0o600); archive.write_bytes(b'changed archive'); archive.chmod(0o400)
+    with pytest.raises(ValueError, match='preservation changed'):
+        backend.verify_reservation_recovery(owner, 'lease', 'a'*40, recovery)
+    archive.unlink()
+    with pytest.raises(FileNotFoundError): backend.verify_reservation_recovery(owner, 'lease', 'a'*40, recovery)
+    proof.chmod(0o600)
+    with pytest.raises(ValueError, match='custody'):
+        backend.verify_reservation_recovery(owner, 'lease', 'a'*40, recovery)

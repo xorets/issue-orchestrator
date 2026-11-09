@@ -1168,3 +1168,68 @@ class TestAgentGate:
         stored = store.read(result.record.head_sha)
         assert stored is not None
         assert stored.passed is True
+
+
+@pytest.mark.parametrize("mismatch", [
+    None, "head", "command", "timeout", "disabled", "run", "worktree", "binding", "bytes",
+    "failed", "timed_out", "record_head",
+])
+def test_owned_completion_validation_is_exact_and_does_not_trust_generic_cache(tmp_path, mismatch):
+    from dataclasses import replace
+    from hashlib import sha256
+    from tests.unit.test_completion_evidence_intake import command, completion, setup
+
+    ledger, run, capability, intake, working_copy, runner = setup(tmp_path)
+    receipt = intake.submit(capability, command(completion(), "owned-gate"))
+    intake.drain()
+    evidence = intake.prepare_receipt_for_issue(receipt, run, 42)
+    gate = PublishGate(run.worktree_path, runner, working_copy,
+                       command="configured-check", timeout_seconds=30)
+    original = ValidationRecord.from_dict(json.loads(evidence.validation_bytes))
+    # A passing HEAD-only cache cannot authorize a mismatched owned receipt.
+    gate.store.write(replace(original, suite="publish_gate"))
+    selected_output = run.run_dir
+    if mismatch == "head":
+        working_copy.get_head_sha.return_value = "b" * 40
+    elif mismatch == "command":
+        gate.command = "different-check"
+    elif mismatch == "timeout":
+        gate.timeout_seconds += 1
+    elif mismatch == "disabled":
+        gate.command = None
+    elif mismatch == "run":
+        selected_output = run.run_dir.parent / "another-run"
+    elif mismatch == "worktree":
+        gate.worktree = tmp_path / "another-worktree"
+    elif mismatch == "binding":
+        evidence = replace(evidence, validation=replace(evidence.validation,
+            binding=replace(evidence.validation.binding, entry_id="b" * 64)))
+    elif mismatch == "bytes":
+        evidence = replace(evidence, validation_bytes=evidence.validation_bytes + b" ")
+    elif mismatch in ("failed", "timed_out", "record_head"):
+        changed = json.loads(evidence.validation_bytes)
+        changed.update({"passed": False} if mismatch == "failed" else
+                       {"timed_out": True} if mismatch == "timed_out" else {"head_sha": "b" * 40})
+        raw = json.dumps(changed).encode()
+        evidence = replace(evidence, validation_bytes=raw, validation=replace(
+            evidence.validation, result_sha256=sha256(raw).hexdigest()))
+
+    result = gate.check_completion(evidence, selected_output)
+
+    assert result.allowed is (mismatch is None)
+    assert not result.cache_hit
+    if mismatch is None:
+        assert result.record == original
+        assert json.loads((run.run_dir / "validation-record.json").read_bytes()) == original.to_dict()
+        from issue_orchestrator.execution.issue_run_ledger import SqliteIssueRunLedger
+        reopened = SqliteIssueRunLedger(tmp_path / "state" / "issue_run_ledger.sqlite",
+                                       repo_slug="test-owner/test-repo")
+        restored = reopened.prepare_candidate(receipt.entry_id, evidence.run)
+        assert restored is not None
+        assert gate.check_completion(restored, run.run_dir).allowed
+        assert json.loads((run.run_dir / "validation-record.json").read_bytes()) == original.to_dict()
+    else:
+        assert result.record is None
+        assert not (selected_output / "validation-record.json").exists()
+    # Only the original intake validator ran; no generic rerun can cover a bad binding.
+    assert runner.run.call_count == 1

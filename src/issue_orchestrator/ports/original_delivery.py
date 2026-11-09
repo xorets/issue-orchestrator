@@ -1,7 +1,7 @@
 """The original delivery shares the issue claim's remote CAS cell."""
 from typing import Protocol, runtime_checkable
 from ..domain.claim import Claim
-from ..domain.original_delivery import DockerCustody, OriginalDelivery
+from ..domain.original_delivery import DockerCustody, OriginalDelivery, ReservationRecovery
 from ..domain.session_run import SessionRunAssets
 
 
@@ -30,3 +30,9 @@ class DockerOriginalDeliveryClaims(Protocol):
 class OriginalDeliveryClaimHistory(Protocol):
     """Optional exact selection-anchor observation for independent REVIEW only."""
     def original_claim_at(self, issue_number: int, fence: str) -> Claim: ...
+
+
+@runtime_checkable
+class OriginalReservationRecoveryClaims(Protocol):
+    def retire_original_reservation(self, issue_number: int, lease_id: str, fence: str,
+                                    recovery: ReservationRecovery) -> Claim | None: ...

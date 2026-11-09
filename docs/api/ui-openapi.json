@@ -30,7 +30,7 @@
         "operationId": "commandOriginalDelivery",
         "parameters": [
           {"name": "issue_number", "in": "path", "required": true, "schema": {"type": "integer", "minimum": 1}},
-          {"name": "operation", "in": "path", "required": true, "schema": {"type": "string", "enum": ["register", "handoff", "correct", "launch", "track", "resume", "cancel", "reconcile"]}}
+          {"name": "operation", "in": "path", "required": true, "schema": {"type": "string", "enum": ["register", "handoff", "correct", "launch", "track", "resume", "cancel", "reconcile", "retire"]}}
         ],
         "requestBody": {
           "required": true,
@@ -1263,6 +1263,30 @@
           }
         }
       },
+      "ReservationRecoveryPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "request_id",
+          "previous_fence",
+          "evidence_path",
+          "evidence_sha256"
+        ],
+        "properties": {
+          "request_id": {
+            "type": "string"
+          },
+          "previous_fence": {
+            "type": "string"
+          },
+          "evidence_path": {
+            "type": "string"
+          },
+          "evidence_sha256": {
+            "type": "string"
+          }
+        }
+      },
       "OriginalDeliveryOwnerPayload": {
         "type": "object",
         "additionalProperties": false,
@@ -1301,6 +1325,7 @@
           "docker_custody"
         ],
         "properties": {
+          "reservation_recovery": {"anyOf": [{"$ref": "#/components/schemas/ReservationRecoveryPayload"}, {"type": "null"}]},
           "repository": {
             "type": "string"
           },
@@ -1747,6 +1772,91 @@
           ]}
         }
       },
+      "DockerStopWaitResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status_code",
+          "started_at",
+          "finished_at",
+          "restart_count"
+        ],
+        "properties": {
+          "status_code": {
+            "type": "integer"
+          },
+          "started_at": {
+            "type": "string",
+            "minLength": 1
+          },
+          "finished_at": {
+            "type": "string",
+            "minLength": 1
+          },
+          "restart_count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "DockerStopWaitPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "schema_version",
+          "kind",
+          "repository",
+          "run_id",
+          "session_name",
+          "contract_sha256",
+          "launch_sha256",
+          "daemon_id",
+          "controller_container_id",
+          "container_id",
+          "provider_exec_id",
+          "result"
+        ],
+        "properties": {
+          "schema_version": {
+            "type": "integer",
+            "const": 1
+          },
+          "kind": {
+            "type": "string",
+            "const": "docker-stop-wait"
+          },
+          "repository": {
+            "type": "string"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "session_name": {
+            "type": "string"
+          },
+          "contract_sha256": {
+            "type": "string"
+          },
+          "launch_sha256": {
+            "type": "string"
+          },
+          "daemon_id": {
+            "type": "string"
+          },
+          "controller_container_id": {
+            "type": "string"
+          },
+          "container_id": {
+            "type": "string"
+          },
+          "provider_exec_id": {
+            "type": "string"
+          },
+          "result": {
+            "$ref": "#/components/schemas/DockerStopWaitResult"
+          }
+        }
+      },
       "OriginalDeliveryPayload": {
         "type": "object",
         "additionalProperties": false,
@@ -1797,6 +1907,7 @@
             ]
           },
           "never_started": {"$ref": "#/components/schemas/DockerNeverStartedPayload"},
+          "stop_waits": {"type": "array", "items": {"$ref": "#/components/schemas/DockerStopWaitPayload"}},
           "remote_released": {
             "type": "boolean"
           }
@@ -1805,6 +1916,8 @@
       "OriginalDeliveryRequestPayload": {
         "additionalProperties": false,
         "properties": {
+          "recovery_evidence_path": {"type": "string", "default": "", "maxLength": 4096},
+          "recovery_evidence_sha256": {"type": "string", "default": "", "maxLength": 64},
           "lease_id": {
             "maxLength": 256,
             "minLength": 1,

@@ -18,6 +18,7 @@ from tests.run_allocation_helpers import make_completion_processor
 
 import dataclasses
 import json
+import hashlib
 import pytest
 
 from issue_orchestrator.domain.dirty_remediation import (
@@ -1143,17 +1144,23 @@ class TestReviewExchangeExecution:
         intake.drain()
         config = self._make_config(tmp_path)
         config.repo = "example/repo"
+        config.validation.quick.cmd = "configured-check"
+        config.validation.quick.timeout_seconds = 30
         config.agents["agent:claude"] = config.agents.pop("agent:coder")
         mock_git_adapter.get_head_sha.return_value = working_copy.get_head_sha(
             run.worktree_path
         )
+        from issue_orchestrator.control.issue_run_allocator import IssueRunAllocationService
+        from issue_orchestrator.ports.working_copy import BranchStatus
+        working_copy.get_branch_status.return_value = BranchStatus("feature", 0, 0, False, True)
+        allocator = IssueRunAllocationService(FileSystemSessionOutput(), ledger, working_copy, configuration=config)
         review_runner = _CapturingReviewExchangeRunner()
         processor = make_completion_processor(
             agent_callback_endpoint=ready_callback_endpoint(),
             label_adapter=mock_label_adapter, pr_adapter=mock_pr_adapter,
             git_adapter=mock_git_adapter, session_output=FileSystemSessionOutput(),
             review_exchange_runner=review_runner, event_bus=event_bus,
-            config=config, completion_intake=intake,
+            config=config, completion_intake=intake, issue_run_allocator=allocator,
         )
 
         result = processor.process(
@@ -1167,6 +1174,172 @@ class TestReviewExchangeExecution:
         attestation = ledger.validation_for_receipt(receipt.entry_id)
         assert evidence.head_sha == attestation.head_sha
         assert evidence.passed is True
+
+    @pytest.mark.parametrize("policy", ["unchanged", "command", "timeout", "disabled", "missing-config"])
+    def test_restart_refuses_superseded_validator_before_publication(
+        self, tmp_path, mock_label_adapter, mock_pr_adapter, mock_git_adapter, policy,
+    ):
+        from issue_orchestrator.control.completion_intake import CompletionEvidenceIntakeService
+        from issue_orchestrator.control.completion_intake_validation import ConfiguredCompletionEvidenceValidator
+        from issue_orchestrator.execution.issue_run_ledger import SqliteIssueRunLedger
+        from issue_orchestrator.ports.background_job import BackgroundJobRunner
+        from issue_orchestrator.ports.completion_intake import CompletionValidationWorkspace
+        from issue_orchestrator.ports.historical_intake import HistoricalIntakeHandler
+        from tests.unit.test_completion_evidence_intake import command, completion, setup
+
+        ledger, run, capability, intake, working_copy, runner = setup(tmp_path)
+        raw = json.loads(completion())
+        raw["requested_actions"] = ["push_branch", "create_pr"]
+        receipt = intake.submit(capability, command(json.dumps(raw).encode(), "policy-restart"))
+        intake.drain()
+        original = ledger.validation_for_receipt(receipt.entry_id)
+        runner.run.reset_mock()
+        config = Config(repo="test-owner/test-repo")
+        config.review_enabled = False
+        config.validation.quick.cmd = "changed-validator" if policy == "command" else None if policy == "disabled" else "configured-check"
+        config.validation.quick.timeout_seconds = 31 if policy == "timeout" else 30
+        workspace = Mock(spec=CompletionValidationWorkspace)
+        workspace.checkout.return_value = run.worktree_path
+        reopened = CompletionEvidenceIntakeService(
+            SqliteIssueRunLedger(tmp_path / "state/issue_run_ledger.sqlite", repo_slug="test-owner/test-repo"),
+            ConfiguredCompletionEvidenceValidator(working_copy, runner, workspace,
+                command=config.validation.quick.cmd or "", timeout_seconds=config.validation.quick.timeout_seconds),
+            Mock(spec=HistoricalIntakeHandler), Mock(spec=BackgroundJobRunner),
+        )
+        mock_git_adapter.get_head_sha.return_value = working_copy.get_head_sha(run.worktree_path)
+        processor = make_completion_processor(label_adapter=mock_label_adapter,
+            pr_adapter=mock_pr_adapter, git_adapter=mock_git_adapter,
+            session_output=FileSystemSessionOutput(), agent_callback_endpoint=ready_callback_endpoint(),
+            config=None if policy == "missing-config" else config, completion_intake=reopened)
+        result = processor.process(run.worktree_path, 42, "Feature", run_assets=run, intake_receipt=receipt)
+        assert result.success is (policy == "unchanged"), result
+        runner.run.assert_not_called()
+        assert ledger.validation_for_receipt(receipt.entry_id) == original
+        if policy != "unchanged":
+            assert result.failure_kind == "validation_failed"
+            mock_git_adapter.push.assert_not_called()
+            mock_pr_adapter.create_pr.assert_not_called()
+
+    @pytest.mark.parametrize("rework", ["none", "passed", "missing", "failed", "command", "timeout", "disabled"])
+    def test_receipt_validation_survives_the_real_publish_gate(
+        self, tmp_path, mock_label_adapter, mock_pr_adapter, mock_git_adapter, event_bus, rework,
+    ):
+        import shlex
+        import sys
+        from issue_orchestrator.control.completion_intake import CompletionEvidenceIntakeService
+        from issue_orchestrator.control.completion_intake_validation import ConfiguredCompletionEvidenceValidator
+        from issue_orchestrator.control.validation import PublishGate
+        from issue_orchestrator.execution.command_runner import LocalCommandRunner
+        from issue_orchestrator.ports.background_job import BackgroundJobRunner
+        from issue_orchestrator.ports.completion_intake import CompletionValidationWorkspace
+        from issue_orchestrator.ports.historical_intake import HistoricalIntakeHandler
+        from tests.unit.test_completion_evidence_intake import command, completion, setup
+
+        ledger, run, capability, _, working_copy, _ = setup(tmp_path)
+        calls = tmp_path / "validator-calls.jsonl"
+        script = tmp_path / "validator.py"
+        script.write_text(
+            "import json, os, pathlib, sys\n"
+            "context = json.loads(os.environ.get('ISSUE_ORCHESTRATOR_COMPLETION_CONTEXT', '{}'))\n"
+            "if not context: sys.exit(78)\n"
+            f"with pathlib.Path({str(calls)!r}).open('a') as output: output.write(json.dumps(context) + '\\n')\n"
+        )
+        validator_command = f"{shlex.quote(sys.executable)} -I -B {shlex.quote(str(script))}"
+        runner = LocalCommandRunner()
+        workspace = Mock(spec=CompletionValidationWorkspace)
+        workspace.checkout.return_value = run.worktree_path
+        intake = CompletionEvidenceIntakeService(
+            ledger, ConfiguredCompletionEvidenceValidator(
+                working_copy, runner, workspace, command=validator_command, timeout_seconds=30,
+            ), Mock(spec=HistoricalIntakeHandler), Mock(spec=BackgroundJobRunner),
+        )
+        raw = json.loads(completion())
+        raw["requested_actions"] = ["push_branch", "create_pr"]
+        receipt = intake.submit(capability, command(json.dumps(raw).encode(), "publish-gate"))
+        intake.drain()
+        assert ledger.validation_for_receipt(receipt.entry_id).passed
+        config = self._make_config(tmp_path)
+        config.repo = "example/repo"
+        config.validation.quick.cmd = validator_command
+        config.validation.quick.timeout_seconds = 30
+        config.agents["agent:claude"] = config.agents.pop("agent:coder")
+        mock_git_adapter.get_head_sha.return_value = working_copy.get_head_sha(run.worktree_path)
+        gate = PublishGate(run.worktree_path, runner, working_copy,
+                           command=validator_command, timeout_seconds=30)
+        from issue_orchestrator.control.issue_run_allocator import IssueRunAllocationService
+        from issue_orchestrator.ports.working_copy import BranchStatus
+        working_copy.get_branch_status.return_value = BranchStatus("feature", 0, 0, False, True)
+        allocator = IssueRunAllocationService(FileSystemSessionOutput(), ledger, working_copy, configuration=config)
+        final_receipts = [receipt.entry_id]
+        final_evidence = [intake.prepare_receipt_for_issue(receipt, run, 42)]
+        class ReworkingReviewRunner(_CapturingReviewExchangeRunner):
+            def run(self, **kwargs):
+                if rework != "none":
+                    child = kwargs["exchange_run"].session_run
+                    assert ledger.recorded_run(child).run == child
+                    working_copy.get_head_sha.return_value = "b" * 40
+                    mock_git_adapter.get_head_sha.return_value = "b" * 40
+                    if rework != "missing":
+                        if rework == "failed":
+                            script.write_text("import sys; sys.exit(1)\n")
+                        child_receipt = intake.submit(ledger.submission_capability(child),
+                            command(json.dumps(raw).encode(), "reworked"))
+                        intake.drain()
+                        if rework in {"passed", "command", "timeout", "disabled"}:
+                            final_evidence.append(intake.prepare_receipt_for_issue(child_receipt, child, 42))
+                            final_receipts.append(child_receipt.entry_id)
+                        if rework == "command":
+                            config.validation.quick.cmd = "changed-validator"
+                        elif rework == "timeout":
+                            config.validation.quick.timeout_seconds = 31
+                        elif rework == "disabled":
+                            config.validation.quick.cmd = None
+                return super().run(**kwargs)
+        processor = make_completion_processor(
+            agent_callback_endpoint=ready_callback_endpoint(), label_adapter=mock_label_adapter,
+            pr_adapter=mock_pr_adapter, git_adapter=mock_git_adapter,
+            session_output=FileSystemSessionOutput(), review_exchange_runner=ReworkingReviewRunner(),
+            event_bus=event_bus, config=config, completion_intake=intake, issue_run_allocator=allocator,
+        )
+
+        from issue_orchestrator.control.session_controller import SessionController
+        from issue_orchestrator.domain.models import SessionStatus
+        from issue_orchestrator.observation.observation import SessionObservationResult
+        from issue_orchestrator.ports import NullEventSink
+        controller = SessionController(
+            processor, NullEventSink(), FileSystemSessionOutput(), working_copy,
+            command_runner=runner, validation_cmd=validator_command, validation_timeout_seconds=30,
+        )
+        decision = controller.decide_outcome(
+            SessionObservationResult.terminated(runtime_minutes=1), run.worktree_path, 42,
+            "Feature", run.session_name, session_run_assets=run, task_kind=SessionKind.CODE,
+        )
+        if rework in {"missing", "failed", "command", "timeout", "disabled"}:
+            assert decision.status is SessionStatus.VALIDATION_FAILED
+            assert decision.validation_passed is False
+            expected_error = ("accepted completion validation differs from current worktree"
+                              if rework == "missing" else "receipt is not completed and validated publication intent")
+            if rework in {"command", "timeout"}:
+                expected_error = "retained validation belongs to another configured validator"
+            elif rework == "disabled":
+                expected_error = "retained publication requires a configured validator"
+            assert decision.validation_error == expected_error
+            mock_pr_adapter.create_pr.assert_not_called()
+            mock_git_adapter.push.assert_not_called()
+            return
+        assert decision.status is SessionStatus.COMPLETED, decision
+        assert decision.validation_passed is True
+        recorded_calls = [json.loads(line) for line in calls.read_text().splitlines()]
+        assert [value["entry_id"] for value in recorded_calls] == final_receipts
+        record = json.loads((run.run_dir / "validation-record.json").read_bytes())
+        assert record["passed"] is True
+        assert record["suite"] == "completion_intake"
+        assert record["head_sha"] == ("b" if rework == "passed" else "a") * 40
+        assert record == json.loads(final_evidence[-1].validation_bytes)
+        original = final_evidence[-1].validation.result_path.read_bytes()
+        assert hashlib.sha256(original).hexdigest() == final_evidence[-1].validation.result_sha256
+        # Context-free validation still executes and refuses: owned passes are not HEAD caches.
+        assert gate.check(session_output_dir=run.run_dir).allowed is False
 
     def test_exchange_failure_halts_before_pr_creation(
         self,

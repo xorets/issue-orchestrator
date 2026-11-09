@@ -14,12 +14,23 @@ if TYPE_CHECKING:
 
 
 @contextmanager
-def original_delivery_ports(config: Config, lease_config: LeaseConfig) -> Iterator[tuple[OriginalDeliveryClaims, RepositoryHost]]:
+def original_delivery_ports(config: Config, lease_config: LeaseConfig, *,
+                            recovery_issue: int | None = None) -> Iterator[tuple[OriginalDeliveryClaims, RepositoryHost]]:
     claimant_id = config.claims.claimant_id
-    if not claimant_id:
+    if not claimant_id and recovery_issue is None:
         raise ValueError("Original custody requires an explicit claimant identity")
     repository = GitHubAdapter(repo=config.repo, config=config)
     try:
+        if not claimant_id:
+            assert recovery_issue is not None
+            claim = GitHubRefClaimAdapter.read_original_record(repository.http_client, recovery_issue)
+            original = claim.original
+            assert original is not None
+            first_pid = original.engine_history[0][1] if original.engine_history else original.engine_pid
+            if ((original.repository, original.config_fingerprint) != (config.repo, config.config_fingerprint) or
+                    claim.claimant != f'orchestrator-{first_pid}'):
+                raise ValueError('Legacy recovery claimant/configuration does not match original custody')
+            claimant_id = claim.claimant
         claims = GitHubRefClaimAdapter(repository.http_client, claimant_id, lease_config,
             label_adapter=repository)
         yield claims, repository

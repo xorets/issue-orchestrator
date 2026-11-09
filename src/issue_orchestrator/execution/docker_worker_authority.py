@@ -9,6 +9,7 @@ import time
 
 from .agent_runner_env import DEFAULT_FORBIDDEN_ENV_VARS
 from .docker_launch_input import canonical, sealed_bytes
+from .original_delivery_contract import require_contract_schema
 
 MODEL_AUTH_ENV = "XORETS_DOCKER_MODEL_AUTH_JSON"
 MODEL_LAUNCH_ENV = "XORETS_DOCKER_LAUNCH_JSON"
@@ -263,6 +264,7 @@ def _require_subject(packet: dict, outer: dict, inner: dict, inner_path: Path) -
         ("workspace", "session_name", "agent_label", "logical_child", "backend", "docker_launch", "callback")}
     if "worker_projection" in execution:
         subject["execution"]["worker_projection"] = execution["worker_projection"]
+    require_contract_schema(inner)
     intent = {key: value for key, value in packet.items() if key not in {"contract_sha256", "run_id", "engine_run_dir", "command_sha256"}}
     keys = {"schema_version", "kind", "model_admission", "run_id", "subject", "engine_contract", "worker", "installed_acceptance"}
     if outer.get("schema_version") == 2:
@@ -273,7 +275,7 @@ def _require_subject(packet: dict, outer: dict, inner: dict, inner_path: Path) -
             set(outer.get("worker", {})) != {"image_id", "manifest_sha256"} or
             outer["worker"]["image_id"] != packet["image_id"] or
             not re.fullmatch(r"[0-9a-f]{64}", outer["worker"].get("manifest_sha256", "")) or
-            inner.get("schema_version") != 4 or inner.get("controller_compatibility") != "supervised-v4" or
+            inner.get("schema_version") not in (4, 5) or inner.get("controller_compatibility") != "supervised-v4" or
             inner.get("run_id") != packet["builder_run_id"] or inner.get("repository", {}).get("name") != packet["repository"] or
             (execution.get("workspace"), execution.get("session_name"), execution.get("backend")) !=
                 (packet["working_dir"], packet["session_name"], "docker") or

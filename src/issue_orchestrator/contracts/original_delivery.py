@@ -17,5 +17,8 @@ class OriginalDeliveryRequest(BaseModel):
     base_sha: str = Field(default="", max_length=40)
     feedback: str = Field(default="", max_length=65536)
 
+    recovery_evidence_path: str = Field(default="", max_length=4096)
+    recovery_evidence_sha256: str = Field(default="", max_length=64)
+
     def command(self, operation: str) -> OriginalDeliveryCommand:
         return OriginalDeliveryCommand(operation=operation, **self.model_dump())

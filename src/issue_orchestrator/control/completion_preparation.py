@@ -1,6 +1,6 @@
 """Prepared completion phases shared by live execution and manual publication."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 from ..domain.prepared_completion import PreparedCompletionEvidence
 from ..domain.completion_intake import CompletionIntakeReceipt
@@ -31,6 +31,7 @@ class PreparedCompletion:
     branch: str | None
     preserved_completion_path: str | None
     actions: PreparedActionPlan
+    validation_evidence: PreparedCompletionEvidence | None = field(default=None, repr=False)
 
     @property
     def agent_label(self) -> str | None:

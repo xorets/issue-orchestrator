@@ -45,11 +45,11 @@ def build_original_delivery_owner(config: Config, claims: object, repository: Re
 
 
 @contextmanager
-def build_offline_original_delivery_owner(config: Config) -> Iterator[OriginalDeliveryOwner]:
+def build_offline_original_delivery_owner(config: Config, *, recovery_issue: int | None = None) -> Iterator[OriginalDeliveryOwner]:
     from .bootstrap_claims import lease_config_from
-    if not config.claims.enabled or not config.claims.claimant_id or not config.repo:
+    if not config.claims.enabled or not config.repo or not config.claims.claimant_id and recovery_issue is None:
         raise ValueError("Original reconciliation requires its explicit original remote claimant/configuration")
-    with original_delivery_ports(config, lease_config_from(config)) as (claims, repository):
+    with original_delivery_ports(config, lease_config_from(config), recovery_issue=recovery_issue) as (claims, repository):
         owner = build_original_delivery_owner(config, claims, repository, None, None)
         assert owner is not None
         yield owner

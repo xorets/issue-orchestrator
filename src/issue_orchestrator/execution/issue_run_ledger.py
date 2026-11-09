@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import sqlite3
+import stat
 from collections.abc import Iterator, Sequence
 from contextlib import closing, contextmanager
 from pathlib import Path
@@ -34,6 +35,27 @@ from ..infra.sqlite_connection import open_sqlite
 logger = logging.getLogger(__name__)
 
 
+def _prepare_private_state_directory(path: Path) -> None:
+    if path.resolve() != path.absolute():
+        raise IssueRunEvidenceUnavailable("Run state directory must be canonical")
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        before = os.fstat(descriptor)
+        if before.st_uid != os.getuid():
+            raise IssueRunEvidenceUnavailable("Run state directory is not owner custody")
+        if stat.S_IMODE(before.st_mode) != 0o700:
+            os.fchmod(descriptor, 0o700)
+        current = path.lstat()
+        if (path.resolve() != path.absolute() or
+                (current.st_dev, current.st_ino, current.st_uid) !=
+                (before.st_dev, before.st_ino, before.st_uid) or
+                stat.S_IMODE(current.st_mode) != 0o700):
+            raise IssueRunEvidenceUnavailable("Run state directory custody changed")
+    finally:
+        os.close(descriptor)
+
+
 class SqliteIssueRunLedger:
     """Append-only launch facts; neither age nor launch failure erases ownership.
 
@@ -45,7 +67,7 @@ class SqliteIssueRunLedger:
     def __init__(self, db_path: Path, *, repo_slug: str) -> None:
         self._path = db_path
         self._repo_slug = repo_slug
-        db_path.parent.mkdir(parents=True, exist_ok=True)
+        _prepare_private_state_directory(db_path.parent)
         marker = db_path.with_suffix(db_path.suffix + ".initialized")
         if marker.exists():
             self._identity = marker.read_text(encoding="ascii")
