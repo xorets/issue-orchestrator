@@ -1,8 +1,9 @@
 """Typed outcome of completion processing across owner boundaries."""
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, replace, field
 from .completion_intake import CompletionIntakeReceipt, CompletionIntakeError
 from .registered_completion import CompletionProcessingPolicy
+from .prepared_completion import PreparedCompletionEvidence
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +59,7 @@ class ProcessingResult:
     validation_failed_rerouted: bool = False
     # Exact processed receipt; never rediscovered when recording retry custody.
     intake_receipt: CompletionIntakeReceipt | None = None
+    validation_evidence: PreparedCompletionEvidence | None = field(default=None, repr=False)
 
     def require_processing_policy(self) -> CompletionProcessingPolicy:
         """A processed result cannot be reclassified as an unprocessed session."""

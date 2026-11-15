@@ -415,6 +415,28 @@ export interface DockerNeverStartedPayload {
   stop_wait: "completed";
 }
 
+export interface DockerStopWaitPayload {
+  container_id: string;
+  contract_sha256: string;
+  controller_container_id: string;
+  daemon_id: string;
+  kind: "docker-stop-wait";
+  launch_sha256: string;
+  provider_exec_id: string;
+  repository: string;
+  result: DockerStopWaitResult;
+  run_id: string;
+  schema_version: 1;
+  session_name: string;
+}
+
+export interface DockerStopWaitResult {
+  finished_at: string;
+  restart_count: number;
+  started_at: string;
+  status_code: number;
+}
+
 export interface DoctorCheckPayload {
   detail?: string | null;
   name?: string | null;
@@ -1108,6 +1130,7 @@ export interface OriginalDeliveryOwnerPayload {
   process_roots: (string | number)[][];
   released: boolean;
   repository: string;
+  reservation_recovery?: ReservationRecoveryPayload | null;
   run_dir: string;
   run_id: string;
   session_name: string;
@@ -1126,6 +1149,7 @@ export interface OriginalDeliveryPayload {
   never_started?: DockerNeverStartedPayload;
   owner: OriginalDeliveryOwnerPayload | null;
   remote_released: boolean;
+  stop_waits?: DockerStopWaitPayload[];
 }
 
 export interface OriginalDeliveryRequestPayload {
@@ -1136,6 +1160,8 @@ export interface OriginalDeliveryRequestPayload {
   head_sha?: string;
   lease_id: string;
   pr_number?: number;
+  recovery_evidence_path?: string;
+  recovery_evidence_sha256?: string;
   request_id: string;
   run_id: string;
   session_name?: string;
@@ -1482,6 +1508,13 @@ export interface RepositorySetupValidationDefaultsPayload {
   publish_command: string | null;
   quick_command: string | null;
   source: string;
+}
+
+export interface ReservationRecoveryPayload {
+  evidence_path: string;
+  evidence_sha256: string;
+  previous_fence: string;
+  request_id: string;
 }
 
 export interface RetrospectiveReviewDecisionPayload {

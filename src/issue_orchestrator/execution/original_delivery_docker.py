@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 from ..domain.models import Session
-from ..domain.original_delivery import DockerCustody, OriginalDelivery
+from ..domain.original_delivery import DockerCustody, OriginalDelivery, ReservationRecovery
 from ..ports.original_docker_custody import DockerPrestartSnapshot
 from .terminal_docker import DockerPlugin, canonical, sealed_bytes
 from .original_delivery_session import require_native_session_assets
-from hashlib import sha256
+from hashlib import sha256, file_digest
 import json
 import os
 import re
@@ -178,12 +178,76 @@ class DockerOriginalCustody:
             raise ValueError("Docker original worker identity changed")
         return actual
 
-    def _worker(self, custody: DockerCustody) -> dict:
+    def _worker(self, owner: OriginalDelivery, custody: DockerCustody) -> dict:
         actual = self._container(custody)
-        provider = self.runner.engine.request("GET", f"/exec/{custody.provider_exec_id}/json")
-        if provider.get("ID") != custody.provider_exec_id or provider.get("ContainerID") != custody.container_id:
-            raise ValueError("Docker original exec identity changed")
+        result = self.runner.engine.inspect_exec(custody.provider_exec_id)
+        provider = result.get('value') if type(result) is dict else None
+        same_exec = (type(result) is dict and set(result) == {'status', 'value'} and
+            type(result['status']) is int and result['status'] == 200 and type(provider) is dict and
+            provider.get('ID') == custody.provider_exec_id and provider.get('ContainerID') == custody.container_id)
+        retained_stop = (type(result) is dict and set(result) == {'status'} and
+            type(result['status']) is int and result['status'] == 404 and
+            self.stopped_wait(owner, custody, actual) is not None)
+        if not same_exec and not retained_stop:
+            raise ValueError("Docker original exec identity or retained settlement changed")
         return actual
+
+    def recovery_snapshot(self, owner: OriginalDelivery) -> list[dict]:
+        """Current containment only; missing historical provider settlement stays unknown."""
+        from .docker_worker_state import stopped_container_generation
+        self.verify_contract(owner)
+        if (owner.execution_backend != "docker" or not owner.cancelled or not owner.docker_custody or
+                {row.run_id for row in owner.docker_custody} != {owner.run_id, *(row[1] for row in owner.correction_runs)}):
+            raise ValueError("Docker recovery custody coverage is unknown")
+        snapshots = []
+        for row in owner.docker_custody:
+            worker = self._container(row)
+            controller = self.runner.engine.request("GET", f"/containers/{row.controller_container_id}/json")
+            snapshots.append({"run_id": row.run_id,
+                "worker": stopped_container_generation(worker, row.container_id),
+                "controller": stopped_container_generation(controller, row.controller_container_id)})
+        return snapshots
+
+    def verify_reservation_recovery(self, owner: OriginalDelivery, lease_id: str, fence: str,
+                                    recovery: ReservationRecovery) -> None:
+        raw = _private_diagnostic_bytes(Path(recovery.evidence_path), 65536, mode=0o400)
+        if sha256(raw).hexdigest() != recovery.evidence_sha256:
+            raise ValueError("Reservation recovery evidence digest changed")
+        evidence = json.loads(raw, object_pairs_hook=_unique_record)
+        expected = {"schema_version": 1, "kind": "original-reservation-recovery", "lease_id": lease_id,
+            "previous_fence": fence, "owner": owner.to_dict(), "stopped": self.recovery_snapshot(owner)}
+        if (type(evidence) is not dict or set(evidence) != {*expected, "preserved"} or
+                canonical({k: evidence[k] for k in expected}) != canonical(expected)):
+            raise ValueError("Reservation recovery identity or stopped generation changed")
+        preserved = evidence["preserved"]
+        if type(preserved) is not dict or set(preserved) != {"claim_bundle", "task_archive", "git_bundle"}:
+            raise ValueError("Reservation recovery preservation is incomplete")
+        for artifact in preserved.values():
+            if (type(artifact) is not dict or set(artifact) != {"path", "sha256"} or
+                    type(artifact["path"]) is not str or type(artifact["sha256"]) is not str or
+                    re.fullmatch("[0-9a-f]{64}", artifact["sha256"]) is None):
+                raise ValueError("Reservation recovery preservation shape differs")
+            path = Path(artifact["path"])
+            if not path.is_absolute() or path.resolve(strict=True) != path:
+                raise ValueError("Reservation recovery preservation path differs")
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                before = os.fstat(fd)
+                if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size <= 0 or
+                        before.st_mode & 0o022):
+                    raise ValueError("Reservation recovery preservation custody differs")
+                with os.fdopen(fd, "rb", closefd=False) as stream:
+                    digest = file_digest(stream, "sha256").hexdigest()
+                after = os.fstat(fd)
+                named = path.lstat()
+                if (digest != artifact["sha256"] or (named.st_dev, named.st_ino) != (before.st_dev, before.st_ino) or
+                        any(getattr(before, key) != getattr(after, key) for key in
+                            ("st_dev", "st_ino", "st_uid", "st_nlink", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns"))):
+                    raise ValueError("Reservation recovery preservation changed")
+            finally:
+                os.close(fd)
+        if expected["stopped"] != self.recovery_snapshot(owner):
+            raise ValueError("Docker recovery stopped generation changed during verification")
 
     def quiescent(self, owner: OriginalDelivery, *, offline: bool) -> None:
         if owner.execution_backend != "docker" or not owner.docker_custody:
@@ -200,12 +264,67 @@ class DockerOriginalCustody:
             settled = (type(provider) is dict and provider.get('ID') == custody.provider_exec_id and
                 provider.get('ContainerID') == custody.container_id and provider.get('Running') is False and
                 type(provider.get('ExitCode')) is int)
-            if not settled and self.never_started(owner, custody) is None:
+            retained_stop = (type(result) is dict and set(result) == {'status'} and
+                type(result['status']) is int and result['status'] == 404 and self.stopped_wait(owner, custody, actual) is not None)
+            if not settled and not retained_stop and self.never_started(owner, custody) is None:
                 raise ValueError("Docker original provider settlement is unknown")
             if offline:
                 controller = self.runner.engine.request("GET", f"/containers/{custody.controller_container_id}/json")
                 if controller.get("Id") != custody.controller_container_id or controller.get("State", {}).get("Running") is not False:
                     raise ValueError("Docker original controller is active or unknown")
+                if retained_stop and (type(controller.get('State', {}).get('Pid')) is not int or controller['State']['Pid'] != 0):
+                    raise ValueError('Docker original controller stopped state is unknown')
+
+    def stop_waits(self, owner: OriginalDelivery) -> list[dict]:
+        """Export retained containment evidence, never a provider-success claim."""
+        proofs = []
+        for row in owner.docker_custody:
+            try:
+                proof = self.stopped_wait(owner, row, self._container(row))
+            except (OSError, ValueError, RuntimeError):
+                proof = None
+            if proof is not None:
+                proofs.append(proof)
+        return proofs
+
+    def stopped_wait(self, owner: OriginalDelivery, custody: DockerCustody, actual: dict) -> dict | None:
+        """Exec absence is usable only alongside a retained positive stop/wait."""
+        from .docker_worker_state import stopped_container_generation
+        try:
+            self.verify_contract(owner)
+            if self.runner.template_path is not None:
+                self.runner.select_run(custody.run_id)
+            path = self.runner.receipt_path()
+            for parent in (path.parent, path.parent.parent):
+                info = parent.lstat()
+                if parent.resolve(strict=True) != parent or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+                    return None
+            record = json.loads(_private_diagnostic_bytes(path, 65536, mode=0o600), object_pairs_hook=_unique_record)
+            launch_path = self.runner.launch_path
+            if launch_path is None:
+                return None
+            packet = json.loads(sealed_bytes(launch_path, expected=custody.launch_sha256))
+            runs = [(owner.run_id, owner.run_dir, owner.session_name),
+                *((row[1], row[2], row[3]) for row in owner.correction_runs)]
+            if ((packet['run_id'], packet['engine_run_dir'], packet['session_name']) not in runs or
+                    (packet['repository'], packet['working_dir'], packet['contract_sha256']) !=
+                    (owner.repository, owner.worktree, owner.contract_sha256) or
+                    record.get('state') != 'stopped' or record.get('original_binding') != 'bound' or
+                    type(record.get('start_gate_version')) is not int or record['start_gate_version'] != 1 or
+                    record.get('start_intent') not in ('requested', 'cancelled-before-start') or
+                    not isinstance(record.get('original_fence'), str) or
+                    re.fullmatch('[0-9a-f]{40}', record['original_fence']) is None or
+                    any(record.get(key) != getattr(custody, key) for key in DockerCustody.__dataclass_fields__) or
+                    record.get('contract_sha256') != owner.contract_sha256 or
+                    record.get('repository') != owner.repository or record.get('session_name') != packet['session_name']):
+                return None
+            expected = {'schema_version':1, 'kind':'docker-stop-wait',
+                **{key:record[key] for key in ('repository', 'run_id', 'session_name', 'contract_sha256',
+                    'launch_sha256', 'daemon_id', 'controller_container_id', 'container_id', 'provider_exec_id')},
+                'result':stopped_container_generation(actual, custody.container_id)}
+            return expected if canonical(record.get('stop_wait')) == canonical(expected) else None
+        except (OSError, ValueError, TypeError, KeyError):
+            return None
 
     def never_started(self, owner: OriginalDelivery, custody: DockerCustody | None = None) -> dict | None:
         """Return only a protected, identity-bound source-owned stop/wait proof."""
@@ -259,7 +378,18 @@ class DockerOriginalCustody:
         rows = [row for row in owner.docker_custody if row.run_id == run_id]
         if len(rows) != 1:
             raise ValueError("Docker original termination custody is unknown")
-        self._worker(rows[0])
+        self._worker(owner, rows[0])
+
+    def verify_terminal_session(self, owner: OriginalDelivery, session: Session) -> None:
+        require_native_session_assets(session)
+        run = session.run_assets
+        runs = [(owner.run_id, owner.run_dir, owner.session_name),
+            *((row[1], row[2], row[3]) for row in owner.correction_runs)]
+        if ((run.run_id, str(run.run_dir), session.terminal_id) not in runs or
+                str(run.worktree_path) != owner.worktree):
+            raise ValueError('Docker typed original termination session changed')
+        self.verify_contract(owner)
+        self.termination_scope(owner, run.run_id)
 
     def verify_contract(self, owner: OriginalDelivery) -> None:
         if self.runner.template_path is not None:

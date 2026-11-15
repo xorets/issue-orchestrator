@@ -18,6 +18,31 @@ class OriginalDeliveryOperation(StrEnum):
     RESUME = "resume"
     CANCEL = "cancel"
     RECONCILE = "reconcile"
+    RETIRE = "retire"
+
+
+@dataclass(frozen=True, slots=True)
+class ReservationRecovery:
+    """Current recovery evidence; never a historical original-release certificate."""
+    request_id: str
+    previous_fence: str
+    evidence_path: str
+    evidence_sha256: str
+
+    def __post_init__(self) -> None:
+        from pathlib import Path
+        if (type(self.request_id) is not str or not self.request_id.strip() or len(self.request_id) > 256 or
+                type(self.previous_fence) is not str or not re.fullmatch('[0-9a-f]{40}', self.previous_fence) or
+                type(self.evidence_sha256) is not str or not re.fullmatch('[0-9a-f]{64}', self.evidence_sha256) or
+                type(self.evidence_path) is not str or not Path(self.evidence_path).is_absolute()):
+            raise ValueError('Invalid reservation recovery binding')
+
+
+    @classmethod
+    def from_dict(cls, value: object) -> ReservationRecovery:
+        if type(value) is not dict or set(value) != set(cls.__dataclass_fields__):
+            raise ValueError('Invalid reservation recovery record')
+        return cls(**value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,10 +102,15 @@ class OriginalDelivery:
     released: bool = False
     execution_backend: str = "native"
     docker_custody: tuple[DockerCustody, ...] = ()
+    reservation_recovery: ReservationRecovery | None = None
 
     def __post_init__(self) -> None:
         self._validate_identity()
         self._validate_history()
+        if self.reservation_recovery is not None and (
+                type(self.reservation_recovery) is not ReservationRecovery or not self.cancelled or
+                self.released or self.execution_backend != 'docker'):
+            raise ValueError('Invalid retired reservation state')
         if self.execution_backend not in {"native", "docker"}:
             raise ValueError("unknown original execution backend")
         if type(self.docker_custody) is not tuple or any(type(item) is not DockerCustody for item in self.docker_custody):
@@ -136,11 +166,15 @@ class OriginalDelivery:
 
     @classmethod
     def from_dict(cls, value: object) -> OriginalDelivery:
+        if type(value) is dict and 'reservation_recovery' not in value:
+            value = {**value, 'reservation_recovery':None}
         if type(value) is dict and set(value) == set(cls.__dataclass_fields__) - {"execution_backend", "docker_custody"}:
             value = {**value, "execution_backend": "native", "docker_custody": []}
         if type(value) is not dict or set(value) != set(cls.__dataclass_fields__):
             raise ValueError("original delivery field set is invalid")
         decoded: dict[str, Any] = dict(value)
+        if decoded['reservation_recovery'] is not None:
+            decoded['reservation_recovery'] = ReservationRecovery.from_dict(decoded['reservation_recovery'])
         if type(decoded["docker_custody"]) not in {tuple, list} or any(type(item) is not dict for item in decoded["docker_custody"]):
             raise ValueError("Docker custody history must be a sequence")
         try:
@@ -192,6 +226,8 @@ def transition(owner: OriginalDelivery, operation: str, *, request_id: str,
     """Pure policy; the claim store commits this transition with its original fence."""
     if type(request_id) is not str or not request_id.strip() or len(request_id) > 256:
         raise ValueError("a bounded request id is required")
+    if owner.reservation_recovery is not None:
+        raise ValueError('Original reservation has been retired')
     if owner.released:
         if operation == "reconcile":
             return owner
@@ -207,6 +243,14 @@ def transition(owner: OriginalDelivery, operation: str, *, request_id: str,
     if operation == "launch" and owner.pending and request_id == owner.correction_id:
         return owner if request_id in owner.launches else replace(owner, launches=(*owner.launches, request_id))
     raise ValueError("unsupported original delivery operation")
+
+
+def retire_reservation(owner: OriginalDelivery, recovery: ReservationRecovery) -> OriginalDelivery:
+    if owner.reservation_recovery is not None:
+        if owner.reservation_recovery == recovery:
+            return owner
+        raise ValueError('Original reservation has been retired')
+    return replace(owner, reservation_recovery=recovery)
 
 
 def bind_correction_run(owner: OriginalDelivery, request_id: str, run_id: str, run_dir: str,

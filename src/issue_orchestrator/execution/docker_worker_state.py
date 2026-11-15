@@ -5,6 +5,23 @@ from ..domain.original_delivery import DockerCustody
 from .docker_engine import DockerEngine
 
 
+def stopped_container_generation(actual: dict, container_id: str) -> dict:
+    """A positive stopped observation, bound to one container generation."""
+    if type(actual) is not dict or type(actual.get('State')) is not dict:
+        raise ValueError('Docker stopped container generation is unproven')
+    state = actual['State']
+    if (actual.get('Id') != container_id or state.get('Running') is not False or
+            state.get('Status') != 'exited' or state.get('Paused') is not False or state.get('Restarting') is not False or
+            type(state.get('Pid')) is not int or state['Pid'] != 0 or
+            type(state.get('ExitCode')) is not int or type(actual.get('RestartCount')) is not int or
+            actual['RestartCount'] < 0 or any(type(state.get(key)) is not str or not state[key]
+                for key in ('StartedAt', 'FinishedAt'))):
+        raise ValueError('Docker stopped container generation is unproven')
+    return {'status_code':state['ExitCode'], 'started_at':state['StartedAt'],
+        'finished_at':state['FinishedAt'], 'restart_count':actual['RestartCount']}
+
+
+
 def require_never_started_exec(provider: dict, container_id: str, exec_id: str,
                                user: str, command: list[str]) -> None:
     """Require the exact pre-start Docker exec observation; never infer it from absence."""

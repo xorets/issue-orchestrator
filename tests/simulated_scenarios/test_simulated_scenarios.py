@@ -1073,20 +1073,21 @@ def test_validation_cache_invalidates_on_record_corruption(scenario_repo: Path):
     "no record yet" from "record but unreadable" — both miss, so
     validation re-runs.
     """
-    # Stub head SHA is "deadbeef" (StubWorkingCopy.get_head_sha).
     # Seed the corrupt cache before the orchestrator boots; the worktree
     # path is the conventional ``<repo>/.issue-orchestrator/worktrees/sim-wt-1``.
     from .conftest import TempWorktreeManager
-    TempWorktreeManager(scenario_repo / ".issue-orchestrator" / "worktrees").create(
+    worktree = TempWorktreeManager(scenario_repo / ".issue-orchestrator" / "worktrees").create(
         scenario_repo, 1, "cache scenario"
-    )
+    ).path
+    head = StubWorkingCopy().get_head_sha(worktree)
+    assert head is not None
     validation_dir = (
         scenario_repo
         / ".issue-orchestrator" / "worktrees" / "sim-wt-1"
         / ".issue-orchestrator" / "validation"
     )
     validation_dir.mkdir(parents=True, exist_ok=True)
-    (validation_dir / "deadbeef.json").write_text(
+    (validation_dir / f"{head}.json").write_text(
         "{ this is not valid JSON",
         encoding="utf-8",
     )

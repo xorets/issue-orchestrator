@@ -9,7 +9,8 @@ from issue_orchestrator.domain.original_delivery import OriginalDelivery
 from issue_orchestrator.execution.original_delivery_contract import sealed_execution_contract
 
 
-def test_sealed_launch_ceiling_matches_engine_configuration(tmp_path, sample_config, monkeypatch):
+@pytest.mark.parametrize('schema_version,backend', [(4, 'native'), (5, 'docker')])
+def test_sealed_launch_ceiling_matches_engine_configuration(tmp_path, sample_config, monkeypatch, schema_version, backend):
     sample_config.refresh_config_fingerprint()
     owner = OriginalDelivery(repository=sample_config.repo, config_fingerprint=sample_config.config_fingerprint,
         contract_sha256='a'*64, run_id='native-run', session_name='issue-42', native_phase_name='coding-1', logical_child='code:42', started_at='start',
@@ -21,6 +22,19 @@ def test_sealed_launch_ceiling_matches_engine_configuration(tmp_path, sample_con
             'configuration_sha256':'b'*64}, 'branch':{'name':owner.branch}, 'capabilities':ceiling,
         'supervised':{'correction':{'capabilities':{'originating':ceiling},
             'configuration_sha256':'b'*64, 'budget':{'max_rework_cycles':owner.max_cycles}}}}
+    contract['schema_version'] = schema_version
+    contract['execution']['backend'] = backend
+    owner = replace(owner, execution_backend=backend)
+    if schema_version == 5:
+        request = {'schema_version': 1, 'action': 'retry', 'repository': owner.repository,
+            'issue_id': 42, 'requirements_sha256': 'c' * 64, 'predecessor_sha256': 'd' * 64,
+            'history': [{'id': 101, 'publisher_id': 7, 'body_sha256': 'e' * 64}]}
+        compact = lambda value: json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
+        request['id'] = hashlib.sha256(compact(request)).hexdigest()
+        contract['repository']['id'] = 10
+        contract['issue'] = {'id': 42, 'number': 42, 'request': request, 'requirements_sha256': 'c' * 64, 'satisfied_dependencies': []}
+        contract['generation'] = 'request-v1-' + request['id']
+        contract['run_id'] = 'run-' + hashlib.sha256(compact([10, 42, contract['generation']])).hexdigest()[:32]
     encoded = json.dumps(contract).encode()
     path = tmp_path/'contract.json'
     path.write_bytes(encoded)

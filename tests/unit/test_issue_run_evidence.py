@@ -1,6 +1,8 @@
 """Run ownership survives restart and refuses unknown or conflicting evidence."""
 
+import os
 import sqlite3
+import stat
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import replace
@@ -30,6 +32,40 @@ from issue_orchestrator.infra.repo_identity import state_dir
 from issue_orchestrator.infra.sqlite_registry import list_sqlite_databases
 
 NOW = "2026-09-06T12:00:00Z"
+
+
+@pytest.mark.parametrize("existing", [False, True])
+def test_run_ledger_establishes_private_owner_state_before_custody(tmp_path, existing):
+    path = tmp_path / ".issue-orchestrator" / "state" / "issue_run_ledger.sqlite"
+    if existing:
+        path.parent.mkdir(parents=True, mode=0o755)
+        path.parent.chmod(0o755)
+    previous_umask = os.umask(0o022)
+    try:
+        ledger = SqliteIssueRunLedger(path, repo_slug="test-owner/test-repo")
+    finally:
+        os.umask(previous_umask)
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    record = run_record(tmp_path)
+    ledger.record_run(42, record)
+    # An already initialized ledger also secures its owner directory without
+    # erasing or rebinding the existing run and completion custody.
+    path.parent.chmod(0o755)
+    reopened = SqliteIssueRunLedger(path, repo_slug="test-owner/test-repo")
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    assert source(reopened).evidence_for_issue(42).runs == (record,)
+
+
+def test_run_ledger_refuses_alias_state_before_creating_database(tmp_path):
+    target = tmp_path / "other-state"
+    target.mkdir(mode=0o755)
+    target.chmod(0o755)
+    alias = tmp_path / "state"
+    alias.symlink_to(target, target_is_directory=True)
+    with pytest.raises(IssueRunEvidenceUnavailable):
+        SqliteIssueRunLedger(alias / "issue_run_ledger.sqlite", repo_slug="test-owner/test-repo")
+    assert not list(target.iterdir())
+    assert stat.S_IMODE(target.stat().st_mode) == 0o755
 
 
 def run_record(tmp_path: Path, run_id: str = "run-1") -> IssueRunRecord:

@@ -161,6 +161,20 @@ uses the existing trusted Docker daemon and client custody; it does not prove
 that another privileged Docker client could not have started the exec.
 The optional `never_started` original-owner projection binds that disposition
 to the registered custody and does not grant model or execution authority.
+For started originals, the same private session receipt retains a positive
+container stop/wait result before controller shutdown. It binds the exact
+repository, run, contract, launch, daemon, controller, worker and provider exec,
+plus container start/finish timestamps and restart count. The optional
+`stop_waits` owner projection exposes only validated retained receipts. Recovery
+can use one when the exact exec now returns 404, the worker's stopped generation
+still matches, and the recorded old controller is demonstrably stopped for
+offline adoption. A live or contradictory exec observation still refuses.
+The container wait status is containment evidence, not the provider's exit
+status or task success. Failed wait, changed generation, missing/private-file
+violations or a crash before durable recording leaves release unknown; this
+does not repair historical runs that never retained that evidence. These
+launch-to-stop-to-recovery checks currently substitute Docker and admission
+ports; actual runtime qualification remains separate.
 The retained helper observation saw the exact exec return HTTP 404 after a
 container kill and wait. The post-stop readback following Engine's container
 stop and wait remains unqualified until exercised by the actual lifecycle.

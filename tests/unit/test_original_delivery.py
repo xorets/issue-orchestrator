@@ -9,6 +9,22 @@ def custody():
         engine_birth="34", max_cycles=1)
 
 
+def test_retirement_is_distinct_from_original_release_and_is_terminal():
+    from dataclasses import replace
+    import pytest
+    from issue_orchestrator.domain.original_delivery import ReservationRecovery, retire_reservation
+    owner = replace(custody(), execution_backend='docker', cancelled=True)
+    recovery = ReservationRecovery('cleanup-1', 'b'*40, '/private/receipt.json', 'c'*64)
+    retired = retire_reservation(owner, recovery)
+    assert retired.cancelled and not retired.released and retired.reservation_recovery == recovery
+    assert OriginalDelivery.from_dict(retired.to_dict()) == retired
+    assert retire_reservation(retired, recovery) == retired
+    with pytest.raises(ValueError, match='retired'):
+        transition(retired, 'reconcile', request_id='cannot-invent-release')
+    with pytest.raises(ValueError):
+        retire_reservation(replace(owner, cancelled=False), recovery)
+
+
 def test_correction_admission_is_bounded_cancel_aware_and_idempotent():
     original = custody()
     published = transition(original, "handoff", request_id="handoff-1", pr_number=101, head_sha="b" * 40)

@@ -331,7 +331,10 @@ class StubWorkingCopy:
         return ()
 
     def get_head_sha(self, worktree: Path) -> str | None:
-        return "deadbeef"
+        # Intake validates real commits; terminal gates must observe the same HEAD.
+        from issue_orchestrator.execution.git_working_copy import GitWorkingCopy
+
+        return GitWorkingCopy().get_head_sha(worktree)
 
     def get_current_branch(self, worktree: Path) -> str | None:
         # Honours the port: `WorkingCopy.get_current_branch` returns None on a

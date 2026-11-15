@@ -391,3 +391,97 @@ def test_invalid_original_command_preserves_label_cancellation_and_foreign_claim
         owner.execute(42, command(owner, operation))
     assert owner.observe(42) == before
     assert owner.claims.original_claim(43) == foreign
+
+
+@pytest.fixture
+def recovery_owner(original_owner):
+    from hashlib import sha1
+    from issue_orchestrator.domain.original_delivery import DockerCustody
+    class HexClient(FakeGitHubRefClient):
+        def _mint(self, prefix):
+            return sha1(super()._mint(prefix).encode()).hexdigest()
+    owner, session = original_owner
+    owner.claims = GitHubRefClaimAdapter(HexClient(), 'original')
+    session.lease_id = owner.claims.attempt_claim(42).lease_id
+    owner.docker_custody = MagicMock()
+    owner.docker_custody.capture.return_value = DockerCustody(1, 'original', 'daemon', '1'*64,
+        '2'*64, '3'*64, '4'*64)
+    owner.execute(42, command(owner, 'register'))
+    return owner
+
+
+def cancel_for_recovery(owner):
+    claim, fence = owner.claims.original_claim(42)
+    assert owner.claims.transition_original(42, claim.lease_id, fence, 'cancel', request_id='cleanup')
+
+
+def test_retirement_uses_owner_guard_and_preserves_unreleased_history(recovery_owner):
+    from issue_orchestrator.domain.original_delivery import ReservationRecovery
+    owner = recovery_owner
+    cancel_for_recovery(owner)
+    owner.state = None
+    before = owner.observe(42, include_diagnostic=False)
+    cancelled = owner.claims.original_claim(42)[0].original
+    request = command(owner, 'retire', recovery_evidence_path='/private/preservation.json',
+        recovery_evidence_sha256='c'*64)
+    result = owner.execute(42, request)
+    recovery = ReservationRecovery('retire', before['fence'], '/private/preservation.json', 'c'*64)
+    owner.docker_custody.verify_reservation_recovery.assert_called_once_with(
+        cancelled, before['lease_id'], before['fence'], recovery)
+    assert result['owner']['cancelled'] and not result['remote_released']
+    assert result['owner']['reservation_recovery']['previous_fence'] == before['fence']
+    assert owner.claims.get_current_claim(42) is None
+    owner.quiescent.assert_not_called()
+    owner.execute(42, command(owner, 'retire', recovery_evidence_path='/private/preservation.json',
+        recovery_evidence_sha256='c'*64))
+    assert owner.claims.attempt_claim(42).success
+    with pytest.raises(ValueError, match='fence changed'):
+        owner.execute(42, request)
+
+
+@pytest.mark.parametrize('failure', ['live', 'evidence', 'foreign-run', 'foreign-config', 'not-cancelled', 'cas'])
+def test_refused_retirement_keeps_claim_unchanged(recovery_owner, failure):
+    owner = recovery_owner
+    if failure != 'not-cancelled': cancel_for_recovery(owner)
+    if failure != 'live': owner.state = None
+    if failure == 'evidence':
+        owner.docker_custody.verify_reservation_recovery.side_effect = ValueError('preservation changed')
+    if failure == 'foreign-config':
+        owner.config.config_fingerprint = 'foreign'
+    before = owner.claims.original_claim(42)
+    request = OriginalDeliveryCommand('retire', before[0].lease_id, before[1], 'a'*64,
+        'foreign' if failure == 'foreign-run' else 'original', 'retire',
+        recovery_evidence_path='/private/preservation.json', recovery_evidence_sha256='c'*64)
+    if failure == 'cas':
+        owner.claims.retire_original_reservation = lambda *args: None
+    with pytest.raises(ValueError): owner.execute(42, request)
+    assert owner.claims.original_claim(42) == before
+
+
+@pytest.mark.parametrize('change', [None, 'claimant', 'configuration', 'no-scope'])
+def test_legacy_offline_claimant_is_bound_to_original_record(sample_config, monkeypatch, change):
+    from issue_orchestrator.domain.lease_config import LeaseConfig
+    from issue_orchestrator.execution.original_delivery_adapter import original_delivery_ports
+    from tests.unit.test_original_delivery import custody
+    sample_config.claims.claimant_id = None
+    sample_config.refresh_config_fingerprint()
+    client = FakeGitHubRefClient()
+    claims = GitHubRefClaimAdapter(client, 'foreign' if change == 'claimant' else 'orchestrator-10')
+    claim = claims.attempt_claim(42)
+    _, fence = claims.original_claim(42)
+    original = replace(custody(), repository=sample_config.repo, config_fingerprint=sample_config.config_fingerprint,
+        engine_pid=10)
+    assert claims.bind_original(42, claim.lease_id, fence, original)
+    repository = MagicMock(spec=RepositoryHost)
+    repository.http_client = client
+    client.close = MagicMock()
+    monkeypatch.setattr('issue_orchestrator.execution.original_delivery_adapter.GitHubAdapter', lambda **kwargs: repository)
+    if change == 'configuration': sample_config.config_fingerprint = 'foreign'
+    if change is not None:
+        with pytest.raises(ValueError):
+            with original_delivery_ports(sample_config, LeaseConfig(), recovery_issue=None if change == 'no-scope' else 42):
+                pytest.fail('foreign recovery admitted')
+    else:
+        with original_delivery_ports(sample_config, LeaseConfig(), recovery_issue=42) as (observed, _):
+            assert observed.original_claim(42)[0].claimant == 'orchestrator-10'
+            assert observed.original_claim(42)[0].original == original

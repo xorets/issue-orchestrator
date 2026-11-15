@@ -568,3 +568,37 @@ def test_retained_preparation_rejects_identity_substitution(tmp_path, damage):
         identity = replace(identity, requested_actions=(RequestedAction.PUSH_BRANCH, RequestedAction.CREATE_PR))
     with pytest.raises(CompletionIntakeError, match="exact owner"):
         ledger.prepare_evidence(replace(evidence, identity=identity))
+
+
+def test_exchange_validation_resolves_only_exact_allocations_after_restart(tmp_path):
+    from issue_orchestrator.domain.review_exchange_run import ReviewExchangeRunAssets
+    from issue_orchestrator.ports.completion_intake import CompletionEvidenceValidator
+
+    ledger, run, capability, intake, _, runner = setup(tmp_path)
+    assets = ReviewExchangeRunAssets.from_run_dir(run.run_dir)
+    assert intake.prepare_exchange_for_issue(assets, 42) is None
+    receipt = intake.submit(capability, command(completion(), "exchange"))
+    intake.drain()
+    expected = intake.prepare_receipt_for_issue(receipt, run, 42)
+    assert intake.prepare_exchange_for_issue(assets, 42) == expected
+    reopened = SqliteIssueRunLedger(tmp_path / "state" / "issue_run_ledger.sqlite",
+                                   repo_slug="test-owner/test-repo")
+    validator = Mock(spec=CompletionEvidenceValidator)
+    validator.validate.side_effect = AssertionError("existing owned evidence must not rerun validation")
+    restored = CompletionEvidenceIntakeService(reopened, validator,
+        Mock(spec=HistoricalIntakeHandler), Mock(spec=BackgroundJobRunner))
+    assert restored.prepare_exchange_for_issue(assets, 42) == expected
+    for selected, issue in [
+        (assets, 43),
+        (ReviewExchangeRunAssets.from_run_dir(run.run_dir.parent / "unallocated"), 42),
+        (replace(assets, summary_path=assets.exchange_dir / "foreign.json"), 42),
+    ]:
+        with pytest.raises(CompletionIntakeError):
+            restored.prepare_exchange_for_issue(selected, issue)
+    runner.run.return_value = CommandResult(returncode=1, stdout="", stderr="failed", timed_out=False)
+    failed = intake.submit(capability, command(completion() + b" ", "failed-exchange"))
+    intake.drain()
+    assert ledger.validation_for_receipt(receipt.entry_id).passed is True
+    assert ledger.validation_for_receipt(failed.entry_id).passed is False
+    with pytest.raises(CompletionIntakeError):
+        restored.prepare_exchange_for_issue(assets, 42)

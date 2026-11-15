@@ -38,9 +38,41 @@ def sealed_execution_contract(owner: OriginalDelivery, config: Config) -> None:
     _require_contract_binding(contract, owner, config)
 
 
-def _require_contract_binding(contract: object, owner: OriginalDelivery, config: Config) -> None:
-    if not isinstance(contract, dict) or contract.get("schema_version") != 4 or contract.get("controller_compatibility") != "supervised-v4":
+def require_contract_schema(contract: dict) -> None:
+    """Schema 5 binds current-state retry identity; schema 4 keeps its original meaning."""
+    version = contract.get("schema_version")
+    issue = contract.get("issue", {})
+    if type(version) is not int or version not in (4, 5) or not isinstance(issue, dict):
         raise ValueError("Original supervised contract schema is unsupported")
+    if version == 4:
+        if "request" in issue or str(contract.get("generation", "")).startswith("request-v1-"):
+            raise ValueError("Legacy contract cannot carry current request identity")
+        return
+    request = issue.get("request")
+    repository = contract.get("repository", {})
+    if (contract.get("execution", {}).get("backend") != "docker" or not isinstance(request, dict) or
+            set(request) != {"schema_version", "id", "action", "repository", "issue_id",
+                             "requirements_sha256", "predecessor_sha256", "history"} or
+            set(issue) != {"id", "number", "requirements_sha256", "request", "satisfied_dependencies"} or
+            type(request.get("schema_version")) is not int or request["schema_version"] != 1 or
+            request.get("action") != "retry" or request.get("repository") != repository.get("name") or
+            request.get("issue_id") != issue.get("id") or
+            request.get("requirements_sha256") != issue.get("requirements_sha256")):
+        raise ValueError("Current request contract subject is invalid")
+    request_digest = hashlib.sha256(json.dumps({k: v for k, v in request.items() if k != "id"},
+        sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    generation = "request-v1-" + request_digest
+    run_id = "run-" + hashlib.sha256(json.dumps([repository.get("id"), issue["id"], generation],
+        sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:32]
+    if (request.get("id") != request_digest or contract.get("generation") != generation or
+            contract.get("run_id") != run_id):
+        raise ValueError("Current request contract identity changed")
+
+
+def _require_contract_binding(contract: object, owner: OriginalDelivery, config: Config) -> None:
+    if not isinstance(contract, dict) or contract.get("controller_compatibility") != "supervised-v4":
+        raise ValueError("Original supervised contract schema is unsupported")
+    require_contract_schema(contract)
     repository = contract.get("repository", {})
     execution = contract.get("execution", {})
     branch = contract.get("branch", {})

@@ -35,7 +35,7 @@ def test_actual_runner_status_survives_handoff(tmp_path, message, kind):
     assert (status.error_type.value if status.error_type else None) == kind
 
 
-@pytest.mark.parametrize('attack', ['missing', 'symlink', 'hardlink', 'oversized', 'malformed', 'extra', 'exit', 'bool-attempt', 'foreign-provider', 'foreign-lane', 'heals', 'slot-symlink'])
+@pytest.mark.parametrize('attack', ['missing', 'symlink', 'hardlink', 'oversized', 'malformed', 'extra', 'exit', 'success-error', 'bool-attempt', 'foreign-provider', 'foreign-lane', 'heals', 'slot-symlink'])
 def test_refuses_untrusted_provider_status(tmp_path, attack):
     slot = tmp_path / 'slot'; slot.mkdir(mode=0o700)
     target = tmp_path / 'controller'; target.mkdir(mode=0o700)
@@ -45,6 +45,7 @@ def test_refuses_untrusted_provider_status(tmp_path, attack):
     path = slot / 'provider-status.json'
     if attack == 'extra': status['extra'] = True
     if attack == 'exit': status['exit_code'] = 1
+    if attack == 'success-error': status['error_type'] = 'auth'
     if attack == 'bool-attempt': status['attempts'] = True
     if attack == 'foreign-provider': status['provider'] = 'other'
     if attack == 'foreign-lane': status['provider'] = 'codex:foreign'
@@ -295,6 +296,38 @@ def test_marker_classification_is_narrow(tmp_path, message, exact):
     assert ordinary.provider_error_type == expected
     assert actual.provider_error_type == (None if exact else expected)
     assert actual.stderr == message and actual.attempts == 1
+
+
+@pytest.mark.parametrize('lane', ['codex', 'codex:spark'])
+@pytest.mark.parametrize(('message', 'exit_code', 'kind'), [
+    ('Committed abc401def', 0, None),
+    ('Updated authentication documentation', 0, None),
+    ('Documented usage_limit_exceeded handling', 0, None),
+    ('authentication failed', 1, 'auth'),
+    ('usage_limit_exceeded', 1, 'quota'),
+    ('connection refused', 1, 'transient'),
+])
+def test_selected_docker_status_round_trip_respects_command_outcome(tmp_path, monkeypatch, lane, message, exit_code, kind):
+    import shlex
+    from issue_orchestrator.entrypoints.cli_tools.provider_runner import main
+    from issue_orchestrator.execution import docker_provider_status
+    slot = tmp_path / 'slot'; slot.mkdir(mode=0o700)
+    target = tmp_path / 'controller'; target.mkdir(mode=0o700)
+    monkeypatch.setenv('ISSUE_ORCHESTRATOR_CALLBACK_SCOPE', 'docker')
+    monkeypatch.setenv('ISSUE_ORCHESTRATOR_DOCKER_PROVIDER_DIR', str(slot))
+    monkeypatch.setattr(docker_provider_status, 'worker_slot', lambda value, run_dir: Path(value))
+    text = shlex.quote(message + '\n')
+    command = f'printf %s {text}; printf %s {text} >&2; exit {exit_code}'
+    assert main(['--command', command, '--provider', lane, '--run-dir', str(slot), '--max-attempts', '1']) == exit_code
+    descriptor = os.open(slot, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        settle(slot, descriptor, lane, False, {'engine_run_dir':str(target)}, exit_code)
+    finally:
+        os.close(descriptor)
+    status = read_provider_status(target)
+    assert status is not None and status.succeeded == (exit_code == 0)
+    assert (status.error_type.value if status.error_type else None) == kind
+    assert status.attempts == 1 and status.timed_out is False
 
 
 @pytest.mark.parametrize('lane', ['codex', 'codex:spark'])

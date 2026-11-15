@@ -2341,7 +2341,8 @@ class TestSessionControllerValidationCaching:
         )
 
         assert decision.status == SessionStatus.VALIDATION_FAILED
-        assert decision.validation_passed is None
+        assert decision.validation_passed is False
+        assert "Working tree is dirty" in decision.validation_error
         label_adapter.add_label.assert_called_once_with(123, "validation-failed")
         pr_adapter.add_comment.assert_called_once()
         git_adapter.push.assert_not_called()

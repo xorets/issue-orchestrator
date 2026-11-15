@@ -133,10 +133,18 @@ class DockerEngine:
         finally:
             stream.close()
 
-    def stop(self, container_id: str) -> None:
+    def stop(self, container_id: str) -> dict:
+        before = self.request('GET', f'/containers/{container_id}/json')
+        if type(before) is not dict or before.get('Id') != container_id:
+            raise ValueError('Docker stop target identity changed')
         self.request("POST", f"/containers/{container_id}/stop?t=2")
         waited = self.request("POST", f"/containers/{container_id}/wait?condition=not-running")
-        if type(waited.get('StatusCode')) is not int or waited.get('Error'):
-            raise ValueError('Docker container wait is unproven')
-        if self.request("GET", f"/containers/{container_id}/json").get("State", {}).get("Running") is not False:
-            raise ValueError("Docker container remains active after stop")
+        from .docker_worker_state import stopped_container_generation
+        stopped = stopped_container_generation(self.request("GET", f"/containers/{container_id}/json"), container_id)
+        if (type(waited) is not dict or type(waited.get('StatusCode')) is not int or waited.get('Error') is not None or
+                type(before.get('State')) is not dict or type(before.get('RestartCount')) is not int or
+                stopped['status_code'] != waited['StatusCode'] or
+                before['State'].get('StartedAt') != stopped['started_at'] or
+                before['RestartCount'] != stopped['restart_count']):
+            raise ValueError('Docker container wait and stopped generation differ')
+        return stopped
