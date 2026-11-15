@@ -5,11 +5,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import re
 import stat
 from typing import TYPE_CHECKING
 
 from ..domain.original_delivery import OriginalDelivery
+from ..contracts.current_request import current_request_generation
 
 if TYPE_CHECKING:
     from ..infra.config import Config
@@ -52,57 +52,18 @@ def require_contract_schema(contract: dict) -> None:
     request = issue.get("request")
     repository = contract.get("repository", {})
     execution = contract.get("execution", {})
-    request_version = request.get("schema_version") if isinstance(request, dict) else None
-    fields = {"schema_version", "id", "action", "repository", "issue_id",
-              "requirements_sha256", "predecessor_sha256", "history"}
-    if request_version == 2:
-        fields.add("selection")
     if (not isinstance(execution, dict) or execution.get("backend") != "docker" or
             not isinstance(repository, dict) or type(repository.get("id")) is not int or repository["id"] <= 0 or
             any(type(issue.get(key)) is not int or issue[key] <= 0 for key in ("id", "number")) or
             not isinstance(request, dict) or
-            set(request) != fields or
             set(issue) != {"id", "number", "requirements_sha256", "request", "satisfied_dependencies"} or
-            type(request_version) is not int or request_version not in (1, 2) or
-            request.get("action") not in (("retry",) if request_version == 1 else ("start", "retry")) or
-            request.get("repository") != repository.get("name") or
-            request.get("issue_id") != issue.get("id") or
+            request.get("repository") != repository.get("name") or request.get("issue_id") != issue.get("id") or
             request.get("requirements_sha256") != issue.get("requirements_sha256")):
         raise ValueError("Current request contract subject is invalid")
-    if request_version == 2:
-        selection = request["selection"]
-        if (not isinstance(selection, dict) or set(selection) != {"kind", "project_id"} or
-                selection["kind"] not in ("explicit", "project") or
-                (selection["kind"] == "explicit" and selection["project_id"] is not None) or
-                (selection["kind"] == "project" and (not isinstance(selection["project_id"], str) or
-                    not re.fullmatch("PVT_[A-Za-z0-9_-]+", selection["project_id"]))) or
-                (request["action"] == "start" and request["predecessor_sha256"] is not None)):
-            raise ValueError("Current request selection is invalid")
-    if (type(request["issue_id"]) is not int or request["issue_id"] <= 0 or
-            not isinstance(request["repository"], str) or
-            not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", request["repository"]) or
-            any(not isinstance(request[key], str) or not re.fullmatch("[0-9a-f]{64}", request[key])
-                for key in ("id", "requirements_sha256")) or
-            (request["action"] == "retry" and (not isinstance(request["predecessor_sha256"], str) or
-                not re.fullmatch("[0-9a-f]{64}", request["predecessor_sha256"]))) or
-            not isinstance(request["history"], list) or len(request["history"]) > 10000 or
-            (request_version == 1 and not request["history"])):
-        raise ValueError("Current request identity fields are invalid")
-    identifiers = []
-    for item in request["history"]:
-        if (not isinstance(item, dict) or set(item) != {"id", "publisher_id", "body_sha256"} or
-                any(type(item[key]) is not int or item[key] <= 0 for key in ("id", "publisher_id")) or
-                not isinstance(item["body_sha256"], str) or not re.fullmatch("[0-9a-f]{64}", item["body_sha256"])):
-            raise ValueError("Current request history is invalid")
-        identifiers.append(item["id"])
-    if identifiers != sorted(set(identifiers)):
-        raise ValueError("Current request history is inconsistent")
-    request_digest = hashlib.sha256(json.dumps({k: v for k, v in request.items() if k != "id"},
-        sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    generation = "request-v" + str(request_version) + "-" + request_digest
+    generation = current_request_generation(request)
     run_id = "run-" + hashlib.sha256(json.dumps([repository.get("id"), issue["id"], generation],
         sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:32]
-    if (request.get("id") != request_digest or contract.get("generation") != generation or
+    if (contract.get("generation") != generation or
             contract.get("run_id") != run_id):
         raise ValueError("Current request contract identity changed")
 

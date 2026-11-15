@@ -23,6 +23,16 @@ and correction limits. Schema-4 contracts retain their original interpretation;
 a current request cannot be relabeled as legacy authority. This compatibility
 change grants no model allowance, installation, activation or merge authority.
 
+Ordinary selected Builder tasks may carry a version-2 current request in the
+same schema-5 envelope. Its closed wire decoder binds initial or retry action,
+explicit/Project selection, requirements, predecessor and trusted history to
+the request digest and generation. Version 1 stays retry-only; schema 4 cannot
+carry a current-request identity. Selection metadata is not a grant: the
+launch-inherited sealed contract, finite model allowance, original custody and
+existing correction ceiling are still required. Builder owns acknowledgement,
+request-label reconciliation and the operator task-control protocol; the Engine
+does not infer new launch or resume authority from Project Status.
+
 ## Public commands
 
 MCP exposes `orchestrator.original_delivery(issue_number, operation, payload)`.
