@@ -9,6 +9,7 @@ import stat
 from typing import TYPE_CHECKING
 
 from ..domain.original_delivery import OriginalDelivery
+from ..contracts.current_request import current_request_generation
 
 if TYPE_CHECKING:
     from ..infra.config import Config
@@ -39,32 +40,30 @@ def sealed_execution_contract(owner: OriginalDelivery, config: Config) -> None:
 
 
 def require_contract_schema(contract: dict) -> None:
-    """Schema 5 binds current-state retry identity; schema 4 keeps its original meaning."""
+    """Schema 5 binds versioned current requests; schema 4 keeps its original meaning."""
     version = contract.get("schema_version")
     issue = contract.get("issue", {})
     if type(version) is not int or version not in (4, 5) or not isinstance(issue, dict):
         raise ValueError("Original supervised contract schema is unsupported")
     if version == 4:
-        if "request" in issue or str(contract.get("generation", "")).startswith("request-v1-"):
+        if "request" in issue or str(contract.get("generation", "")).startswith("request-v"):
             raise ValueError("Legacy contract cannot carry current request identity")
         return
     request = issue.get("request")
     repository = contract.get("repository", {})
-    if (contract.get("execution", {}).get("backend") != "docker" or not isinstance(request, dict) or
-            set(request) != {"schema_version", "id", "action", "repository", "issue_id",
-                             "requirements_sha256", "predecessor_sha256", "history"} or
+    execution = contract.get("execution", {})
+    if (not isinstance(execution, dict) or execution.get("backend") != "docker" or
+            not isinstance(repository, dict) or type(repository.get("id")) is not int or repository["id"] <= 0 or
+            any(type(issue.get(key)) is not int or issue[key] <= 0 for key in ("id", "number")) or
+            not isinstance(request, dict) or
             set(issue) != {"id", "number", "requirements_sha256", "request", "satisfied_dependencies"} or
-            type(request.get("schema_version")) is not int or request["schema_version"] != 1 or
-            request.get("action") != "retry" or request.get("repository") != repository.get("name") or
-            request.get("issue_id") != issue.get("id") or
+            request.get("repository") != repository.get("name") or request.get("issue_id") != issue.get("id") or
             request.get("requirements_sha256") != issue.get("requirements_sha256")):
         raise ValueError("Current request contract subject is invalid")
-    request_digest = hashlib.sha256(json.dumps({k: v for k, v in request.items() if k != "id"},
-        sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    generation = "request-v1-" + request_digest
+    generation = current_request_generation(request)
     run_id = "run-" + hashlib.sha256(json.dumps([repository.get("id"), issue["id"], generation],
         sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:32]
-    if (request.get("id") != request_digest or contract.get("generation") != generation or
+    if (contract.get("generation") != generation or
             contract.get("run_id") != run_id):
         raise ValueError("Current request contract identity changed")
 

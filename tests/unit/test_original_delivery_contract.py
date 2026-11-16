@@ -7,10 +7,13 @@ import pytest
 
 from issue_orchestrator.domain.original_delivery import OriginalDelivery
 from issue_orchestrator.execution.original_delivery_contract import sealed_execution_contract
+from issue_orchestrator.execution.original_delivery_contract import require_contract_schema
 
 
-@pytest.mark.parametrize('schema_version,backend', [(4, 'native'), (5, 'docker')])
-def test_sealed_launch_ceiling_matches_engine_configuration(tmp_path, sample_config, monkeypatch, schema_version, backend):
+@pytest.mark.parametrize('schema_version,backend,request_version,action', [
+    (4, 'native', None, None), (5, 'docker', 1, 'retry'),
+    (5, 'docker', 2, 'start'), (5, 'docker', 2, 'retry')])
+def test_sealed_launch_ceiling_matches_engine_configuration(tmp_path, sample_config, monkeypatch, schema_version, backend, request_version, action):
     sample_config.refresh_config_fingerprint()
     owner = OriginalDelivery(repository=sample_config.repo, config_fingerprint=sample_config.config_fingerprint,
         contract_sha256='a'*64, run_id='native-run', session_name='issue-42', native_phase_name='coding-1', logical_child='code:42', started_at='start',
@@ -26,14 +29,18 @@ def test_sealed_launch_ceiling_matches_engine_configuration(tmp_path, sample_con
     contract['execution']['backend'] = backend
     owner = replace(owner, execution_backend=backend)
     if schema_version == 5:
-        request = {'schema_version': 1, 'action': 'retry', 'repository': owner.repository,
-            'issue_id': 42, 'requirements_sha256': 'c' * 64, 'predecessor_sha256': 'd' * 64,
+        request = {'schema_version': request_version, 'action': action, 'repository': owner.repository,
+            'issue_id': 42, 'requirements_sha256': 'c' * 64, 'predecessor_sha256': None if action == 'start' else 'd' * 64,
             'history': [{'id': 101, 'publisher_id': 7, 'body_sha256': 'e' * 64}]}
+        if request_version == 2:
+            request['selection'] = {'kind': 'project', 'project_id': 'PVT_selected'}
+            if action == 'start':
+                request['history'] = []
         compact = lambda value: json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
         request['id'] = hashlib.sha256(compact(request)).hexdigest()
         contract['repository']['id'] = 10
         contract['issue'] = {'id': 42, 'number': 42, 'request': request, 'requirements_sha256': 'c' * 64, 'satisfied_dependencies': []}
-        contract['generation'] = 'request-v1-' + request['id']
+        contract['generation'] = 'request-v' + str(request_version) + '-' + request['id']
         contract['run_id'] = 'run-' + hashlib.sha256(compact([10, 42, contract['generation']])).hexdigest()[:32]
     encoded = json.dumps(contract).encode()
     path = tmp_path/'contract.json'
@@ -100,3 +107,30 @@ def test_sealed_genuine_schema_hierarchy_refuses_sibling_config_mismatch(tmp_pat
     contract['supervised']['correction']['capabilities']['originating']=None
     with pytest.raises(ValueError,match='ceiling'):
         sealed_execution_contract(seal(),sample_config)
+
+
+@pytest.mark.parametrize('mutation', ['legacy-start', 'selection', 'predecessor', 'history', 'generation'])
+def test_current_request_reader_refuses_rehashed_malformed_identity(mutation):
+    compact = lambda value: json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
+    request = {'schema_version': 2, 'action': 'start', 'repository': 'local/one', 'issue_id': 42,
+        'requirements_sha256': 'c'*64, 'predecessor_sha256': None, 'history': [],
+        'selection': {'kind': 'project', 'project_id': 'PVT_fixture'}}
+    if mutation == 'legacy-start':
+        request['schema_version'] = 1
+        del request['selection']
+    elif mutation == 'selection':
+        request['selection']['project_id'] = 'arbitrary'
+    elif mutation == 'predecessor':
+        request['predecessor_sha256'] = 'd'*64
+    elif mutation == 'history':
+        request['history'] = [{'id': True, 'publisher_id': 7, 'body_sha256': 'e'*64}]
+    request['id'] = hashlib.sha256(compact(request)).hexdigest()
+    generation = 'request-v' + str(request['schema_version']) + '-' + request['id']
+    contract = {'schema_version': 5, 'repository': {'id': 10, 'name': 'local/one'},
+        'execution': {'backend': 'docker'}, 'issue': {'id': 42, 'number': 42,
+            'requirements_sha256': 'c'*64, 'request': request, 'satisfied_dependencies': []},
+        'generation': generation, 'run_id': 'run-' + hashlib.sha256(compact([10, 42, generation])).hexdigest()[:32]}
+    if mutation == 'generation':
+        contract['generation'] = generation.replace('request-v2-', 'request-v1-')
+    with pytest.raises(ValueError):
+        require_contract_schema(contract)
