@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Callable, Optional, Protocol
 
+from ..domain.claim import ClaimReleaseDisposition
 from ..ports.worktree_custody import (
     CustodyError,
     CustodyGrant,
@@ -107,11 +108,8 @@ def terminate_tech_lead_session(
     claims = getattr(deps, "claim_manager", None)
     lease_id = getattr(session, "lease_id", None)
     claim_released = attempt(
-        _void(
-            lambda: claims.release_claim(number, lease_id)
-            if (claims and lease_id)
-            else None
-        ),
+        lambda: (not (claims and lease_id)
+                 or claims.release_claim(number, lease_id) is not ClaimReleaseDisposition.RETAINED),
         "release claim",
     )
     # Only a STOPPED run hands its run back (#7348 review r3). A terminal that

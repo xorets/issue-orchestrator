@@ -70,6 +70,36 @@ class TestConfig:
         assert config.merge_queue.enqueue_after == "code-reviewed"
         assert config.merge_queue.failure_action == "rework"
 
+    def test_expected_claim_predecessor_round_trips_from_yaml(self, tmp_path):
+        path = tmp_path / ".issue-orchestrator/config/modes/default/default.yaml"
+        path.parent.mkdir(parents=True)
+        predecessor = {"issue_number": 42, "ref_sha": "a" * 40}
+        path.write_text(yaml.safe_dump({"filtering": {"issue": 42}, "claims": {
+            "enabled": True, "expected_predecessor": predecessor,
+        }}), encoding="utf-8")
+
+        config = Config.load(path)
+
+        assert config.claims.expected_predecessor.issue_number == 42
+        assert config.to_dict()["claims"]["expected_predecessor"] == predecessor
+        assert config.to_dict()["filtering"]["issue"] == 42
+        assert "claims" not in Config().to_dict()
+
+    @pytest.mark.parametrize("claims", [
+        {"enabled": True, "expected_predecessor": None},
+        {"enabled": True, "expected_predecessor": {"issue_number": 42}},
+        {"enabled": True, "expected_predecessor": {"issue_number": True, "ref_sha": "a" * 40}},
+        {"enabled": True, "expected_predecessor": {"issue_number": 42, "ref_sha": "HEAD"}},
+        {"enabled": False, "expected_predecessor": {"issue_number": 42, "ref_sha": "a" * 40}},
+    ])
+    def test_expected_claim_predecessor_refuses_invalid_yaml(self, tmp_path, claims):
+        path = tmp_path / ".issue-orchestrator/config/modes/default/default.yaml"
+        path.parent.mkdir(parents=True)
+        path.write_text(yaml.safe_dump({"claims": claims}), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="claims.expected_predecessor"):
+            Config.load(path)
+
     def test_merge_queue_parses_from_yaml(self, tmp_path):
         """A merge_queue section is parsed onto Config."""
         path = (

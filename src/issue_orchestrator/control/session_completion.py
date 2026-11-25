@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
+from ..domain.claim import ClaimReleaseDisposition
 from ..domain.completion_processing import CompletionPublication
 from ..domain.completion_intake import CompletionIntakeReceipt
 from ..domain.issue_key import GitHubIssueKey, IssueKey
@@ -784,7 +785,9 @@ def _release_completed_claim(session: Session, claims: "ClaimManager", *, events
             logger.info("[COMPLETION] Retained original handoff claim for issue #%d", session.issue.number)
             return
         assert session.lease_id is not None
-        claims.release_claim(session.issue.number, session.lease_id)
+        if claims.release_claim(session.issue.number, session.lease_id) is ClaimReleaseDisposition.RETAINED:
+            logger.info("[COMPLETION] Preserved guarded claim custody for issue #%d", session.issue.number)
+            return
         current = claims.get_current_claim(session.issue.number)
         if current is not None and current.lease_id == session.lease_id:
             raise RuntimeError("Remote completed claim release was not acknowledged")

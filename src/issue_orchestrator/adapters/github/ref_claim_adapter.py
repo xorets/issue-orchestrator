@@ -18,10 +18,11 @@ from typing import TYPE_CHECKING, Protocol as TypingProtocol
 from ...domain.claim import (
     Claim,
     ClaimFetchError,
+    ClaimReleaseDisposition,
     ClaimResult,
     ClaimState,
 )
-from ...domain.lease_config import LeaseConfig
+from ...domain.lease_config import ExpectedClaimPredecessor, LeaseConfig
 from ...domain.session_run import SessionRunAssets
 from ...domain.original_delivery import DockerCustody, OriginalDelivery, ReservationRecovery, bind_correction_run, retire_reservation, transition
 from ...domain.run_ledger import (
@@ -210,7 +211,8 @@ class GitHubRefClaimAdapter(ClaimManager):
     An active claim is represented by the current commit at
     ``refs/issue-orchestrator/claims/issue-N``. Updates are non-force ref
     moves to a commit whose parent is the previously-read ref tip, so GitHub's
-    fast-forward check acts as the compare-and-swap guard.
+    fast-forward check protects ordinary updates. An explicitly selected
+    expired predecessor instead requires a Git exact-old compare at acquisition.
 
     Ordinary release deletes the owned claim ref after a fresh read confirms
     the releasing lease. Registered original custody instead retains this cell
@@ -228,6 +230,7 @@ class GitHubRefClaimAdapter(ClaimManager):
         label_adapter: "LabelSetProtocol | None" = None,
         io_claimed_label: str = "io:claimed",
         ref_prefix: str = CLAIM_REF_PREFIX,
+        *, expected_predecessor: ExpectedClaimPredecessor | None = None,
     ) -> None:
         self._client = client
         self._claimant_id = claimant_id
@@ -236,6 +239,7 @@ class GitHubRefClaimAdapter(ClaimManager):
         self._labels = label_adapter
         self._io_claimed_label = io_claimed_label
         self._store = GitRefCasStore(client, ref_prefix=ref_prefix)
+        self._expected_predecessor = expected_predecessor
 
     def attempt_claim(self, issue_number: int) -> ClaimResult:
         """Atomically attempt to acquire the issue claim ref."""
@@ -250,6 +254,8 @@ class GitHubRefClaimAdapter(ClaimManager):
         )
 
         try:
+            if self._expected_predecessor is not None:
+                return self._attempt_expected_claim(claim, self._expected_predecessor)
             for _ in range(MAX_CAS_ATTEMPTS):
                 snapshot = self._store.read(_issue_ref_key(issue_number))
                 current_claim = self._active_claim(snapshot, issue_number)
@@ -270,29 +276,7 @@ class GitHubRefClaimAdapter(ClaimManager):
                 if not acquired:
                     continue
 
-                try:
-                    self._add_claim_label(issue_number)
-                except Exception as exc:
-                    self._release_owned_claim(issue_number, lease_id, remove_label=False)
-                    return ClaimResult.failed(
-                        f"Acquired claim but failed to label issue #{issue_number}: {exc}",
-                        host_rate_limit=host_rate_limit_of(exc),
-                    )
-
-                self._emit_event("CLAIM_ATTEMPTED", {
-                    "issue_number": issue_number,
-                    "lease_id": lease_id,
-                    "claimant": self._claimant_id,
-                    "priority": priority,
-                    "storage": "git_ref",
-                })
-                logger.info(
-                    "Acquired GitHub ref claim for issue #%d: lease_id=%s, claimant=%s",
-                    issue_number,
-                    lease_id,
-                    self._claimant_id,
-                )
-                return ClaimResult.claimed(lease_id)
+                return self._complete_claim(claim)
 
             return ClaimResult.failed(
                 f"GitHub claim ref changed during acquisition for issue #{issue_number}"
@@ -300,6 +284,46 @@ class GitHubRefClaimAdapter(ClaimManager):
         except Exception as exc:
             logger.error("Failed to acquire claim for issue #%d: %s", issue_number, exc)
             return ClaimResult.failed(str(exc), host_rate_limit=host_rate_limit_of(exc))
+
+    def _attempt_expected_claim(self, claim: Claim, expected: ExpectedClaimPredecessor) -> ClaimResult:
+        issue_number = claim.issue_number
+        if issue_number != expected.issue_number:
+            return ClaimResult.failed("Issue differs from the selected expected claim predecessor")
+        snapshot = self._read_snapshot(issue_number)
+        if snapshot is None or snapshot.commit_sha != expected.ref_sha:
+            return ClaimResult.failed("Expected claim predecessor no longer holds the ref")
+        previous = _parse_owned_claim(snapshot.record, issue_number=issue_number)
+        if previous is None or previous.original is not None or not previous.is_expired(datetime.now()):
+            return ClaimResult.failed("Expected claim predecessor must be expired and unregistered")
+        with gh_audit.context(reason=gh_audit.AuditReason.GH_WRITE,
+                              issue_key=str(issue_number), scope=gh_audit.AuditScope.UNKNOWN):
+            acquired = self._store.append_exact_claim(snapshot, _format_claim_commit_message(claim))
+        if not acquired:
+            return ClaimResult.failed("Expected claim predecessor changed during Git verification")
+        return self._complete_claim(claim)
+
+    def _complete_claim(self, claim: Claim) -> ClaimResult:
+        issue_number, lease_id = claim.issue_number, claim.lease_id
+        try:
+            self._add_claim_label(issue_number)
+        except Exception as exc:
+            self._release_owned_claim(issue_number, lease_id, remove_label=False)
+            return ClaimResult.failed(
+                f"Acquired claim but failed to label issue #{issue_number}: {exc}",
+                host_rate_limit=host_rate_limit_of(exc),
+            )
+        self._emit_event("CLAIM_ATTEMPTED", {
+            "issue_number": issue_number,
+            "lease_id": lease_id,
+            "claimant": self._claimant_id,
+            "priority": claim.priority,
+            "storage": "git_ref",
+        })
+        logger.info(
+            "Acquired GitHub ref claim for issue #%d: lease_id=%s, claimant=%s",
+            issue_number, lease_id, self._claimant_id,
+        )
+        return ClaimResult.claimed(lease_id)
 
     def run_convergence(self, issue_number: int, lease_id: str) -> bool:
         """Confirm ownership.
@@ -393,9 +417,9 @@ class GitHubRefClaimAdapter(ClaimManager):
         logger.info("Renewed GitHub ref claim for issue #%d, lease_id=%s", issue_number, lease_id)
         return True
 
-    def release_claim(self, issue_number: int, lease_id: str) -> None:
-        """Release the claim by deleting the owned issue claim ref."""
-        self._release_owned_claim(issue_number, lease_id, remove_label=True)
+    def release_claim(self, issue_number: int, lease_id: str) -> ClaimReleaseDisposition | None:
+        """Release an ordinary owned ref or explicitly retain guarded custody."""
+        return self._release_owned_claim(issue_number, lease_id, remove_label=True)
 
     def check_winner(self, issue_number: int, lease_id: str) -> bool:
         """Check whether the current active ref claim is our lease."""
@@ -600,7 +624,12 @@ class GitHubRefClaimAdapter(ClaimManager):
         lease_id: str,
         *,
         remove_label: bool,
-    ) -> None:
+    ) -> ClaimReleaseDisposition | None:
+        if self._expected_predecessor is not None:
+            # An unregistered successor preserves the selected history and
+            # expires if launch failed. A non-conditional delete could remove
+            # another claimant's record. Registered release has its own fence.
+            return ClaimReleaseDisposition.RETAINED
         try:
             snapshot = self._read_snapshot(issue_number)
             held = (

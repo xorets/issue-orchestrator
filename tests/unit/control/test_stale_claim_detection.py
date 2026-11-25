@@ -266,6 +266,21 @@ class MockEventSink:
 class TestDetectStaleClaimsAPIResilience:
     """Tests for _detect_stale_claims handling of ClaimFetchError."""
 
+    def test_selected_predecessor_skips_only_its_advisory_label_cleanup(self):
+        class ExpiredClaims:
+            def get_current_claim(self, issue_number):
+                assert issue_number == 43
+                return None
+
+        issues = [make_issue(number, issue_labels=["io:claimed"]) for number in (42, 43)]
+
+        result = _detect_stale_claims(
+            issues, [], ExpiredClaims(), MockEventSink(), EventContext(),
+            expected_predecessor_issue=42,
+        )
+
+        assert [issue.number for issue in result] == [43]
+
     def test_skips_issue_on_api_error(self):
         """Issues that fail API fetch are skipped, not flagged as stale."""
 

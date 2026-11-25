@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from ..domain.budgeted_validation import BudgetedValidationSuite
+from ..domain.lease_config import ExpectedClaimPredecessor
 
 # Tech-lead sub-models live in their own module for cohesion and line budget
 # (mirroring the ``config_sections_tech_lead`` parsing split). Re-exported here
@@ -432,6 +433,7 @@ class ClaimsConfig:
     convergence_timeout_seconds: float = 5.0  # Max time to wait for convergence
     convergence_poll_min_ms: int = 250  # Min poll interval (randomized)
     convergence_poll_max_ms: int = 500  # Max poll interval (randomized)
+    expected_predecessor: ExpectedClaimPredecessor | None = None
 
 
 @dataclass

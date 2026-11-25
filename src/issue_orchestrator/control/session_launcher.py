@@ -566,7 +566,7 @@ class SessionLauncher:
         """Release claim if one was acquired. Used for cleanup on failure."""
         if self._claim_manager and claim.lease_id:
             self._claim_manager.release_claim(issue_number, claim.lease_id)
-            logger.info(issue_log(issue_number, "Released claim: lease_id=%s"), claim.lease_id)
+            logger.info(issue_log(issue_number, "Requested claim release: lease_id=%s"), claim.lease_id)
 
     def _cleanup_pre_active_launch_worktree(
         self,

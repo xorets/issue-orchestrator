@@ -86,6 +86,12 @@ class Claim:
         return (self.expires_at - now).total_seconds()
 
 
+class ClaimReleaseDisposition(Enum):
+    """Explicit exception to the ordinary claim release and readback contract."""
+
+    RETAINED = "retained"
+
+
 @dataclass(frozen=True)
 class ClaimResult:
     """Result of attempting to claim an issue.

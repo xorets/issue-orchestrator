@@ -29,6 +29,8 @@ def _detect_stale_claims(
     events: EventSink,
     event_context: EventContext,
     io_claimed_label: str = "io:claimed",
+    *,
+    expected_predecessor_issue: int | None = None,
 ) -> list["Issue"]:
     """Detect issues with stale claims (io:claimed label but no valid claim).
 
@@ -44,6 +46,7 @@ def _detect_stale_claims(
         events: Event sink for emitting events
         event_context: Event context for enriching events
         io_claimed_label: Resolved io:claimed label string
+        expected_predecessor_issue: Selected issue whose guarded takeover owns the old claim
 
     Returns:
         List of issues with stale claims
@@ -57,6 +60,8 @@ def _detect_stale_claims(
     stale_claim_issues: list["Issue"] = []
 
     for issue in issues:
+        if issue.number == expected_predecessor_issue:
+            continue
         # Only check issues with io:claimed label
         if io_claimed_label not in issue.labels:
             continue

@@ -82,6 +82,17 @@ class RecordTruncatedError(ValueError):
     """
 
 
+def _bounded_record(record: str) -> bytes:
+    encoded = record.encode("utf-8")
+    if len(encoded) > MAX_RECORD_BYTES:
+        raise RecordTooLargeError(
+            f"record is {len(encoded)} bytes, above the {MAX_RECORD_BYTES}-byte "
+            "limit this storage accepts; refusing to write a record that "
+            "could not be read back"
+        )
+    return encoded
+
+
 @dataclass(frozen=True)
 class GitRefSnapshot:
     """One exact ref value and the record it carries."""
@@ -161,13 +172,7 @@ class GitRefCasStore:
 
     def _record_tree_sha(self, record: str) -> str:
         """Store the record as a blob and return the tree that carries it."""
-        size = len(record.encode("utf-8"))
-        if size > MAX_RECORD_BYTES:
-            raise RecordTooLargeError(
-                f"record is {size} bytes, above the {MAX_RECORD_BYTES}-byte "
-                "limit this storage accepts; refusing to write a record that "
-                "could not be read back"
-            )
+        _bounded_record(record)
         blob = self._client.create_git_blob(content=record)
         tree = self._client.create_git_tree(
             tree=[
@@ -218,6 +223,13 @@ class GitRefCasStore:
             if is_ref_conflict(exc):
                 return False
             raise
+
+    def append_exact_claim(self, snapshot: GitRefSnapshot, record: str) -> bool:
+        """Append to the selected claim only if the exact OID still holds."""
+        return self._client.append_exact_claim(
+            ref=snapshot.ref, predecessor=snapshot.commit_sha,
+            record=_bounded_record(record), message=commit_summary(snapshot.ref),
+        )
 
     def delete(self, snapshot: GitRefSnapshot) -> bool:
         """Delete the ref, refusing when it no longer holds ``snapshot``.

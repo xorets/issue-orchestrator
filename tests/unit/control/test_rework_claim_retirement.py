@@ -12,12 +12,18 @@ Each test uses the REAL launcher, SQLite claim store and sweep.
 
 from __future__ import annotations
 
+from dataclasses import replace
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
+from issue_orchestrator.adapters.github.claim_parser import format_claim_comment
+from issue_orchestrator.adapters.github.ref_claim_adapter import CLAIM_REF_PREFIX, GitHubRefClaimAdapter
 from issue_orchestrator.control.in_flight_work import InFlightWorkLedger
+from issue_orchestrator.domain.claim import Claim
+from issue_orchestrator.domain.lease_config import ExpectedClaimPredecessor
 from issue_orchestrator.domain.validated_work_commands import (
     ValidatedWorkDispositionBatch,
 )
@@ -28,6 +34,7 @@ from tests.unit.test_provider_readiness_boundary import (
     _recover_with_no_terminals,
     _route,
 )
+from tests.unit.adapters.github.fake_git_data import FakeGitHubRefClient
 
 SUBJECT = 7  # the rework ``_pending_state("rework")`` queues
 
@@ -105,6 +112,34 @@ def test_the_issue_runtime_boundary_settles_a_stopped_rework_claim(tmp_path):
     assert harness.claims.list_unresolved_claims() == ()
     assert _next_tick_sweep(state, harness) == 0
     assert state.pending_reworks == []
+
+
+def test_protected_termination_settles_local_work_and_retains_guarded_live_claim(tmp_path):
+    harness, state, session = _live_rework(tmp_path)
+    core, sessions = _core(state, harness)
+    session.lease_id = "guarded-successor"
+    client = FakeGitHubRefClient()
+    ref = f"{CLAIM_REF_PREFIX}/issue-{SUBJECT}"
+    now = datetime.now().replace(microsecond=0)
+    active = Claim(lease_id=session.lease_id, claimant="fixture", issue_number=SUBJECT, started_at=now,
+                   expires_at=now + timedelta(minutes=10), priority=1)
+    held_sha = client.seed_record(ref, format_claim_comment(active))
+    events = MagicMock()
+    claims = GitHubRefClaimAdapter(client, "fixture", events=events,
+                                   expected_predecessor=ExpectedClaimPredecessor(SUBJECT, "a" * 40))
+    core = replace(core, claim_manager=claims)
+
+    termination = core.release_preserved(
+        SUBJECT, "operator-terminated", ValidatedWorkDispositionBatch.no_work(SUBJECT, "fixture")
+    )
+
+    assert session.terminal_id in termination.stopped_session_ids
+    assert session.terminal_id in termination.cleared_active_session_ids
+    assert any(call.args[0].name == session.terminal_id for call in sessions.stop.call_args_list)
+    assert state.active_sessions == [] and harness.claims.list_unresolved_claims() == ()
+    assert claims.get_current_claim(SUBJECT) == active
+    assert claims.original_claim(SUBJECT) == (active, held_sha) and not client.deleted_refs
+    events.publish.assert_not_called()
 
 
 def test_a_stop_that_commits_then_raises_still_settles_the_claim(tmp_path):

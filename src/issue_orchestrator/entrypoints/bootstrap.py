@@ -42,7 +42,7 @@ from .bootstrap_environment import (
     ISSUE_ORCHESTRATOR_PYTHON_ENV as ISSUE_ORCHESTRATOR_PYTHON_ENV,
     export_orchestrator_python as export_orchestrator_python,
 )
-from .bootstrap_claims import ClaimComponents, assemble_claim_components, lease_config_from
+from .bootstrap_claims import ClaimComponents, assemble_claim_components, selected_claim_lease
 from .bootstrap_pair_registry import build_pair_registry_with_worktree_hook
 from .bootstrap_pending_work import (
     build_pending_work_wiring,
@@ -274,16 +274,15 @@ def _create_claim_components(
     io_claimed_label: str = "io:claimed",
 ) -> ClaimComponents:
     """Choose both coordination stores from one deployment setting."""
-    lease = lease_config_from(config) if github and config.claims.enabled else LeaseConfig()
+    lease = selected_claim_lease(config, github_available=bool(github))
     if github and config.claims.enabled:
         claimant_id = config.claims.claimant_id or f"orchestrator-{os.getpid()}"
         manager = GitHubRefClaimAdapter(
             client=github.http_client, claimant_id=claimant_id, config=lease,
             events=events, label_adapter=github, io_claimed_label=io_claimed_label,
+            expected_predecessor=config.claims.expected_predecessor,
         )
-        ledger = GitHubRefRunLedgerAdapter(
-            client=github.http_client, claimant_id=claimant_id, config=lease,
-        )
+        ledger = GitHubRefRunLedgerAdapter(github.http_client, claimant_id, lease)
         logger.info("Claims enabled: claimant_id=%s, lease=%ds", claimant_id, lease.lease_seconds)
     else:
         manager = NullClaimManager()
