@@ -4,7 +4,22 @@ This module defines the configuration parameters for distributed issue
 coordination between multiple orchestrator instances.
 """
 
+import re
 from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class ExpectedClaimPredecessor:
+    """Exact expired, unregistered claim selected for one issue takeover."""
+
+    issue_number: int
+    ref_sha: str
+
+    def __post_init__(self) -> None:
+        if type(self.issue_number) is not int or self.issue_number < 1:
+            raise ValueError("claims.expected_predecessor.issue_number must be a positive integer")
+        if not re.fullmatch(r"[0-9a-f]{40}", self.ref_sha):
+            raise ValueError("claims.expected_predecessor.ref_sha must be an exact Git OID")
 
 
 @dataclass(frozen=True)

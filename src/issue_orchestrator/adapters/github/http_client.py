@@ -24,6 +24,7 @@ from .auth import (
     GitHubAuth,
     build_github_auth,
     build_github_token_provider,
+    is_canonical_github_api,
 )
 from .errors import (
     GitHubAuthError,
@@ -32,6 +33,7 @@ from .errors import (
     GitHubScanIncompleteError,
     GitHubTransportError,
 )
+from .exact_claim_git import append_claim_record
 from .rate_limit import github_http_failure, graphql_rate_limit
 from .tokens import (
     KEYRING_SERVICE,
@@ -1716,6 +1718,17 @@ class GitHubHttpClient:
         if not isinstance(payload, dict):
             raise GitHubHttpError("GitHub update ref payload was not an object")
         return payload
+
+    def append_exact_claim(self, *, ref: str, predecessor: str, record: bytes, message: str) -> bool:
+        if self._auth.repo != self._config.repo:
+            raise GitHubAuthError("Exact claim repository differs from its authentication scope")
+        if (not is_canonical_github_api(self._config.base_url)
+                or not is_canonical_github_api(str(self._client.base_url))):
+            raise GitHubAuthError("Exact claim REST endpoint must be the canonical GitHub.com HTTPS API")
+        return append_claim_record(
+            self._auth.exact_claim_git_env(), ref=ref, predecessor=predecessor,
+            record=record, message=message, timeout_seconds=self._config.timeout_seconds,
+        )
 
     def delete_git_ref(self, ref: str) -> None:
         encoded = quote(_api_ref_path(ref), safe="/")

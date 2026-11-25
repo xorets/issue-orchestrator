@@ -11,6 +11,7 @@ small function that returns its sub-dict (empty when everything is at default);
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -34,6 +35,8 @@ def observability_section(config: "Config") -> dict:
 
 def filtering_section(config: "Config") -> dict:
     section: dict = {}
+    if config.claims.expected_predecessor is not None:
+        section["issue"] = config.filtering.issue
     if config.filtering.label:
         section["label"] = config.filtering.label
     if config.filtering.milestones:
@@ -50,6 +53,15 @@ def filtering_section(config: "Config") -> dict:
         section["fetch_limit"] = config.filtering.fetch_limit
     if config.filtering.max_to_start != 0:
         section["max_to_start"] = config.filtering.max_to_start
+    return section
+
+
+def claims_section(config: "Config", *, include_defaults: bool = False) -> dict:
+    if not include_defaults and config.claims.expected_predecessor is None:
+        return {}
+    section = asdict(config.claims)
+    if config.claims.expected_predecessor is None:
+        section.pop("expected_predecessor")
     return section
 
 

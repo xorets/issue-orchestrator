@@ -20,6 +20,7 @@ from typing import Optional
 from unittest.mock import MagicMock
 
 from issue_orchestrator.domain.host_rate_limit import HostRateLimitWindow
+from issue_orchestrator.domain.claim import ClaimReleaseDisposition
 from issue_orchestrator.control.tech_lead_run_activity import (
     in_memory_run_activity,
 )
@@ -343,6 +344,20 @@ def test_the_run_is_released_even_when_another_cleanup_effect_FAILS():
     assert "scratch-worktree removal" in termination.failures()
     assert termination.run_released is True
     assert host.shared.live_keys() == ()
+
+
+def test_retained_claim_is_not_reported_as_released():
+    host = _Host(flavor=TechLeadSessionFlavor.HEALTH_REVIEW)
+    session = FakeSession(ANCHOR, TechLeadSessionFlavor.HEALTH_REVIEW)
+    session.lease_id = "guarded-lease"
+    host.deps.claim_manager = MagicMock()
+    host.deps.claim_manager.release_claim.return_value = ClaimReleaseDisposition.RETAINED
+    host.state.active_sessions.append(session)
+
+    outcome = host.terminate_tech_lead_session(session)
+
+    host.deps.claim_manager.release_claim.assert_called_once_with(ANCHOR, "guarded-lease")
+    assert outcome.claim_released is False
 
 
 def test_a_custody_refusal_is_reported_as_protected_not_leaked():

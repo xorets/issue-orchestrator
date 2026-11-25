@@ -42,6 +42,7 @@ from .config_models import (
     ValidationConfig,
 )
 from .config_identity import ConfigLaunchIdentity, RuntimeConfigReferenceOwner
+from .config_serialization import claims_section
 from .config_paths import (
     CONFIG_DIR as CONFIG_DIR,
     DEFAULT_CONFIG_NAME as DEFAULT_CONFIG_NAME,
@@ -736,15 +737,7 @@ class Config(ConfigLaunchIdentity, RuntimeConfigReferenceOwner, TechLeadActivati
                 "retention_weekly": self.sqlite_backup.retention_weekly,
                 "enforce_on_startup": self.sqlite_backup.enforce_on_startup,
             },
-            "claims": {
-                "enabled": self.claims.enabled,
-                "claimant_id": self.claims.claimant_id,
-                "lease_seconds": self.claims.lease_seconds,
-                "renew_before_expiry_seconds": self.claims.renew_before_expiry_seconds,
-                "convergence_timeout_seconds": self.claims.convergence_timeout_seconds,
-                "convergence_poll_min_ms": self.claims.convergence_poll_min_ms,
-                "convergence_poll_max_ms": self.claims.convergence_poll_max_ms,
-            },
+            "claims": claims_section(self, include_defaults=True),
             "hooks": {
                     "ai_gate": {
                         "interval_days": self.hooks.ai_gate.interval_days,
@@ -961,6 +954,8 @@ class Config(ConfigLaunchIdentity, RuntimeConfigReferenceOwner, TechLeadActivati
         # Filtering section
         if filtering_dict := filtering_section(self):
             result["filtering"] = filtering_dict
+        if claims_dict := claims_section(self):
+            result["claims"] = claims_dict
 
         # Scheduling section
         if self.scheduling.default_priority_tier != 1:

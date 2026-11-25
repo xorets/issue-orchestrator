@@ -33,6 +33,10 @@ _APP_JWT_LIFETIME_SECONDS = 540
 _APP_TOKEN_REFRESH_SKEW_SECONDS = 300
 
 
+def is_canonical_github_api(endpoint: str) -> bool:
+    return endpoint in ("https://api.github.com", "https://api.github.com/")
+
+
 def _git_basic_auth_header(token: str) -> str:
     credential = f"x-access-token:{token}".encode("utf-8")
     encoded = b64encode(credential).decode("ascii")
@@ -182,6 +186,18 @@ class GitHubAuth:
     def git_env_overrides(self, *, remote: str) -> dict[str, str] | None:
         if not self.enable_git_push_auth:
             return None
+        return self._repository_git_env(remote)
+
+    def exact_claim_git_env(self) -> dict[str, str]:
+        """Use the existing repo token for the separately scoped claim transport."""
+        if not is_canonical_github_api(self.api_url):
+            raise GitHubAuthError("Exact claim Git transport requires the canonical GitHub.com HTTPS API")
+        if (not self.repo or not re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+", self.repo)
+                or self.repo.split("/")[1] in (".", "..")):
+            raise GitHubAuthError("Exact claim Git transport requires a configured GitHub.com repository")
+        return self._repository_git_env("origin")
+
+    def _repository_git_env(self, remote: str) -> dict[str, str]:
         if not self.repo:
             raise GitHubAuthError("Authenticated git push requires a configured repo.")
         if not re.fullmatch(r"[A-Za-z0-9._/-]+", remote):

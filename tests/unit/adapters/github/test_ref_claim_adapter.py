@@ -2,20 +2,26 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta
+from unittest.mock import Mock
 
 import httpx
 import pytest
 
 from issue_orchestrator.adapters.github.claim_parser import format_claim_comment
+from issue_orchestrator.adapters.github.exact_claim_git import ExactClaimGitError
 from issue_orchestrator.adapters.github.ref_claim_adapter import (
     CLAIM_REF_PREFIX,
     GitHubRefClaimAdapter,
 )
 from issue_orchestrator.adapters.github.rate_limit import github_http_failure
-from issue_orchestrator.domain.claim import Claim, ClaimFetchError, ClaimState
+from issue_orchestrator.adapters.github.ref_store import RECORD_PATH
+from issue_orchestrator.control.session_completion import _release_completed_claim
+from issue_orchestrator.domain.claim import Claim, ClaimFetchError, ClaimReleaseDisposition, ClaimState
 from issue_orchestrator.ports.repository_host import host_rate_limit_of
-from issue_orchestrator.domain.lease_config import LeaseConfig
+from issue_orchestrator.domain.lease_config import ExpectedClaimPredecessor, LeaseConfig
+from issue_orchestrator.domain.original_delivery import OriginalDelivery
 
 from .fake_git_data import FakeGitHubRefClient
 
@@ -189,6 +195,147 @@ def test_expired_claim_is_not_current() -> None:
     seed_claim_ref(client, 42, expired_claim)
 
     assert adapter.get_current_claim(42) is None
+
+
+class ExactClaimClient(FakeGitHubRefClient):
+    ref = f"{CLAIM_REF_PREFIX}/issue-42"
+    predecessor = "a" * 40
+
+    def __init__(self, claim: Claim) -> None:
+        super().__init__()
+        original = self.seed_record(self.ref, format_claim_comment(claim))
+        self.commits[self.predecessor] = {**self.commits[original], "sha": self.predecessor}
+        self.refs[self.ref] = self.predecessor
+        self.attempts = 0
+        self.race = False
+        self.acknowledge = True
+
+    def append_exact_claim(self, *, ref: str, predecessor: str, record: bytes, message: str) -> bool:
+        self.attempts += 1
+        if self.race:
+            self.refs[ref] = "racing-owner"
+        if self.refs.get(ref) != predecessor:
+            return False
+        blob = self.create_git_blob(content=record.decode())
+        tree = self.create_git_tree(tree=[{"path": RECORD_PATH, "sha": blob["sha"]}])
+        child = self.create_git_commit(message=message, tree_sha=tree["sha"], parents=[predecessor])
+        self.refs[ref] = child["sha"]
+        if not self.acknowledge:
+            raise ExactClaimGitError("push", "missing-acknowledgement", elapsed_ms=100, exit_status=0)
+        return True
+
+    def adapter(self, labels: FakeLabels) -> GitHubRefClaimAdapter:
+        return GitHubRefClaimAdapter(self, "new-controller", label_adapter=labels,
+                                    expected_predecessor=ExpectedClaimPredecessor(42, self.predecessor))
+
+
+@pytest.fixture
+def expired_predecessor() -> Claim:
+    return Claim(lease_id="old", claimant="old-controller", issue_number=42,
+                 started_at=datetime(2024, 1, 1), expires_at=datetime(2024, 1, 2), priority=1)
+
+
+def test_selected_expired_claim_is_acquired_with_exact_compare(expired_predecessor: Claim) -> None:
+    client = ExactClaimClient(expired_predecessor)
+    labels = FakeLabels()
+    adapter = client.adapter(labels)
+
+    result = adapter.attempt_claim(42)
+
+    assert result.success
+    assert client.attempts == 1
+    child = client.get_git_commit(client.refs[client.ref])
+    assert child["parents"] == [{"sha": client.predecessor}]
+    assert adapter.get_current_claim(42).lease_id == result.lease_id
+    assert labels.added == [(42, "io:claimed")]
+
+
+@pytest.mark.parametrize("case", ["wrong-issue", "absent", "moved", "active", "released-owner", "race"])
+def test_selected_claim_refuses_changed_or_ineligible_record(expired_predecessor: Claim, case: str) -> None:
+    if case == "active":
+        expired_predecessor = replace(expired_predecessor, expires_at=datetime(2100, 1, 1))
+    if case == "released-owner":
+        owner = OriginalDelivery(repository="local/one", config_fingerprint="config", contract_sha256="a" * 64,
+            run_id="run", session_name="issue-42", native_phase_name="coding-1", logical_child="code:42", started_at="start",
+            branch="delivery", worktree="/tmp/delivery", run_dir="/tmp/delivery/run", agent="agent:pilot",
+            engine_host="host", engine_pid=12, engine_birth="34", max_cycles=0, cancelled=True, released=True)
+        expired_predecessor = replace(expired_predecessor, original=owner)
+    client = ExactClaimClient(expired_predecessor)
+    labels = FakeLabels()
+    if case == "absent":
+        del client.refs[client.ref]
+    if case == "moved":
+        client.seed_record(client.ref, format_claim_comment(expired_predecessor))
+    client.race = case == "race"
+    created_before = client.created_refs.copy()
+    updated_before = client.updated_refs.copy()
+
+    result = client.adapter(labels).attempt_claim(43 if case == "wrong-issue" else 42)
+
+    assert not result.success
+    assert client.attempts == int(client.race)
+    assert not labels.added
+    assert client.created_refs == created_before and client.updated_refs == updated_before
+    assert not client.deleted_refs
+
+
+def test_unacknowledged_update_never_admits_or_deletes_successor(expired_predecessor: Claim, caplog) -> None:
+    client = ExactClaimClient(expired_predecessor)
+    client.acknowledge = False
+    labels = FakeLabels()
+    adapter = client.adapter(labels)
+
+    result = adapter.attempt_claim(42)
+    assert not result.success
+    assert result.error == (
+        "Exact claim Git push failed (ExactClaimGitError, missing-acknowledgement, "
+        "elapsed_ms=100, exit_status=0, ref update unconfirmed)"
+    )
+    assert result.error in caplog.text
+    held, successor = adapter.original_claim(42)
+    adapter.release_claim(42, held.lease_id)
+    assert not adapter.attempt_claim(42).success
+
+    assert client.refs[client.ref] == successor != client.predecessor
+    assert client.attempts == 1
+    assert not client.deleted_refs and not labels.added and not labels.removed
+
+
+def test_expired_guarded_successor_does_not_report_release(expired_predecessor: Claim) -> None:
+    client = ExactClaimClient(expired_predecessor)
+    labels = FakeLabels()
+    adapter = client.adapter(labels)
+    attempt = adapter.attempt_claim(42)
+    assert attempt.success and attempt.lease_id is not None
+    held, _ = adapter.original_claim(42)
+    expired = replace(held, expires_at=datetime.now().replace(microsecond=0) - timedelta(seconds=1))
+    retained_sha = client.seed_record(client.ref, format_claim_comment(expired))
+    assert adapter.get_current_claim(42) is None
+    session = Mock(lease_id=attempt.lease_id)
+    session.issue.number = 42
+    events = Mock()
+
+    _release_completed_claim(session, adapter, events=events, status="completed")
+
+    events.publish.assert_not_called()
+    assert adapter.release_claim(42, attempt.lease_id) is ClaimReleaseDisposition.RETAINED
+    assert adapter.original_claim(42) == (expired, retained_sha)
+    assert not client.deleted_refs and not labels.removed
+
+
+def test_label_failure_keeps_guarded_claim_parent_and_does_not_admit(expired_predecessor: Claim) -> None:
+    class UnavailableLabels(FakeLabels):
+        def add_label(self, issue_number: int, label: str) -> None:
+            raise RuntimeError("label unavailable")
+
+    client = ExactClaimClient(expired_predecessor)
+    adapter = client.adapter(UnavailableLabels())
+
+    assert not adapter.attempt_claim(42).success
+
+    child = client.get_git_commit(client.refs[client.ref])
+    assert child["parents"] == [{"sha": client.predecessor}]
+    assert not client.deleted_refs
 
 
 class RateLimitedRefClient(FakeGitHubRefClient):

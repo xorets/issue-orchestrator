@@ -43,6 +43,16 @@ def lease_config_from(config: "Config") -> LeaseConfig:
     )
 
 
+def selected_claim_lease(config: "Config", *, github_available: bool) -> LeaseConfig:
+    """Validate the protected selector before choosing the coordination backend."""
+    expected = config.claims.expected_predecessor
+    if expected is not None and (not github_available or config.claims.enabled is not True
+                                 or type(config.filtering.issue) is not int
+                                 or config.filtering.issue != expected.issue_number):
+        raise ValueError("Expected claim predecessor requires GitHub claims and the exact issue filter")
+    return lease_config_from(config) if github_available and config.claims.enabled else LeaseConfig()
+
+
 def assemble_claim_components(
     claim_manager: ClaimManager,
     run_ledger_store: TechLeadRunLedgerStore,
@@ -70,4 +80,4 @@ def assemble_claim_components(
     )
 
 
-__all__ = ["ClaimComponents", "assemble_claim_components", "lease_config_from"]
+__all__ = ["ClaimComponents", "assemble_claim_components", "lease_config_from", "selected_claim_lease"]

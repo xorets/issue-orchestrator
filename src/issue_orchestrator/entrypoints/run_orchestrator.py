@@ -21,6 +21,7 @@ import logging
 import os
 import signal
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -188,12 +189,7 @@ def _load_config_for_instance(
     config.worktree_base = original_base / instance_id
     logger.info("Worktree base set to instance-specific path: %s", config.worktree_base)
     if config.claims.enabled and not config.claims.claimant_id:
-        config.claims = config.claims.__class__(
-            enabled=config.claims.enabled,
-            claimant_id=instance_id,
-            lease_seconds=config.claims.lease_seconds,
-            renew_before_expiry_seconds=config.claims.renew_before_expiry_seconds,
-        )
+        config.claims = replace(config.claims, claimant_id=instance_id)
         logger.info("Claimant ID set to instance ID: %s", instance_id)
     return config
 

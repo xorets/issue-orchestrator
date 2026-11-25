@@ -15,6 +15,8 @@ from datetime import timedelta
 from types import SimpleNamespace
 from typing import Optional
 
+import pytest
+
 from issue_orchestrator.control.actions import (
     CreateTechLeadIssueAction,
     QueueTechLeadAction,
@@ -289,3 +291,19 @@ def test_claims_enabled_backs_run_ownership_with_the_shared_ref_store():
 
     store = ownership._store  # noqa: SLF001 - composition assertion
     assert isinstance(store, GitHubRefRunLedgerAdapter)
+
+
+@pytest.mark.parametrize("filter_issue,github_configured", [(None, True), (43, True), (42, False)])
+def test_expected_predecessor_cannot_fall_back_to_unguarded_claims(filter_issue, github_configured):
+    from issue_orchestrator.domain.lease_config import ExpectedClaimPredecessor
+    from issue_orchestrator.entrypoints.bootstrap import _create_claim_components
+
+    config = Config()
+    config.claims.enabled = True
+    config.claims.expected_predecessor = ExpectedClaimPredecessor(42, "a" * 40)
+    config.filtering.issue = filter_issue
+    github = SimpleNamespace(http_client=SimpleNamespace()) if github_configured else None
+    events = SimpleNamespace(publish=lambda _event: None)
+
+    with pytest.raises(ValueError, match="exact issue filter"):
+        _create_claim_components(config, github, events)  # type: ignore[arg-type]

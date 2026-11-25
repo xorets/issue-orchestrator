@@ -18,7 +18,7 @@ Exception contract:
 
 from typing import Protocol
 
-from ..domain.claim import Claim, ClaimResult
+from ..domain.claim import Claim, ClaimReleaseDisposition, ClaimResult
 
 
 class ClaimManager(Protocol):
@@ -94,11 +94,12 @@ class ClaimManager(Protocol):
         """
         ...
 
-    def release_claim(self, issue_number: int, lease_id: str) -> None:
+    def release_claim(self, issue_number: int, lease_id: str) -> ClaimReleaseDisposition | None:
         """Release a claim on an issue.
 
-        Removes the claim label and releases the backing claim record.
-        Called when a session completes or is terminated.
+        Called when a session completes or is terminated. ``RETAINED`` means
+        the release path intentionally left backing custody in place. The
+        ordinary path returns ``None`` and keeps its existing readback contract.
 
         Args:
             issue_number: The GitHub issue number.

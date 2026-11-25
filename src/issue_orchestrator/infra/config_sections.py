@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..domain.models import AgentConfig, CommentHeadings
+from ..domain.lease_config import ExpectedClaimPredecessor
 from .budgeted_validation_config import parse_budgeted_validation
 from .config_models import (
     AiGateConfig,
@@ -172,6 +173,16 @@ def parse_timeline_config(data: dict) -> TimelineConfig:
 
 def parse_claims_config(data: dict) -> ClaimsConfig:
     """Parse claims section from YAML data."""
+    expected = None
+    if "expected_predecessor" in data:
+        raw = data["expected_predecessor"]
+        if not isinstance(raw, dict) or set(raw) != {"issue_number", "ref_sha"}:
+            raise ValueError("claims.expected_predecessor must contain issue_number and ref_sha")
+        if data.get("enabled") is not True:
+            raise ValueError("claims.expected_predecessor requires claims.enabled=true")
+        if not isinstance(raw["ref_sha"], str):
+            raise ValueError("claims.expected_predecessor.ref_sha must be an exact Git OID")
+        expected = ExpectedClaimPredecessor(issue_number=raw["issue_number"], ref_sha=raw["ref_sha"])
     return ClaimsConfig(
         enabled=data.get("enabled", False),
         claimant_id=data.get("claimant_id"),
@@ -180,6 +191,7 @@ def parse_claims_config(data: dict) -> ClaimsConfig:
         convergence_timeout_seconds=data.get("convergence_timeout_seconds", 5.0),
         convergence_poll_min_ms=data.get("convergence_poll_min_ms", 250),
         convergence_poll_max_ms=data.get("convergence_poll_max_ms", 500),
+        expected_predecessor=expected,
     )
 
 

@@ -242,6 +242,21 @@ filtering:
   exclude_labels: ["test-data"]
 ```
 
+### Take over one verified predecessor claim
+
+A trusted coordinator can set `claims.expected_predecessor` after verifying
+that the previous execution has stopped. Set `claims.enabled: true` and make
+`filtering.issue` equal to `expected_predecessor.issue_number`. The
+`expected_predecessor.ref_sha` must identify the expired, unregistered GitHub
+claim for that issue. The Engine appends one direct child only if the remote
+ref still holds the exact SHA at acquisition. A changed claim, missing claim,
+or unconfirmed write prevents the launch.
+
+This option requires Linux process-lifetime file descriptors and the
+canonical GitHub.com HTTPS API (`https://api.github.com`). The Git transport
+and its helpers are stopped when the Engine exits. A guarded unregistered
+claim record is retained through lease expiry for fenced follow-up.
+
 ### Milestone Sort Strategy
 
 ```yaml

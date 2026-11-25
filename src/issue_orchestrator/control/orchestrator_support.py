@@ -700,7 +700,12 @@ def run_planning_cycle(
 
     # Detect stale issues and claims
     stale_issues = _detect_stale_in_progress(observer, state, events, event_context)
-    stale_claim_issues = _detect_stale_claims(state.cached_queue_issues, state.active_sessions, claim_manager, events, event_context, io_claimed_label=io_claimed_label)
+    expected_predecessor = config.claims.expected_predecessor
+    stale_claim_issues = _detect_stale_claims(
+        state.cached_queue_issues, state.active_sessions, claim_manager, events, event_context,
+        io_claimed_label=io_claimed_label,
+        expected_predecessor_issue=expected_predecessor.issue_number if expected_predecessor else None,
+    )
 
     # Sample provider launch eligibility BEFORE planning: it probes a CLI and
     # writes circuit state, so it is the tick's job, not the pure planner's

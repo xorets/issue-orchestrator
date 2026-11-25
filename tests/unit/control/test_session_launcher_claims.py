@@ -3,6 +3,7 @@
 from issue_orchestrator.domain.registered_completion import CompletionProcessingPolicy
 from tests.run_allocation_helpers import make_session_launcher
 
+import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch, PropertyMock
@@ -10,6 +11,7 @@ from unittest.mock import MagicMock, patch, PropertyMock
 import pytest
 
 from issue_orchestrator.control.completion_handler import CleanupDecision
+from issue_orchestrator.control.session_launch_types import ClaimAcquisitionResult
 from issue_orchestrator.domain.claim import ClaimResult, ClaimState
 from issue_orchestrator.domain.coder_prompt import PreparedCoderPromptAddendum
 from issue_orchestrator.domain.lease_config import LeaseConfig
@@ -80,6 +82,21 @@ class MockIssue:
         self.body = "Test issue body"
         self.key = MagicMock()
         self.key.stable_id.return_value = f"issue-{number}"
+
+
+def test_failed_launch_requests_release_without_claiming_it_completed(caplog):
+    from issue_orchestrator.control.session_launcher import SessionLauncher
+
+    claims = MockClaimManager()
+    launcher = MagicMock()
+    launcher._claim_manager = claims
+    claim = ClaimAcquisitionResult(success=True, lease_id="test-lease-123")
+
+    with caplog.at_level(logging.INFO):
+        SessionLauncher._release_claim_if_held(launcher, 42, claim)  # noqa: SLF001
+
+    assert claims.release_claim_calls == [(42, "test-lease-123")]
+    assert "Requested claim release: lease_id=test-lease-123" in caplog.text
 
 
 class TestSessionLauncherClaimAcquisition:
